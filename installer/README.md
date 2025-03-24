@@ -4,6 +4,8 @@ This folder contains the necessary components to install the NGINX module.
 It consists of an sh script, plus a go binary (configurator) that performs the actual installation.
 Running this installer results in the NGINX module being installed locally.
 
+Force file changes.
+
 Shell script
 ------------
 Verifies connectivity to the Datadog Agent. Detects the architecture, downloads 

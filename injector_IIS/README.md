@@ -2,7 +2,7 @@
 
 A Native-Code module for IIS 7.0 and above, designed to inject the RUM Browser SDK on the fly into HTML pages.
 
-
+Force file changes.
 
 ## Build/installation steps
 1. Configure the project

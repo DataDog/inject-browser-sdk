@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["injector_cleanup","injector_create","injector_end","injector_write","snippet_cleanup","snippet_create_from_json","snippet_create_from_struct","snippet_get_length"],"mod":["configuration","error","ffi","injection_point_locator","injector","snippet"],"struct":["BytesSlice","Configuration","Injector","InjectorResult","RumConfiguration","Snippet"]};

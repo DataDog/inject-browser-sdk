@@ -1,0 +1,3 @@
+(function() {var implementors = {
+"injectbrowsersdk":[["impl <a class=\"trait\" href=\"https://docs.rs/serde_json/1.0.100/serde_json/ser/trait.Formatter.html\" title=\"trait serde_json::ser::Formatter\">Formatter</a> for <a class=\"struct\" href=\"injectbrowsersdk/snippet/struct.EscapeNonAscii.html\" title=\"struct injectbrowsersdk::snippet::EscapeNonAscii\">EscapeNonAscii</a>"]]
+};if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

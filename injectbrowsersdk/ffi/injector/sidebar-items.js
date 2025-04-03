@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["injector_cleanup","injector_create","injector_end","injector_write"],"struct":["BytesSlice","Injector","InjectorResult"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cstr_to_json_str","snippet_cleanup","snippet_create_from_json","snippet_create_from_struct","snippet_get_length"],"struct":["Configuration","RumConfiguration","Snippet","SnippetInternal"]};

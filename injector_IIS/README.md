@@ -1,6 +1,6 @@
 RUM SDK Injector for Windows IIS
 ================================
-A Native-Code module for IIS, designed to inject the RUM Browser SDK on the fly into HTML pages.
+A Native-Code module for IIS 7.0 and above, designed to inject the RUM Browser SDK on the fly into HTML pages.
 
 ## How it works?
 [IIS module](https://learn.microsoft.com/en-us/iis/get-started/introduction-to-iis/iis-modules-overview) that
@@ -71,11 +71,3 @@ through `New-Datadog-RUMConfiguration`. It enables automatic injection of the Da
 | **SessionReplaySampleRate** | Int32 | No | Percentage of tracked sessions to capture (between 0-100). |
 | **RemoteConfigurationId** | String | No | Remote configuration ID. Defined in the Datadog UI. |
 | **Service** | String | No | Service name. |
-
-# Release
-
-1. Create and push a git tag with the prefix `iis-`.
-2. Run Gitlab's `manual_injector_IIS_build`, `manual_injector_IIS_e2e_test` and `manual_injector_IIS_release` jobs.
-3. Draft a new Github release from the tag created above.
-4. Run `promote_injector_IIS_release_candidate` Gitlab job.
-5. Finally, publish the Github release.

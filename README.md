@@ -1,40 +1,20 @@
 # Datadog RUM Auto-Instrumentation
 
-A collection of libraries and modules to automatically inject the [Datadog RUM Browser SDK](https://docs.datadoghq.com/real_user_monitoring/browser/) into HTML pages served by various web servers and proxies.
-
-## Overview
-
 This project enables automatic injection of the Datadog RUM Browser SDK into HTML responses without requiring changes to your application code. It works by intercepting HTML responses and inserting the SDK snippet before the closing `</head>` tag.
 
-Supported web servers and proxies:
-
-- **NGINX**
-- **Apache HTTP Server**
-- **Microsoft IIS**
-
-## Key Features
+## Design Considerations
 
 - **Zero Code Changes**: No need to modify your application code
-- **Performance Optimized**: Minimal impact on response times
-- **Flexible Configuration**: Configure per site or application
-- **Telemetry**: Basic telemetry to help diagnose issues
+- **Low Performance Impact**: Minimal impact on response times
+- **Flexible Configuration**
 
 ## Architecture
 
 The project consists of several components:
 
-1. **Core Injection Library**: Written in Rust, handling the parsing and injection of the SDK
+1. **[Core Injection Library](lib/)**: Written in Rust, handling the HTML parsing and determining appropriate injection location
 2. **Web Server Module**: Native module for IIS (Other proxies/web servers may live in different repos)
 3. **Installer Scripts**: For easy deployment and configuration
-
-All modules use a shared core library (`inject-browser-sdk`) to ensure consistent behavior across web servers.
-
-## Development
-
-For detailed build instructions for specific modules, see their respective README files:
-
-- [NGINX/httpd installer](installer/README.md)
-- [IIS Module](injector_IIS/README.md)
 
 ## Contributing
 

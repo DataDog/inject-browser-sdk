@@ -2,7 +2,7 @@ RUM SDK Injector for Windows IIS
 ================================
 A Native-Code module for IIS, designed to inject the RUM Browser SDK on the fly into HTML pages.
 
-# Injector
+## How it works?
 [IIS module](https://learn.microsoft.com/en-us/iis/get-started/introduction-to-iis/iis-modules-overview) that
 intercepts responses and injects the Datadog RUM SDK in the response body for responses that meet all conditions:
 * Response code is `2xx` `4xx` or `5xx`
@@ -46,7 +46,7 @@ cmake --build build -j
 3. Open `%windir%\system32\inetsrv\config\applicationhost.config` and remove the module from  module the `<globalModules>` & `<modules>` sections\
 4. Start the IIS server
 
-# Installer
+## Installer
 Native Windows installer with [WiX Toolset v3.11](https://wixtoolset.org/releases/v3.11/stable).
 
 Build from Windows with [WiX Toolset Build Tools](https://marketplace.visualstudio.com/items?itemName=WixToolset.WiXToolset). Build with

@@ -1,4 +1,4 @@
-# Datadog RUM Browser SDK Auto-Injection
+# Datadog RUM Auto-Instrumentation
 
 A collection of libraries and modules to automatically inject the [Datadog RUM Browser SDK](https://docs.datadoghq.com/real_user_monitoring/browser/) into HTML pages served by various web servers and proxies.
 

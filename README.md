@@ -2,6 +2,8 @@
 
 This project enables automatic injection of the Datadog RUM Browser SDK into HTML responses without requiring changes to your application code. It works by intercepting HTML responses and inserting the SDK snippet before the closing `</head>` tag.
 
+[Browser Monitoring Auto-Instrumentation (Server-Side)](https://docs.datadoghq.com/real_user_monitoring/browser/setup/server/) public documentation.
+
 ## Design Considerations
 
 - **Zero Code Changes**: No need to modify your application code

@@ -13,7 +13,8 @@ namespace datadog::rum::telemetry {
 namespace {
 
 const std::string integration_name = "integration_name:iis";
-const std::string integration_version = std::string("integration_version:") + SHORT_VERSION_STRING;
+const std::string integration_version =
+    std::string("integration_version:") + SHORT_VERSION_STRING;
 const std::string injector_version = "injector_version:0.1.0";
 
 } // namespace
@@ -34,6 +35,15 @@ std::shared_ptr<CounterMetric> invalid_content_type(new CounterMetric{
      integration_version,
      injector_version,
      {"reason:content-type"}},
+    true});
+
+std::shared_ptr<CounterMetric> missing_content_type(new CounterMetric{
+    "injection.skipped",
+    "rum",
+    {integration_name,
+     integration_version,
+     injector_version,
+     {"reason:missing-content-type"}},
     true});
 
 std::shared_ptr<CounterMetric> no_content(new CounterMetric{

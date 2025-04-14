@@ -16,6 +16,7 @@ namespace datadog::rum::telemetry {
 namespace injection_skip {
 extern std::shared_ptr<datadog::telemetry::CounterMetric> already_injected;
 extern std::shared_ptr<datadog::telemetry::CounterMetric> invalid_content_type;
+extern std::shared_ptr<datadog::telemetry::CounterMetric> missing_content_type;
 extern std::shared_ptr<datadog::telemetry::CounterMetric> no_content;
 extern std::shared_ptr<datadog::telemetry::CounterMetric> compressed_html;
 } // namespace injection_skip

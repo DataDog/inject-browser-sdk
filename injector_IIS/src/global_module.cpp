@@ -186,6 +186,7 @@ GlobalModule::GlobalModule(IHttpServer *server, DWORD server_version,
     std::vector<std::shared_ptr<datadog::telemetry::Metric>> rum_metrics{
         telemetry::injection_skip::already_injected,
         telemetry::injection_skip::invalid_content_type,
+        telemetry::injection_skip::missing_content_type,
         telemetry::injection_skip::no_content,
         telemetry::injection_skip::compressed_html,
         telemetry::injection_succeed,

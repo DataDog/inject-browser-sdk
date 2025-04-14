@@ -110,6 +110,8 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
           *content_type));
       return false;
     }
+  } else {
+    telemetry::injection_skip::missing_content_type->inc();
   }
 
   USHORT statusCode = 0;

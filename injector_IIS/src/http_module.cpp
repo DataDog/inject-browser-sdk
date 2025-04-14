@@ -8,18 +8,19 @@
 #include "module_context.h"
 #include "telemetry.h"
 #include <cassert>
+#include <optional>
 
 namespace datadog::rum {
 namespace {
 
 constexpr std::string_view k_injection_header = "x-datadog-rum-injected";
 
-std::string_view get_header(IHttpResponse &http_response,
-                            std::string_view header) {
+std::optional<std::string_view> get_header(IHttpResponse &http_response,
+                                           std::string_view header) {
   USHORT length;
   PCSTR data = http_response.GetHeader(header.data(), &length);
   if (data == nullptr) {
-    return "";
+    return std::nullopt;
   }
 
   return std::string_view(data, length);
@@ -101,12 +102,14 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
   // may or may not be be followed by semicolon-delimited parameters
   //   ie Text/HTML;Charset="utf-8"
   // see https://www.rfc-editor.org/rfc/rfc9110#name-content-type
-
-  if (_strnicmp(get_header(pHttpResponse, "Content-Type").data(), "text/html",
-                9) != 0) {
-    telemetry::injection_skip::invalid_content_type->inc();
-    logger.debug("Skipping RUM injection: content type is not text/html ");
-    return false;
+  if (auto content_type = get_header(pHttpResponse, "Content-Type")) {
+    if (_strnicmp(content_type->data(), "text/html", 9) != 0) {
+      telemetry::injection_skip::invalid_content_type->inc();
+      logger.debug(std::format(
+          "Skip injection: Content-Type: {}\" does not match text/html",
+          *content_type));
+      return false;
+    }
   }
 
   USHORT statusCode = 0;
@@ -121,11 +124,13 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
 
   // We must also validate that another injector in this environment hasn't
   // previously attempted injection into this response
-  if (!get_header(pHttpResponse, k_injection_header).empty()) {
-    telemetry::injection_skip::already_injected->inc();
-    logger.debug("Skipping RUM injection: injection has "
-                 "already been attempted on this response");
-    return false;
+  if (auto content_encoding = get_header(pHttpResponse, k_injection_header)) {
+    if (!content_encoding->empty()) {
+      telemetry::injection_skip::already_injected->inc();
+      logger.debug("Skipping RUM injection: injection has "
+                   "already been attempted on this response");
+      return false;
+    }
   }
 
   return true;

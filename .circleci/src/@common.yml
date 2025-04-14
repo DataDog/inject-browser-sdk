@@ -106,7 +106,7 @@ jobs:
           destination: injector_IIS_installer.msi
       - run:
           name: Run End-to-End Tests
-          command: docker run -e WEBSERVER-FLAVOR=iis -v ${pwd}:C:\inject-browser-sdk datadog/docker-library:rum-auto-instrumentation-windows-iis-latest powershell -Command "C:\inject-browser-sdk\injector_IIS\scripts\SetupIntegrationTestEnvironment.ps1; pytest C:\inject-browser-sdk\tests\integration_tests\scenario -v"
+          command: docker run -e WEBSERVER-FLAVOR=iis -v ${pwd}:C:\inject-browser-sdk datadog/docker-library:rum-auto-instrumentation-windows-iis-latest powershell -Command "C:\inject-browser-sdk\injector_IIS\scripts\SetupIntegrationTestEnvironment.ps1; pip install Flask; pytest C:\inject-browser-sdk\tests\integration_tests\scenario -v"
   build_installer_arm64:
     steps:
     - checkout

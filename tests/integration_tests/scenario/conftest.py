@@ -6,7 +6,7 @@
 import pytest
 
 import threading
-from flask import Flask
+from flask import Flask, abort
 
 
 class FlaskHTTPServer:
@@ -15,8 +15,19 @@ class FlaskHTTPServer:
         self._host = host
         self._port = port
         self._app = app
+        self._routes = {}
+
+    def _catch_all(self, path: str):
+        view_func = self._routes.get(f"/{path}")
+        if view_func:
+            return view_func()
+        else:
+            abort(404, description=f"No view found for path: /{path}")
 
     def internal_run(self) -> None:
+        self._app.add_url_rule(
+            "/<path:path>", view_func=self._catch_all, methods=["GET"]
+        )
         self._app.run(host=self._host, port=self._port)
 
     def run(self) -> None:
@@ -28,7 +39,7 @@ class FlaskHTTPServer:
         pass
 
     def add_route(self, path: str, handler) -> None:
-        self._app.add_url_rule(path, view_func=handler)
+        self._routes[path] = handler
 
 
 def make_temporary_http_server(host: str, port: int) -> FlaskHTTPServer:

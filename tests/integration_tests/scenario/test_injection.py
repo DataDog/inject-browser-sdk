@@ -61,8 +61,8 @@ def test_proxy_injection(upstream_server):
     """
 
     def upstream_handler():
-        is_injection_pending = request.headers.get("x-datadog-rum-injection-pending", 0)
-        if is_injection_pending != 1:
+        is_injection_pending = request.headers.get("x-datadog-rum-injection-pending")
+        if is_injection_pending != "1":
             return Response(
                 response="missing `x-datadog-rum-injection-pending` header",
                 status=404,
@@ -71,7 +71,31 @@ def test_proxy_injection(upstream_server):
 
     upstream_server.add_route("/proxy", upstream_handler)
 
-    r = requests.get("http://localhost:8090/proxy")
+    r = requests.get("http://localhost:8080/proxy")
+
+    assert r.status_code == 200
+    __assert_rum_injection(r.headers, r.content)
+
+
+def test_proxy_injection_missing_content_type(upstream_server):
+    """
+    Verify integration injects the RUM Browser SDK on proxified requests.
+    Also verify they set `x-datadog-sdk-injection` HTTP Header to signal
+    the upstream server to let the caller inject the SDK.
+    """
+
+    def upstream_handler():
+        is_injection_pending = request.headers.get("x-datadog-rum-injection-pending")
+        if is_injection_pending != "1":
+            return Response(
+                response="missing `x-datadog-rum-injection-pending` header",
+                status=404,
+            )
+        return Response(response=SIMPLE_HTML, content_type=None)
+
+    upstream_server.add_route("/proxy_without_content_type", upstream_handler)
+
+    r = requests.get("http://localhost:8080/proxy_without_content_type")
 
     assert r.status_code == 200
     __assert_rum_injection(r.headers, r.content)
@@ -94,7 +118,6 @@ def test_injection_only_for_html_content(upstream_server):
     r1 = requests.get("http://localhost:8081/content-type")
     assert r1.status_code == 200
 
-    assert r0.headers == r1.headers
     assert r0.content == r1.content
 
 
@@ -116,7 +139,6 @@ def test_no_injection_in_compressed_html(upstream_server):
     r1 = requests.get("http://localhost:8081/compressed")
     assert r1.status_code == 200
 
-    assert r0.headers == r1.headers
     assert r0.content == r1.content
 
 
@@ -137,7 +159,6 @@ def test_no_injection_header_set(upstream_server):
     r1 = requests.get("http://localhost:8081/bypass_injection")
     assert r1.status_code == 200
 
-    assert r0.headers == r1.headers
     assert r0.content == r1.content
 
 

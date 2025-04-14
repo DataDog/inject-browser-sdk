@@ -8,7 +8,7 @@ import os
 import pytest
 import requests
 import gzip
-from aiohttp import web
+from flask import Response, request
 
 SIMPLE_HTML = """<html>
         <head>
@@ -32,7 +32,10 @@ def __assert_rum_injection(headers, body):
     assert "datadog-rum.js" in body.decode()
 
 
-@pytest.mark.xfail(os.environ.get("WEBSERVER-FLAVOR", "") == "iis", reason="IIS serves static file directly")
+@pytest.mark.xfail(
+    os.environ.get("WEBSERVER-FLAVOR", "") == "iis",
+    reason="IIS serves static file directly",
+)
 @pytest.mark.parametrize("path", ["/index.html", "/large.html"])
 def test_injection_static_html_file(path):
     """
@@ -44,7 +47,6 @@ def test_injection_static_html_file(path):
     have access to the full HTML page during the injection.
     This assess by chunk logic is working as intended.
     """
-
     url = "http://localhost:8080" + path
     r = requests.get(url)
     assert r.status_code == 200
@@ -58,19 +60,20 @@ def test_proxy_injection(upstream_server):
     the upstream server to let the caller inject the SDK.
     """
 
-    async def upstream_handler(request):
-        request.app["ctx"]["last_request"] = request
-        return web.Response(body=SIMPLE_HTML, content_type="text/html")
+    def upstream_handler():
+        is_injection_pending = request.headers.get("x-datadog-rum-injection-pending", 0)
+        if is_injection_pending != 1:
+            return Response(
+                response="missing `x-datadog-rum-injection-pending` header",
+                status=404,
+            )
+        return Response(response=SIMPLE_HTML, content_type="text/html")
 
     upstream_server.add_route("/proxy", upstream_handler)
 
-    r = requests.get("http://localhost:8080/proxy")
+    r = requests.get("http://localhost:8090/proxy")
 
     assert r.status_code == 200
-    assert (
-        upstream_server.get_last_request().headers["x-datadog-rum-injection-pending"]
-        == "1"
-    )
     __assert_rum_injection(r.headers, r.content)
 
 
@@ -80,8 +83,8 @@ def test_injection_only_for_html_content(upstream_server):
     HTML content-type.
     """
 
-    async def upstream_handler(_):
-        return web.Response(body=SIMPLE_HTML, content_type="text/plain")
+    def upstream_handler():
+        return Response(response=SIMPLE_HTML, content_type="text/plain")
 
     upstream_server.add_route("/content-type", upstream_handler)
 
@@ -100,10 +103,10 @@ def test_no_injection_in_compressed_html(upstream_server):
     Assess the browser SDK is not injected when the HTML content is compressed
     """
 
-    async def upstream_handler(_):
+    def upstream_handler():
         headers = {"Content-Encoding": "gzip"}
         compressed_body = gzip.compress(SIMPLE_HTML.encode())
-        return web.Response(body=compressed_body, headers=headers)
+        return Response(response=compressed_body, headers=headers)
 
     upstream_server.add_route("/compressed", upstream_handler)
 
@@ -121,9 +124,10 @@ def test_no_injection_header_set(upstream_server):
     """
     Asssess an upstream server can bypass injection
     """
-    async def upstream_handler(_):
+
+    def upstream_handler():
         headers = {"x-datadog-rum-injected": "1"}
-        return web.Response(body=SIMPLE_HTML, headers=headers)
+        return Response(response=SIMPLE_HTML, headers=headers)
 
     upstream_server.add_route("/bypass_injection", upstream_handler)
 

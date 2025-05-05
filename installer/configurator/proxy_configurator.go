@@ -18,4 +18,6 @@ type ProxyConfigurator interface {
 	ValidateConfig() error
 	// Returns a message to display to the user after the installation, usually indicating to restart the server
 	GetFinalConfigMessage() string
+	// Uninstalls the module and reverts any config modifications
+	Uninstall(dryRun bool) error
 }

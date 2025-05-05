@@ -12,11 +12,9 @@ events {
 http {
     datadog_agent_url http://localhost:8126;
 
-    # Disable APM Tracing. Remove the next line to enable APM Tracing.
-    datadog_tracing off;
+    datadog_tracing off; # Disable APM Tracing. Remove this line to enable APM Tracing.
 
-    # Enable RUM Injection
-    datadog_rum on;
+    datadog_rum on; # Enable RUM Injection
 
     datadog_rum_config "v6" {
         "applicationId" "ffffffff-ffff-ffff-ffff-ffffffffffff";

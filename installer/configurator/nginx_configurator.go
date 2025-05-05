@@ -17,6 +17,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const NginxModulesPath = "/opt/datadog-nginx"
+
 type NginxConfigurator struct {
 	Version     string
 	ModulesPath string
@@ -82,7 +84,7 @@ func (n *NginxConfigurator) ModifyConfig(remoteConfigID, appID, site, clientToke
 
 	newConfigPath := configPath + ".datadog"
 	log.Info(fmt.Sprintf("Modifying NGINX configuration file based on '%s', into intermediate config file '%s'", configPath, newConfigPath))
-	newContent, err := transformConfig(n, content, remoteConfigID, agentUri, appID, clientToken, site, sessionSampleRate, sessionReplaySampleRate, newConfigPath)
+	newContent, err := addDatadogToConfig(n, content, remoteConfigID, agentUri, appID, clientToken, site, sessionSampleRate, sessionReplaySampleRate, newConfigPath)
 
 	if err != nil {
 		return NewInstallerError(NginxError, fmt.Errorf("failed modifying config config: %v", err))
@@ -233,11 +235,78 @@ func (n *NginxConfigurator) GetFinalConfigMessage() string {
 	return "Please reload NGINX or restart the service for the changes to take effect"
 }
 
+// Modifies the configuration file to exclude previously added datadog_ directives
+// Removes the installation directory
+func (n *NginxConfigurator) Uninstall(dryRun bool) error {
+	log.Debug("Uninstalling NGINX module")
+
+	configPath, err := n.getDefaultConfigLocation()
+	if err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("failed to get config location: %v", err))
+	}
+
+	log.Debug("Found config file at: ", configPath)
+
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("failed to read config file: %v", err))
+	}
+
+	log.Debug("Successfully read config file")
+
+	newConfigPath := configPath + ".datadog"
+	log.Info(fmt.Sprintf("Modifying NGINX configuration file based on '%s', into intermediate config file '%s'", configPath, newConfigPath))
+	newContent, err := removeDatadogFromConfig(n, content, newConfigPath)
+
+	if err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("failed modifying config: %v", err))
+	}
+
+	if err := os.WriteFile(newConfigPath, newContent, 0644); err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("failed to create intermediate config file file: %v", err))
+	}
+
+	log.Debug("Created intermediate config file: ", newConfigPath)
+
+	if err := n.validateConfig(newConfigPath); err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("intermediate config '%s' is invalid: %v", newConfigPath, err))
+	}
+
+	log.Debug("Intermediate config is valid: ", newConfigPath)
+
+	if dryRun {
+		log.Info("Dry run enabled, exitting before modifying the installation. The config to be used in a non dry run is: ", newConfigPath)
+		return nil
+	}
+
+	backupPath := configPath + ".uninstall.backup"
+	if err := os.Rename(configPath, backupPath); err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("failed to move file '%s' to '%s': %v", configPath, backupPath, err))
+	}
+
+	log.Info(fmt.Sprintf("Moved config '%s' into backup file '%s'", configPath, backupPath))
+
+	if err := os.Rename(newConfigPath, configPath); err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("failed to move '%s' into final config file '%s': %v", newConfigPath, configPath, err))
+	}
+
+	log.Debug("Created final config file: ", configPath)
+	log.Info("Removing nginx modules directory: " + NginxModulesPath)
+
+	if err := os.RemoveAll(NginxModulesPath); err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("failed to remove nginx modules directory '%s': %v", NginxModulesPath, err))
+	}
+
+	log.Info("Successfully removed nginx modules directory: ", n.ModulesPath)
+
+	return nil
+}
+
 // Insert load_module directive at the beginning of the file
 // Find http and bracket { on possibly multiple lines
 // Insert the datadog configuration after the http block
 // Return the modified content
-func transformConfig(n *NginxConfigurator, content []byte, remoteConfigID, agentUri string, appID string, clientToken string, site string, sessionSampleRate int, sessionReplaySampleRate int, destFile string) ([]byte, error) {
+func addDatadogToConfig(n *NginxConfigurator, content []byte, remoteConfigID, agentUri string, appID string, clientToken string, site string, sessionSampleRate int, sessionReplaySampleRate int, destFile string) ([]byte, error) {
 	var newContent strings.Builder
 	newContent.WriteString(fmt.Sprintf("load_module %s/ngx_http_datadog_module.so;\n", n.ModulesPath))
 
@@ -255,11 +324,9 @@ func transformConfig(n *NginxConfigurator, content []byte, remoteConfigID, agent
 
 	datadogConfig := fmt.Sprintf(`    datadog_agent_url %s;
 
-    # Disable APM Tracing. Remove the next line to enable APM Tracing.
-    datadog_tracing off;
+    datadog_tracing off; # Disable APM Tracing. Remove this line to enable APM Tracing.
 
-    # Enable RUM Injection
-    datadog_rum on;
+    datadog_rum on; # Enable RUM Injection
 
     datadog_rum_config "v6" {
         "applicationId" "%s";
@@ -281,6 +348,84 @@ func transformConfig(n *NginxConfigurator, content []byte, remoteConfigID, agent
 	newContent.WriteString(datadogConfig)
 
 	newContent.Write(content[httpBlockStart[1]:])
+
+	return []byte(newContent.String()), nil
+}
+
+func removeDatadogFromConfig(n *NginxConfigurator, content []byte, destFile string) ([]byte, error) {
+
+	contentStr := string(content)
+
+	moduleRegex := regexp.MustCompile(`(?m)^[\s]*load_module[\s]+.*/ngx_http_datadog_module\.so;[\s]*\n?`)
+	moduleMatches := moduleRegex.FindStringIndex(contentStr)
+	if moduleMatches == nil {
+		return nil, NewInstallerError(NginxError, fmt.Errorf("datadog load_module directive not found in nginx config"))
+	}
+
+	httpRegex := regexp.MustCompile(`(?m)^[\s]*http[\s]*\{`)
+	httpBlockStart := httpRegex.FindStringIndex(contentStr)
+	if httpBlockStart == nil {
+		return nil, NewInstallerError(NginxError, fmt.Errorf("could not find http block in nginx config"))
+	}
+
+	httpContentStart := httpBlockStart[1]
+	httpContent := contentStr[httpContentStart:]
+
+	// Count braces to find the end of the http block
+	braceCount := 1
+	httpContentEnd := 0
+	for i, r := range httpContent {
+		if r == '{' {
+			braceCount++
+		} else if r == '}' {
+			braceCount--
+			if braceCount == 0 {
+				httpContentEnd = i
+				break
+			}
+		}
+	}
+
+	if httpContentEnd == 0 {
+		return nil, NewInstallerError(NginxError, fmt.Errorf("malformed http block in nginx config"))
+	}
+
+	httpBlockContent := httpContent[:httpContentEnd]
+
+	datadogAgentUrlRegex := regexp.MustCompile(`(?m)^[\s]*datadog_agent_url[\s]+[^;]+;`)
+	datadogTracingRegex := regexp.MustCompile(`(?m)^[\s]*datadog_tracing[\s]+[^;]+;.*$`)
+	datadogRumRegex := regexp.MustCompile(`(?m)^[\s]*datadog_rum[\s]+[^;]+;.*$`)
+	datadogRumConfigRegex := regexp.MustCompile(`(?m)^[\s]*datadog_rum_config[\s]+.*[\s]*\{[^}]*\}\n`)
+
+	if !datadogAgentUrlRegex.MatchString(httpBlockContent) {
+		return nil, NewInstallerError(NginxError, fmt.Errorf("datadog_agent_url directive not found in http block in the same format it was added"))
+	}
+	if !datadogTracingRegex.MatchString(httpBlockContent) {
+		return nil, NewInstallerError(NginxError, fmt.Errorf("datadog_tracing directive not found in http block in the same format it was added"))
+	}
+	if !datadogRumRegex.MatchString(httpBlockContent) {
+		return nil, NewInstallerError(NginxError, fmt.Errorf("datadog_rum directive not found in http block in the same format it was added"))
+	}
+	if !datadogRumConfigRegex.MatchString(httpBlockContent) {
+		return nil, NewInstallerError(NginxError, fmt.Errorf("datadog_rum_config directive not found in http block in the same format it was added"))
+	}
+
+	var newContent strings.Builder
+
+	newContent.WriteString(contentStr[:moduleMatches[0]])
+
+	newContent.WriteString(contentStr[moduleMatches[1]:httpBlockStart[0]])
+
+	newContent.WriteString(contentStr[httpBlockStart[0]:httpBlockStart[1]])
+
+	httpContentWithoutDatadog := datadogAgentUrlRegex.ReplaceAllString(httpBlockContent, "")
+	httpContentWithoutDatadog = datadogTracingRegex.ReplaceAllString(httpContentWithoutDatadog, "")
+	httpContentWithoutDatadog = datadogRumRegex.ReplaceAllString(httpContentWithoutDatadog, "")
+	httpContentWithoutDatadog = datadogRumConfigRegex.ReplaceAllString(httpContentWithoutDatadog, "")
+
+	newContent.WriteString(httpContentWithoutDatadog)
+
+	newContent.WriteString(httpContent[httpContentEnd:])
 
 	return []byte(newContent.String()), nil
 }
@@ -335,14 +480,12 @@ func (n *NginxConfigurator) getDefaultConfigLocation() (string, error) {
 }
 
 func (n *NginxConfigurator) createModulesDir() error {
-	modulesPath := "/opt/datadog-nginx"
-
-	if err := os.MkdirAll(modulesPath, 0644); err == nil {
-		n.ModulesPath = modulesPath
-		log.Debug("Created nginx modules directory: ", modulesPath)
+	if err := os.MkdirAll(NginxModulesPath, 0644); err == nil {
+		n.ModulesPath = NginxModulesPath
+		log.Debug("Created nginx modules directory: ", NginxModulesPath)
 
 		return nil
 	}
 
-	return NewInstallerError(NginxError, fmt.Errorf("could not create nginx modules directory: %s", modulesPath))
+	return NewInstallerError(NginxError, fmt.Errorf("could not create nginx modules directory: %s", NginxModulesPath))
 }

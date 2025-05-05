@@ -202,6 +202,10 @@ func (n *HttpdConfigurator) GetFinalConfigMessage() string {
 	return "Please gracefully restart httpd (or hard restart) for the changes to take effect"
 }
 
+func (n *HttpdConfigurator) Uninstall(dryRun bool) error {
+	return nil
+}
+
 func (h *HttpdConfigurator) getDefaultConfigLocation() (string, error) {
 	log.Debugf("Getting config location running '%s -V'", h.Command)
 

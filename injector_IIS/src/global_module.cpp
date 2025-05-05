@@ -10,10 +10,12 @@
 #include "module_context.h"
 #include "telemetry.h"
 #include <cassert>
+#include <datadog/tracer_config.h>
 #include <format>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <string>
 
 namespace datadog::rum {
 namespace {
@@ -84,7 +86,9 @@ VARIANT get_property_value(IAppHostProperty &property) {
   return v;
 }
 
-Snippet *read_conf(IHttpServer &server, PCWSTR cfg_path) {
+Snippet *read_conf(IHttpServer &server, PCWSTR cfg_path,
+                   std::string &out_telemetry_app_id,
+                   bool &out_telemetry_remote_config_used) {
   auto admin_manager = server.GetAdminManager();
   IAppHostElement *cfg_root_elem;
   auto res = admin_manager->GetAdminSection(
@@ -161,6 +165,16 @@ Snippet *read_conf(IHttpServer &server, PCWSTR cfg_path) {
     }
   }
 
+  auto appIdIt = rum_sdk_opts.find("applicationId");
+  if (appIdIt != rum_sdk_opts.end()) {
+    out_telemetry_app_id = appIdIt->second;
+  } else {
+    out_telemetry_app_id = "";
+  }
+
+  out_telemetry_remote_config_used =
+      rum_sdk_opts.count("remoteConfigurationId") > 0;
+
   // Build the JSON representation of the configuration
   const std::string json_cfg = make_json_cfg(cfg_version, rum_sdk_opts);
   return snippet_create_from_json(json_cfg.c_str());
@@ -183,19 +197,29 @@ GlobalModule::GlobalModule(IHttpServer *server, DWORD server_version,
     logger_->error(std::format("Failed to configure the telemetry module: {}",
                                error->message));
   } else {
-    std::vector<std::shared_ptr<datadog::telemetry::Metric>> rum_metrics{
-        telemetry::injection_skip::already_injected,
-        telemetry::injection_skip::invalid_content_type,
-        telemetry::injection_skip::no_content,
-        telemetry::injection_skip::compressed_html,
-        telemetry::injection_succeed,
-        telemetry::injection_failed,
-        telemetry::configuration_succeed,
-        telemetry::configuration_failed_invalid_json,
-    };
 
-    telemetry_ = std::make_unique<datadog::telemetry::Telemetry>(
-        *maybe_telemetry_cfg, logger_, rum_metrics);
+    datadog::tracing::Clock clock = datadog::tracing::default_clock;
+    datadog::tracing::DatadogAgentConfig agent_cfg_for_telemetry;
+    auto finalized_agent_cfg_result = datadog::tracing::finalize_config(
+        agent_cfg_for_telemetry, logger_, clock);
+    if (auto *error = finalized_agent_cfg_result.if_error()) {
+      logger_->error(std::format("Failed to finalize agent settings for "
+                                 "telemetry, no telemetry will be sent: {}",
+                                 error->message));
+
+      return;
+    }
+    datadog::tracing::FinalizedDatadogAgentConfig dac =
+        *finalized_agent_cfg_result;
+
+    if (!dac.http_client) {
+      logger_->error(
+          "HTTPClient for telemetry is null, no telemetry will be sent");
+      return;
+    }
+
+    datadog::telemetry::init(*maybe_telemetry_cfg, logger_, dac.http_client,
+                             dac.event_scheduler, dac.url, clock);
   }
 }
 
@@ -216,7 +240,15 @@ GlobalModule::OnGlobalApplicationStart(
   logger_->info(std::format("Parsing configuration \"{}\" for app (id: {})",
                             wstring_to_utf8(config_path),
                             wstring_to_utf8(app->GetApplicationId())));
-  Snippet *snippet = read_conf(*server_, config_path);
+
+  std::string app_id;
+  bool remote_cfg_used;
+  Snippet *snippet = read_conf(*server_, config_path, app_id, remote_cfg_used);
+
+  ctx->application_id_tag = std::format("application_id:{}", app_id);
+  ctx->remote_config_tag =
+      std::format("remote_config_used:{}", remote_cfg_used);
+
   if (snippet == nullptr) {
     logger_->error("Failed to load RUM configuration");
     ctx->js_snippet = nullptr;
@@ -280,13 +312,19 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
     // Question(@dmehala): should the default behaviour to keep the old setting
     // if there's an issue with the configuration?
     if (std::wstring_view(path).starts_with(cfg_path)) {
-      Snippet *snippet = read_conf(*server_, provider->GetChangePath());
+      std::string app_id;
+      bool remote_cfg_used;
+      Snippet *snippet = read_conf(*server_, provider->GetChangePath(), app_id,
+                                   remote_cfg_used);
       if (snippet->error_code != 0) {
         logger_->error(std::format(
             "Failed to load new RUM configuration: {}. Keep using the old one",
             snippet->error_message));
       } else {
         ctx->js_snippet = snippet;
+        ctx->application_id_tag = std::format("application_id:{}", app_id);
+        ctx->remote_config_tag =
+            std::format("remote_config_used:{}", remote_cfg_used);
       }
     }
   }

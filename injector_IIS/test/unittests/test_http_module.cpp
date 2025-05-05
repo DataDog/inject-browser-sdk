@@ -6,6 +6,7 @@
 
 #include "http_module.h"
 #include "mocks.h"
+#include "module_context.h"
 #include "gtest/gtest.h"
 
 using namespace datadog::rum;
@@ -37,6 +38,7 @@ TEST_P(HttpModuleTest, ShouldAttemptInjection_ContentType) {
   HttpModule module;
   SilentLogger logger;
   MockHttpResponse httpResponse;
+  ModuleContext moduleContext;
 
   const auto [content_type, expected] = GetParam();
 
@@ -47,7 +49,8 @@ TEST_P(HttpModuleTest, ShouldAttemptInjection_ContentType) {
           }),
           Return(content_type.data())));
 
-  EXPECT_EQ(expected, module.ShouldAttemptInjection(httpResponse, logger));
+  EXPECT_EQ(expected,
+            module.ShouldAttemptInjection(httpResponse, logger, moduleContext));
 }
 
 constexpr ContentTypeParams kContentTypes[] = {
@@ -64,6 +67,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsFalseFor2xxAnd3xx) {
   HttpModule module;
   SilentLogger logger;
   MockHttpResponse httpResponse;
+  ModuleContext moduleContext;
 
   struct TestCase final {
     USHORT min;
@@ -98,7 +102,8 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsFalseFor2xxAnd3xx) {
                             _Outptr_opt_ IAppHostConfigException **,
                             _Out_ BOOL *) { *pStatusCode = code; }),
               Return()));
-      EXPECT_FALSE(module.ShouldAttemptInjection(httpResponse, logger));
+      EXPECT_FALSE(
+          module.ShouldAttemptInjection(httpResponse, logger, moduleContext));
     }
   }
 }
@@ -107,6 +112,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidStatusCode) {
   HttpModule module;
   SilentLogger logger;
   MockHttpResponse httpResponse;
+  ModuleContext moduleContext;
 
   struct TestCase final {
     USHORT min;
@@ -151,7 +157,8 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidStatusCode) {
                             _Out_ BOOL *) { *pStatusCode = code; }),
               Return()));
 
-      EXPECT_TRUE(module.ShouldAttemptInjection(httpResponse, logger));
+      EXPECT_TRUE(
+          module.ShouldAttemptInjection(httpResponse, logger, moduleContext));
     }
   }
 }
@@ -161,6 +168,7 @@ TEST(HttpModuleTest,
   HttpModule module;
   SilentLogger logger;
   MockHttpResponse httpResponse;
+  ModuleContext moduleContext;
 
   const char *contentTypeHeader = "Content-Type";
   const char *contentTypeHeaderValue = "text/html";
@@ -194,13 +202,15 @@ TEST(HttpModuleTest,
           }),
           Return(customHeaderValue)));
 
-  EXPECT_FALSE(module.ShouldAttemptInjection(httpResponse, logger));
+  EXPECT_FALSE(
+      module.ShouldAttemptInjection(httpResponse, logger, moduleContext));
 }
 
 TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidHeaders) {
   HttpModule module;
   SilentLogger logger;
   MockHttpResponse httpResponse;
+  ModuleContext moduleContext;
 
   const char *contentTypeHeader = "Content-Type";
   const char *contentTypeHeaderValue = "Text/HTML; Charset=\"utf - 8\"";
@@ -234,5 +244,6 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidHeaders) {
           }),
           Return(customHeaderValue)));
 
-  EXPECT_TRUE(module.ShouldAttemptInjection(httpResponse, logger));
+  EXPECT_TRUE(
+      module.ShouldAttemptInjection(httpResponse, logger, moduleContext));
 }

@@ -90,7 +90,7 @@ HttpModule::OnSendResponse(IN IHttpContext *http_context,
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  if (!ShouldAttemptInjection(*http_response, *ctx.logger, ctx)) {
+  if (!ShouldAttemptInjection(*http_response, ctx)) {
     return RQ_NOTIFICATION_CONTINUE;
   }
 
@@ -98,7 +98,6 @@ HttpModule::OnSendResponse(IN IHttpContext *http_context,
 }
 
 bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
-                                        Logger &logger,
                                         ModuleContext &ctx) const {
   // First, we must validate the the content type is 'text/html'
   // Note that the value of the Content-Type header is case insensitive, and it
@@ -112,7 +111,7 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
         *telemetry::injection_skipped,
         telemetry::build_tags("reason:content-type", ctx.application_id_tag,
                               ctx.remote_config_tag));
-    logger.debug("Skipping RUM injection: content type is not text/html ");
+    ctx.logger->debug("Skipping RUM injection: content type is not text/html ");
     return false;
   }
 
@@ -121,7 +120,7 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
 
   // only inject if response code is 2xx, 4xx, 5xx
   if (statusCode < 200 || (statusCode >= 300 && statusCode < 400)) {
-    logger.debug(
+    ctx.logger->debug(
         std::format("Skipping RUM injection: return code {}", statusCode));
     return false;
   }
@@ -133,8 +132,8 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
         *telemetry::injection_skipped,
         telemetry::build_tags("reason:already_injected", ctx.application_id_tag,
                               ctx.remote_config_tag));
-    logger.debug("Skipping RUM injection: injection has "
-                 "already been attempted on this response");
+    ctx.logger->debug("Skipping RUM injection: injection has "
+                      "already been attempted on this response");
     return false;
   }
 

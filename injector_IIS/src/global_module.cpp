@@ -31,9 +31,9 @@ std::string wstring_to_utf8(const std::wstring &wstr) {
   return strTo;
 }
 
-std::string
-make_json_cfg(const int version,
-              const std::unordered_map<std::string, std::string> &opts) {
+Snippet *
+make_snippet(const int version,
+             const std::unordered_map<std::string, std::string> &opts) {
   rapidjson::Document doc;
   doc.SetObject();
 
@@ -66,7 +66,7 @@ make_json_cfg(const int version,
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
   doc.Accept(writer);
 
-  return buffer.GetString();
+  return snippet_create_from_json(buffer.GetString());
 }
 
 IAppHostProperty *get_property(IAppHostElement *xmlElement,
@@ -86,16 +86,15 @@ VARIANT get_property_value(IAppHostProperty &property) {
   return v;
 }
 
-Snippet *read_conf(IHttpServer &server, PCWSTR cfg_path,
-                   std::string &out_telemetry_app_id,
-                   bool &out_telemetry_remote_config_used) {
+std::optional<std::pair<int, std::unordered_map<std::string, std::string>>>
+read_conf(IHttpServer &server, PCWSTR cfg_path) {
   auto admin_manager = server.GetAdminManager();
   IAppHostElement *cfg_root_elem;
   auto res = admin_manager->GetAdminSection(
       (BSTR)L"system.webServer/datadogRum", const_cast<BSTR>(cfg_path),
       &cfg_root_elem);
   if (res != S_OK) {
-    return nullptr;
+    return std::nullopt;
   }
 
   const auto defer_root = defer([&] { cfg_root_elem->Release(); });
@@ -103,21 +102,21 @@ Snippet *read_conf(IHttpServer &server, PCWSTR cfg_path,
   IAppHostProperty *enabled_prop = get_property(cfg_root_elem, L"enabled");
   if (enabled_prop == nullptr) {
     // missing enabled attribute -> invalid format -> disabled
-    return nullptr;
+    return std::nullopt;
   }
 
   const auto defer_enabled_prop = defer([&] { enabled_prop->Release(); });
 
   const auto is_enabled = get_property_value(*enabled_prop).boolVal;
   if (!is_enabled) {
-    return nullptr;
+    return std::nullopt;
   }
 
   int cfg_version = 6;
   auto version_prop = get_property(cfg_root_elem, L"version");
   if (version_prop != nullptr) {
+    const auto defer_version_prop = defer([&] { version_prop->Release(); });
     cfg_version = get_property_value(*version_prop).iVal;
-    version_prop->Release();
   }
 
   // Iterate on the SDK configuration
@@ -145,39 +144,28 @@ Snippet *read_conf(IHttpServer &server, PCWSTR cfg_path,
       const auto option_element_guard =
           defer([&] { option_element->Release(); });
 
-      auto property = get_property(option_element, L"name");
-      if (property == nullptr) {
+      auto name_property = get_property(option_element, L"name");
+      if (name_property == nullptr) {
         // TODO: log property `name` do not exist
         continue;
       }
-      std::string opt_name =
-          wstring_to_utf8(std::wstring(get_property_value(*property).bstrVal));
+      const auto defer_name_property = defer([&] { name_property->Release(); });
+      std::string opt_name = wstring_to_utf8(
+          std::wstring(get_property_value(*name_property).bstrVal));
 
-      property = get_property(option_element, L"value");
-      if (property == nullptr) {
+      auto value_property = get_property(option_element, L"value");
+      if (value_property == nullptr) {
         continue;
       }
-
-      std::string opt_value =
-          wstring_to_utf8(std::wstring(get_property_value(*property).bstrVal));
+      const auto defer_value_property =
+          defer([&] { value_property->Release(); });
+      std::string opt_value = wstring_to_utf8(
+          std::wstring(get_property_value(*value_property).bstrVal));
 
       rum_sdk_opts.emplace(std::move(opt_name), std::move(opt_value));
     }
   }
-
-  auto appIdIt = rum_sdk_opts.find("applicationId");
-  if (appIdIt != rum_sdk_opts.end()) {
-    out_telemetry_app_id = appIdIt->second;
-  } else {
-    out_telemetry_app_id = "";
-  }
-
-  out_telemetry_remote_config_used =
-      rum_sdk_opts.count("remoteConfigurationId") > 0;
-
-  // Build the JSON representation of the configuration
-  const std::string json_cfg = make_json_cfg(cfg_version, rum_sdk_opts);
-  return snippet_create_from_json(json_cfg.c_str());
+  return std::make_optional(std::make_pair(cfg_version, rum_sdk_opts));
 }
 } // namespace
 
@@ -198,14 +186,14 @@ GlobalModule::GlobalModule(IHttpServer *server, DWORD server_version,
                                error->message));
   } else {
 
-    datadog::tracing::Clock clock = datadog::tracing::default_clock;
+    const datadog::tracing::Clock &clock = datadog::tracing::default_clock;
     datadog::tracing::DatadogAgentConfig agent_cfg_for_telemetry;
     auto finalized_agent_cfg_result = datadog::tracing::finalize_config(
         agent_cfg_for_telemetry, logger_, clock);
     if (auto *error = finalized_agent_cfg_result.if_error()) {
-      logger_->error(std::format("Failed to finalize agent settings for "
-                                 "telemetry, no telemetry will be sent: {}",
-                                 error->message));
+      logger_->log_error(
+          error->with_prefix("Failed to finalize agent settings for "
+                             "telemetry, no telemetry will be sent."));
 
       return;
     }
@@ -241,26 +229,7 @@ GlobalModule::OnGlobalApplicationStart(
                             wstring_to_utf8(config_path),
                             wstring_to_utf8(app->GetApplicationId())));
 
-  std::string app_id;
-  bool remote_cfg_used;
-  Snippet *snippet = read_conf(*server_, config_path, app_id, remote_cfg_used);
-
-  ctx->application_id_tag = std::format("application_id:{}", app_id);
-  ctx->remote_config_tag =
-      std::format("remote_config_used:{}", remote_cfg_used);
-
-  if (snippet == nullptr) {
-    logger_->error("Failed to load RUM configuration");
-    ctx->js_snippet = nullptr;
-  } else if (snippet->error_code != 0) {
-    logger_->error(std::format("Failed to load RUM configuration: {}",
-                               snippet->error_message));
-    ctx->js_snippet = nullptr;
-  } else {
-    ctx->js_snippet = snippet;
-    logger_->info("Configuration validated");
-  }
-
+  UpdateModuleContextWithConfiguration(*ctx, config_path);
   app->GetModuleContextContainer()->SetModuleContext(ctx, g_module_id);
 
   // NOTE(@dmehala): Keep a reference on the module context for
@@ -312,24 +281,42 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
     // Question(@dmehala): should the default behaviour to keep the old setting
     // if there's an issue with the configuration?
     if (std::wstring_view(path).starts_with(cfg_path)) {
-      std::string app_id;
-      bool remote_cfg_used;
-      Snippet *snippet = read_conf(*server_, provider->GetChangePath(), app_id,
-                                   remote_cfg_used);
-      if (snippet->error_code != 0) {
-        logger_->error(std::format(
-            "Failed to load new RUM configuration: {}. Keep using the old one",
-            snippet->error_message));
-      } else {
-        ctx->js_snippet = snippet;
-        ctx->application_id_tag = std::format("application_id:{}", app_id);
-        ctx->remote_config_tag =
-            std::format("remote_config_used:{}", remote_cfg_used);
-      }
+      UpdateModuleContextWithConfiguration(*ctx, provider->GetChangePath());
     }
   }
 
   return GL_NOTIFICATION_CONTINUE;
 }
 
+void GlobalModule::UpdateModuleContextWithConfiguration(ModuleContext &ctx,
+                                                        PCWSTR config_path) {
+
+  auto config_options_opt = read_conf(*server_, config_path);
+  if (!config_options_opt.has_value()) {
+    logger_->error("Failed to load RUM configuration");
+    return;
+  }
+  const auto &[cfg_version, rum_sdk_opts] = config_options_opt.value();
+  Snippet *snippet = make_snippet(cfg_version, rum_sdk_opts);
+
+  if (snippet == nullptr) {
+    logger_->error("Failed to create RUM snippet");
+    return;
+  } else if (snippet->error_code != 0) {
+    logger_->error(std::format("Failed to create RUM snippet: {}",
+                               snippet->error_message));
+    return;
+  }
+
+  logger_->info("Configuration validated");
+  ctx.js_snippet = snippet;
+
+  if (auto appIdIt = rum_sdk_opts.find("applicationId");
+      appIdIt != rum_sdk_opts.end()) {
+    ctx.application_id_tag = std::format("application_id:{}", appIdIt->second);
+  }
+
+  auto rcUsed = rum_sdk_opts.count("remoteConfigurationId") > 0;
+  ctx.remote_config_tag = std::format("remote_config_used:{}", rcUsed);
+}
 } // namespace datadog::rum

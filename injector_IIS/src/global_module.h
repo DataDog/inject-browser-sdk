@@ -42,6 +42,10 @@ public:
   GLOBAL_NOTIFICATION_STATUS
   OnGlobalConfigurationChange(
       IGlobalConfigurationChangeProvider *provider) override;
+
+private:
+  void UpdateModuleContextWithConfiguration(ModuleContext &ctx,
+                                            PCWSTR config_path);
 };
 
 } // namespace datadog::rum

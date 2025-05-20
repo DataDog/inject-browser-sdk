@@ -50,7 +50,7 @@ TEST_P(HttpModuleTest, ShouldAttemptInjection_ContentType) {
           Return(content_type.data())));
 
   EXPECT_EQ(expected,
-            module.ShouldAttemptInjection(httpResponse, logger, moduleContext));
+            module.ShouldAttemptInjection(httpResponse, moduleContext));
 }
 
 constexpr ContentTypeParams kContentTypes[] = {
@@ -103,7 +103,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsFalseFor2xxAnd3xx) {
                             _Out_ BOOL *) { *pStatusCode = code; }),
               Return()));
       EXPECT_FALSE(
-          module.ShouldAttemptInjection(httpResponse, logger, moduleContext));
+          module.ShouldAttemptInjection(httpResponse, moduleContext));
     }
   }
 }
@@ -158,7 +158,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidStatusCode) {
               Return()));
 
       EXPECT_TRUE(
-          module.ShouldAttemptInjection(httpResponse, logger, moduleContext));
+          module.ShouldAttemptInjection(httpResponse, moduleContext));
     }
   }
 }
@@ -203,7 +203,7 @@ TEST(HttpModuleTest,
           Return(customHeaderValue)));
 
   EXPECT_FALSE(
-      module.ShouldAttemptInjection(httpResponse, logger, moduleContext));
+      module.ShouldAttemptInjection(httpResponse, moduleContext));
 }
 
 TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidHeaders) {
@@ -245,5 +245,5 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidHeaders) {
           Return(customHeaderValue)));
 
   EXPECT_TRUE(
-      module.ShouldAttemptInjection(httpResponse, logger, moduleContext));
+      module.ShouldAttemptInjection(httpResponse, moduleContext));
 }

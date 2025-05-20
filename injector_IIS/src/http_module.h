@@ -24,7 +24,7 @@ public:
   OnSendResponse(IN IHttpContext *pHttpContext,
                  IN ISendResponseProvider *pProvider);
 
-  bool ShouldAttemptInjection(IHttpResponse &pHttpResponse, Logger &logger,
+  bool ShouldAttemptInjection(IHttpResponse &pHttpResponse,
                               ModuleContext &ctx) const;
 
   REQUEST_NOTIFICATION_STATUS PerformInjection(IHttpContext &pHttpContext,

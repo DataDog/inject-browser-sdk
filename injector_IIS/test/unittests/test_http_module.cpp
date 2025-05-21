@@ -39,6 +39,8 @@ TEST_P(HttpModuleTest, ShouldAttemptInjection_ContentType) {
   SilentLogger logger;
   MockHttpResponse httpResponse;
   ModuleContext moduleContext;
+  moduleContext.logger = &logger;
+
 
   const auto [content_type, expected] = GetParam();
 
@@ -68,6 +70,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsFalseFor2xxAnd3xx) {
   SilentLogger logger;
   MockHttpResponse httpResponse;
   ModuleContext moduleContext;
+  moduleContext.logger = &logger;
 
   struct TestCase final {
     USHORT min;
@@ -113,6 +116,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidStatusCode) {
   SilentLogger logger;
   MockHttpResponse httpResponse;
   ModuleContext moduleContext;
+  moduleContext.logger = &logger;
 
   struct TestCase final {
     USHORT min;
@@ -169,6 +173,7 @@ TEST(HttpModuleTest,
   SilentLogger logger;
   MockHttpResponse httpResponse;
   ModuleContext moduleContext;
+  moduleContext.logger = &logger;
 
   const char *contentTypeHeader = "Content-Type";
   const char *contentTypeHeaderValue = "text/html";
@@ -211,6 +216,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidHeaders) {
   SilentLogger logger;
   MockHttpResponse httpResponse;
   ModuleContext moduleContext;
+  moduleContext.logger = &logger;
 
   const char *contentTypeHeader = "Content-Type";
   const char *contentTypeHeaderValue = "Text/HTML; Charset=\"utf - 8\"";

@@ -10,11 +10,8 @@ using namespace datadog::telemetry;
 
 namespace datadog::rum::telemetry {
 
-std::shared_ptr<Counter> injection_skipped(new Counter("injection.skipped",
-                                                       "rum", true));
-std::shared_ptr<Counter> injection_succeed(new Counter("injection.succeed",
-                                                       "rum", true));
-std::shared_ptr<Counter> injection_failed(new Counter("injection.failed", "rum",
-                                                      true));
+const Counter injection_skipped = {"injection.skipped", "rum", true};
+const Counter injection_succeed = {"injection.succeed", "rum", true};
+const Counter injection_failed = {"injection.failed", "rum", true};
 
 } // namespace datadog::rum::telemetry

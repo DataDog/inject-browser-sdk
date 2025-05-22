@@ -42,10 +42,14 @@ public:
   GLOBAL_NOTIFICATION_STATUS
   OnGlobalConfigurationChange(
       IGlobalConfigurationChangeProvider *provider) override;
+};
 
-private:
-  void UpdateModuleContextWithConfiguration(ModuleContext &ctx,
-                                            PCWSTR config_path);
+struct RumConfig {
+    int version;
+    std::unordered_map<std::string, std::string> sdk_options;
+
+    RumConfig(int v, std::unordered_map<std::string, std::string> opts)
+        : version(v), sdk_options(std::move(opts)) {}
 };
 
 } // namespace datadog::rum

@@ -21,16 +21,17 @@ namespace datadog::rum::telemetry {
 template <typename... T> auto build_tags(T &&...specific_tags) {
   std::vector<std::string> tags = {std::forward<T>(specific_tags)...};
   tags.emplace_back("integration_name:iis");
-  tags.emplace_back("injector_version:0.1.0");
+  tags.emplace_back(std::format("injector_version:{}",
+                                std::string_view{datadog_semver_rum_injector}));
   tags.emplace_back(
       std::format("integration_version:{}", SHORT_VERSION_STRING));
 
   return tags;
 }
 
-extern std::shared_ptr<datadog::telemetry::Counter> injection_skipped;
-extern std::shared_ptr<datadog::telemetry::Counter> injection_succeed;
-extern std::shared_ptr<datadog::telemetry::Counter> injection_failed;
-extern std::shared_ptr<datadog::telemetry::Counter> content_security_policy;
+const extern datadog::telemetry::Counter injection_skipped;
+const extern datadog::telemetry::Counter injection_succeed;
+const extern datadog::telemetry::Counter injection_failed;
+const extern datadog::telemetry::Counter content_security_policy;
 
 } // namespace datadog::rum::telemetry

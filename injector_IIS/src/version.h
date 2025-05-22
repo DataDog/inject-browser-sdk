@@ -26,3 +26,8 @@
 
 #define FILE_VERSION_STRING TO_STRING(MAJ_VER.MIN_VER.PATCH_VER.0)
 #define SHORT_VERSION_STRING TO_STRING(MAJ_VER.MIN_VER.PATCH_VER)
+
+extern "C" {
+extern const char datadog_semver_rum_injector[];
+extern const char datadog_version_rum_injector[];
+}

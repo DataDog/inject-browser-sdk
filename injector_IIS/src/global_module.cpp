@@ -86,8 +86,7 @@ VARIANT get_property_value(IAppHostProperty &property) {
   return v;
 }
 
-std::optional<std::pair<int, std::unordered_map<std::string, std::string>>>
-read_conf(IHttpServer &server, PCWSTR cfg_path) {
+std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
   auto admin_manager = server.GetAdminManager();
   IAppHostElement *cfg_root_elem;
   auto res = admin_manager->GetAdminSection(
@@ -165,7 +164,41 @@ read_conf(IHttpServer &server, PCWSTR cfg_path) {
       rum_sdk_opts.emplace(std::move(opt_name), std::move(opt_value));
     }
   }
-  return std::make_optional(std::make_pair(cfg_version, rum_sdk_opts));
+
+  return RumConfig{cfg_version, std::move(rum_sdk_opts)};
+}
+
+void update_module_context(ModuleContext &ctx, IHttpServer *server,
+                           PCWSTR config_path, std::shared_ptr<Logger> logger) {
+
+  auto config_options_opt = read_conf(*server, config_path);
+  if (!config_options_opt.has_value()) {
+    logger->error("Failed to load RUM configuration");
+    return;
+  }
+  const RumConfig &loaded_config = config_options_opt.value();
+  Snippet *snippet =
+      make_snippet(loaded_config.version, loaded_config.sdk_options);
+
+  if (snippet == nullptr) {
+    logger->error("Failed to create RUM snippet");
+    return;
+  } else if (snippet->error_code != 0) {
+    logger->error(std::format("Failed to create RUM snippet: {}",
+                              snippet->error_message));
+    return;
+  }
+
+  logger->info("Configuration validated");
+  ctx.js_snippet = snippet;
+
+  if (auto appIdIt = loaded_config.sdk_options.find("applicationId");
+      appIdIt != loaded_config.sdk_options.end()) {
+    ctx.application_id_tag = std::format("application_id:{}", appIdIt->second);
+  }
+
+  auto rcUsed = loaded_config.sdk_options.count("remoteConfigurationId") > 0;
+  ctx.remote_config_tag = std::format("remote_config_used:{}", rcUsed);
 }
 } // namespace
 
@@ -229,7 +262,7 @@ GlobalModule::OnGlobalApplicationStart(
                             wstring_to_utf8(config_path),
                             wstring_to_utf8(app->GetApplicationId())));
 
-  UpdateModuleContextWithConfiguration(*ctx, config_path);
+  update_module_context(*ctx, server_, config_path, logger_);
   app->GetModuleContextContainer()->SetModuleContext(ctx, g_module_id);
 
   // NOTE(@dmehala): Keep a reference on the module context for
@@ -281,42 +314,10 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
     // Question(@dmehala): should the default behaviour to keep the old setting
     // if there's an issue with the configuration?
     if (std::wstring_view(path).starts_with(cfg_path)) {
-      UpdateModuleContextWithConfiguration(*ctx, provider->GetChangePath());
+      update_module_context(*ctx, server_, provider->GetChangePath(), logger_);
     }
   }
 
   return GL_NOTIFICATION_CONTINUE;
-}
-
-void GlobalModule::UpdateModuleContextWithConfiguration(ModuleContext &ctx,
-                                                        PCWSTR config_path) {
-
-  auto config_options_opt = read_conf(*server_, config_path);
-  if (!config_options_opt.has_value()) {
-    logger_->error("Failed to load RUM configuration");
-    return;
-  }
-  const auto &[cfg_version, rum_sdk_opts] = config_options_opt.value();
-  Snippet *snippet = make_snippet(cfg_version, rum_sdk_opts);
-
-  if (snippet == nullptr) {
-    logger_->error("Failed to create RUM snippet");
-    return;
-  } else if (snippet->error_code != 0) {
-    logger_->error(std::format("Failed to create RUM snippet: {}",
-                               snippet->error_message));
-    return;
-  }
-
-  logger_->info("Configuration validated");
-  ctx.js_snippet = snippet;
-
-  if (auto appIdIt = rum_sdk_opts.find("applicationId");
-      appIdIt != rum_sdk_opts.end()) {
-    ctx.application_id_tag = std::format("application_id:{}", appIdIt->second);
-  }
-
-  auto rcUsed = rum_sdk_opts.count("remoteConfigurationId") > 0;
-  ctx.remote_config_tag = std::format("remote_config_used:{}", rcUsed);
 }
 } // namespace datadog::rum

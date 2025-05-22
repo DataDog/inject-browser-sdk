@@ -98,7 +98,7 @@ HttpModule::OnSendResponse(IN IHttpContext *http_context,
 }
 
 bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
-                                        ModuleContext &ctx) const {
+                                        const ModuleContext &ctx) const {
   // First, we must validate the the content type is 'text/html'
   // Note that the value of the Content-Type header is case insensitive, and it
   // may or may not be be followed by semicolon-delimited parameters
@@ -108,7 +108,7 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
   if (_strnicmp(get_header(pHttpResponse, "Content-Type").data(), "text/html",
                 9) != 0) {
     datadog::telemetry::counter::increment(
-        *telemetry::injection_skipped,
+        telemetry::injection_skipped,
         telemetry::build_tags("reason:content-type", ctx.application_id_tag,
                               ctx.remote_config_tag));
     ctx.logger->debug("Skipping RUM injection: content type is not text/html ");
@@ -129,7 +129,7 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
   // previously attempted injection into this response
   if (!get_header(pHttpResponse, k_injection_header).empty()) {
     datadog::telemetry::counter::increment(
-        *telemetry::injection_skipped,
+        telemetry::injection_skipped,
         telemetry::build_tags("reason:already_injected", ctx.application_id_tag,
                               ctx.remote_config_tag));
     ctx.logger->debug("Skipping RUM injection: injection has "
@@ -213,11 +213,11 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
 
   if (injected) {
     datadog::telemetry::counter::increment(
-        *telemetry::injection_succeed,
+        telemetry::injection_succeed,
         telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
   } else {
     datadog::telemetry::counter::increment(
-        *telemetry::injection_failed,
+        telemetry::injection_failed,
         telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
   }
 

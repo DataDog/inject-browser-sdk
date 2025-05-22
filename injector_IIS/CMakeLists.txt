@@ -115,6 +115,26 @@ corrosion_experimental_cbindgen(
   FLAGS --config ${CMAKE_SOURCE_DIR}/cbindgen.toml
 )
 
+execute_process (
+  COMMAND cargo pkgid --package inject-browser-sdk --manifest-path "${CMAKE_SOURCE_DIR}/../Cargo.toml"
+  OUTPUT_VARIABLE RUM_SDK_INJECTOR_PKGID
+)
+
+string(REGEX REPLACE ".*@" "" _VERSION_STRING_CANDIDATE "${RUM_SDK_INJECTOR_PKGID}")
+if(_VERSION_STRING_CANDIDATE MATCHES "([0-9]+\\.[0-9]+\\.[0-9]+)")
+  set(RUM_SDK_INJECTOR_VERSION "${CMAKE_MATCH_1}")
+else()
+  message(FATAL_ERROR "Could not extract a maj.min.patch version from string: '${_VERSION_STRING_CANDIDATE}' derived from PkgID: '${RUM_SDK_INJECTOR_PKGID}'")
+endif()
+string(STRIP "${RUM_SDK_INJECTOR_VERSION}" RUM_SDK_INJECTOR_VERSION)
+
+unset(RUM_SDK_INJECTOR_PKGID)
+
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/version.cpp.in
+  ${CMAKE_BINARY_DIR}/generated/version.cpp
+)
+
 add_library(iis_injector-objects OBJECT)
 add_library(iis_injector::obj ALIAS iis_injector-objects)
 
@@ -126,6 +146,7 @@ target_sources(iis_injector-objects
     src/module_context.cpp
     src/telemetry.cpp
     src/ruminjector.rc
+    ${CMAKE_BINARY_DIR}/generated/version.cpp
 )
 
 find_program(MC mc)
@@ -148,6 +169,7 @@ endif()
 target_include_directories(iis_injector-objects
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}/generated
 )
 
 target_compile_options(iis_injector-objects

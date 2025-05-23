@@ -3,45 +3,24 @@
 // Datadog (https://www.datadoghq.com/).
 //
 // Copyright 2024-Present Datadog, Inc.
-
-use std::mem;
-
-use crate::injection_point_locator::{InjectionPointLocator, Location};
+use crate::injection_point_locator::InjectionPointLocator;
 
 /// Stateful object used to inject the provided snippet within a streamed HTML document.
 pub struct Injector<'snippet> {
+    /// Snippet to inject.
     snippet: &'snippet [u8],
-    locator: InjectionPointLocator,
+
+    /// True if we attempted to inject during `write` API; used to decide if `end` API should try.
+    tried_injected: bool,
+
+    /// True if the snippet was successfully injected; used to decide if `end` API should add extra padding space
     injected: bool,
 
-    /// When writing chunks progressively, some data might be missing to locate the injection
-    /// point.
-    ///
-    /// There are two buffers here, because in some cases we need to return previously buffered
-    /// data *and* buffer part of the chunk (see second example). Once emitted, the buffer needs to
-    /// be emptied, so we don't emit the same data twice. To keep things simple, as a convention,
-    /// we only write in `incomplete_data` and move it to the exposed `incomplete_data_public_ref`
-    /// buffer when needed.
-    ///
-    /// Example: imagine we write the following chunks: `foo</he`, `ad>bar`.
-    /// * When writing the first chunk, the injector will return `foo`, but buffer `</he`, as the
-    /// snippet might be injected after `foo`.
-    /// * When writing the second chunk, the injector will realize that `</he` was indeed the
-    /// beginning of the `</head>` tag, so it will emit the snippet, then the buffered data `</he`,
-    /// then the chunk `ad>bar`.
-    ///
-    /// Second example: imagine we write the following chunks: `foo</he`, `ader>bar`.
-    /// * Same as before, the injector will return `foo` and buffer `</he`
-    /// * When writing the second chunk, the injector will realize that `</he` was not the start of
-    /// a `</head>` tag, so it will emit the buffered data `</he`, then the chunk `ader>bar`.
-    ///
-    /// Third example: imagine we write the following chunks: `foo</he`, `ader>bar</`
-    /// * Same as before, the injector will return `foo` and buffer `</he`
-    /// * When writing the second chunk, the injector will realize that `</he` was not the start of
-    /// a `</head>` tag, so it will emit it, then emit `ader>bar`. But it will need to put `</` in
-    /// a second buffer, as it cannot tell yet if it is a valid injection point.
-    incomplete_data: Vec<u8>,
-    incomplete_data_public_ref: Vec<u8>,
+    /// Buffers up to 1024 bytes before attempting injection.
+    /// According to the spec (https://html.spec.whatwg.org/multipage/semantics.html#the-meta-element),
+    /// meta charset tags must appear within the first 1024 bytes or they will be ignored by browsers.
+    /// The `<head>` tag is also typically found within this range.
+    buffer: Vec<u8>,
 
     /// If we don't find any injection point, we need to pad the document with spaces, so the
     /// document has the same size as if the snippet was successfully injected.
@@ -52,68 +31,52 @@ impl<'snippet> Injector<'snippet> {
     pub fn new(snippet: &'snippet [u8]) -> Self {
         Self {
             snippet,
-            locator: InjectionPointLocator::new(),
             injected: false,
-
+            tried_injected: false,
             padding_spaces: Vec::new(),
-            incomplete_data: Vec::new(),
-            incomplete_data_public_ref: Vec::new(),
+            buffer: Vec::new(),
         }
     }
 
     pub fn write<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
-        if self.injected {
+        if self.tried_injected {
             return self.create_result(&[chunk]);
         }
 
-        match self.locator.scan(chunk) {
-            Location::None => {
-                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                return self.create_result(&[&self.incomplete_data_public_ref, chunk]);
-            }
+        self.buffer.extend_from_slice(chunk);
 
-            Location::PotentialFromPreviousChunk => {
-                self.incomplete_data.extend_from_slice(chunk);
-                return self.create_result(&[]);
-            }
-
-            Location::PotentialFromIndex(index) => {
-                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                self.incomplete_data.extend_from_slice(&chunk[index..]);
-                return self.create_result(&[&self.incomplete_data_public_ref, &chunk[..index]]);
-            }
-
-            Location::MatchFromPreviousChunk => {
-                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                self.injected = true;
-                return self.create_result(&[
-                    self.snippet,
-                    &self.incomplete_data_public_ref,
-                    chunk,
-                ]);
-            }
-
-            Location::MatchFromIndex(index) => {
-                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                self.injected = true;
-                return self.create_result(&[
-                    &self.incomplete_data_public_ref,
-                    &chunk[..index],
-                    self.snippet,
-                    &chunk[index..],
-                ]);
-            }
+        if self.buffer.len() >= 1024 {
+            return self.try_inject();
         }
+
+        self.create_result(&[])
     }
 
     pub fn end(&mut self) -> Result<'_> {
-        self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
         if self.injected {
-            return self.create_result(&[&self.incomplete_data_public_ref]);
-        } else {
-            self.padding_spaces = vec![b' '; self.snippet.len()];
-            return self.create_result(&[&self.incomplete_data_public_ref, &self.padding_spaces]);
+            return self.create_result(&[]);
         }
+
+        self.padding_spaces = vec![b' '; self.snippet.len()];
+
+        if !self.tried_injected {
+            return self.try_inject();
+        }
+
+        self.create_result(&[&self.padding_spaces])
+    }
+
+    fn try_inject<'a>(&'a mut self) -> Result<'a> {
+        let needed = self.buffer.len().min(1024);
+        let slice = &self.buffer[..needed];
+        self.tried_injected = true;
+
+        if let Some(point) = InjectionPointLocator::find(slice) {
+            self.injected = true;
+            return self.create_result(&[&slice[..point], self.snippet, &self.buffer[point..]]);
+        }
+
+        self.create_result(&[&self.buffer, &self.padding_spaces])
     }
 
     fn create_result<'a>(&'a self, slices: &[&'a [u8]]) -> Result<'a> {
@@ -126,10 +89,7 @@ impl<'snippet> Injector<'snippet> {
                     length += 1;
                     BytesSlice {
                         bytes: slice,
-                        from_incoming_chunk: slice.as_ptr()
-                            != self.incomplete_data_public_ref.as_ptr()
-                            && slice.as_ptr() != self.padding_spaces.as_ptr()
-                            && slice.as_ptr() != self.snippet.as_ptr(),
+                        from_incoming_chunk: false,
                     }
                 }
                 None => BytesSlice::default(),
@@ -168,19 +128,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn injector_basic() {
-        test_injector(["abc</head>def"], "abc<snippet></head>def");
-        test_injector(["abc</he", "ad>def"], "abc<snippet></head>def");
-        test_injector(["abc", "</head>def"], "abc<snippet></head>def");
-        test_injector(["abc</head>", "def"], "abc<snippet></head>def");
-        test_injector(["abc</h", "ea", "d>def"], "abc<snippet></head>def");
-        test_injector(["abc", "</hea", "d>def"], "abc<snippet></head>def");
+    fn basic() {
+        test_injector(
+            ["<head", ">abc</he", "ad>def"],
+            "<head><snippet>abc</head>def",
+        );
     }
 
     #[test]
-    fn no_head() {
-        test_injector(["abc"], "abc         ");
-        test_injector(["abc</hea"], "abc</hea         ");
+    fn head_after_1_kb() {
+        let input = "A".repeat(1024) + "<head>def";
+        let expected = input.clone() + "         ";
+
+        test_injector([input], &expected);
+    }
+
+    #[test]
+    fn no_head_or_meta() {
+        test_injector(["<html></html>"], "<html></html>         ");
     }
 
     #[test]
@@ -188,47 +153,6 @@ mod tests {
         test_injector::<&str>([], "         ");
         test_injector([""], "         ");
         test_injector(["", ""], "         ");
-    }
-
-    #[test]
-    fn multiple_head() {
-        test_injector(
-            ["abc</head>def</head>ghi"],
-            "abc<snippet></head>def</head>ghi",
-        );
-        test_injector(
-            ["abc</head>def</h", "ead>ghi"],
-            "abc<snippet></head>def</head>ghi",
-        );
-        test_injector(
-            ["abc</head>d", "ef</head>ghi"],
-            "abc<snippet></head>def</head>ghi",
-        );
-    }
-
-    #[test]
-    fn incomplete_head() {
-        test_injector(["abc</he</head>def"], "abc</he<snippet></head>def");
-        test_injector(["abc</he", "</head>def"], "abc</he<snippet></head>def");
-        test_injector(["abc</he", "</", "head>def"], "abc</he<snippet></head>def");
-    }
-
-    #[test]
-    fn casing() {
-        test_injector(["abc</HeAd>def"], "abc<snippet></HeAd>def");
-        test_injector(["abc</HEAD>def"], "abc<snippet></HEAD>def");
-    }
-
-    #[test]
-    fn spaces() {
-        test_injector(["abc </head>def"], "abc <snippet></head>def");
-        test_injector(["abc< /head>def"], "abc< /head>def         ");
-        test_injector(["abc</ head>def"], "abc<snippet></ head>def");
-        test_injector(["abc</h ead>def"], "abc</h ead>def         ");
-        test_injector(["abc</he ad>def"], "abc</he ad>def         ");
-        test_injector(["abc</hea d>def"], "abc</hea d>def         ");
-        test_injector(["abc</head >def"], "abc<snippet></head >def");
-        test_injector(["abc</head> def"], "abc<snippet></head> def");
     }
 
     #[test]
@@ -245,16 +169,16 @@ mod tests {
         }
 
         let parts: [Part; 16] = [
-            Part::new("</head>", true),
-            Part::new("</ head>", true),
-            Part::new("</HeAd>", true),
-            Part::new("</HEAD>", true),
-            Part::new("</h ead>", false),
-            Part::new("</he ad>", false),
-            Part::new("</header>", false),
-            Part::new("</h", false),
-            Part::new("</", false),
-            Part::new("<", false),
+            Part::new("<head>", true),
+            Part::new("<head >", true),
+            Part::new("<HeAd>", true),
+            Part::new("<HEAD>", true),
+            Part::new("<h ead>", false),
+            Part::new("<he ad>", false),
+            Part::new("<header>", false),
+            Part::new("h>", false),
+            Part::new("/>", false),
+            Part::new(">", false),
             Part::new(" ", false),
             Part::new("foo", false),
             Part::new("bar", false),
@@ -274,13 +198,12 @@ mod tests {
             let parts_count = Uniform::new(0, 20).sample(&mut rng);
             for part in parts.choose_multiple(&mut rng, parts_count) {
                 input.push_str(part.string);
+                expected.push_str(part.string);
 
                 if !has_head && part.has_head {
                     expected.push_str("<snippet>");
                     has_head = true;
                 }
-
-                expected.push_str(part.string);
             }
             if !has_head {
                 expected.push_str("         ");

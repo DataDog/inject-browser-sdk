@@ -128,6 +128,7 @@ else()
 endif()
 string(STRIP "${RUM_SDK_INJECTOR_VERSION}" RUM_SDK_INJECTOR_VERSION)
 
+unset(_VERSION_STRING_CANDIDATE)
 unset(RUM_SDK_INJECTOR_PKGID)
 
 configure_file(

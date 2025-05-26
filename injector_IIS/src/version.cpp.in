@@ -10,6 +10,6 @@
 
 #include "version.h"
 
-const char datadog_semver_rum_injector[] = "@RUM_SDK_INJECTOR_VERSION@";
-const char datadog_version_rum_injector[] =
+const char datadog_rum_injector_version[] = "@RUM_SDK_INJECTOR_VERSION@";
+const char datadog_rum_injector_version_string[] =
     "[inject-browser-sdk version @RUM_SDK_INJECTOR_VERSION@]";

@@ -131,28 +131,40 @@ mod tests {
     fn basic() {
         test_injector(
             ["<head", ">abc</he", "ad>def"],
-            "<head><snippet>abc</head>def",
+            "<head>{{SNIPPET}}abc</head>def",
         );
     }
 
     #[test]
     fn head_after_1_kb() {
         let input = "A".repeat(1024) + "<head>def";
-        let expected = input.clone() + "         ";
+        let expected = input.clone() + "           ";
+
+        test_injector([input], &expected);
+    }
+
+    #[test]
+    fn meta_after_1_kb_fallback_to_head() {
+        let input = format!("<head></head>{}<meta charset='...'>def", "a".repeat(1024));
+        let expected = format!(
+            "<head>{}</head>{}<meta charset='...'>def",
+            "{{SNIPPET}}",
+            "a".repeat(1024)
+        );
 
         test_injector([input], &expected);
     }
 
     #[test]
     fn no_head_or_meta() {
-        test_injector(["<html></html>"], "<html></html>         ");
+        test_injector(["<html></html>"], "<html></html>           ");
     }
 
     #[test]
     fn empty() {
-        test_injector::<&str>([], "         ");
-        test_injector([""], "         ");
-        test_injector(["", ""], "         ");
+        test_injector::<&str>([], "           ");
+        test_injector([""], "           ");
+        test_injector(["", ""], "           ");
     }
 
     #[test]
@@ -201,12 +213,12 @@ mod tests {
                 expected.push_str(part.string);
 
                 if !has_head && part.has_head {
-                    expected.push_str("<snippet>");
+                    expected.push_str("{{SNIPPET}}");
                     has_head = true;
                 }
             }
             if !has_head {
-                expected.push_str("         ");
+                expected.push_str("           ");
             }
 
             // Split `input` into chunks of random sizes. Because chunks might not end at a
@@ -233,7 +245,7 @@ mod tests {
         input_chunks: impl IntoIterator<Item = T>,
         expected: &str,
     ) {
-        let snippet = b"<snippet>";
+        let snippet = b"{{SNIPPET}}";
         let mut injector = Injector::new(snippet);
 
         let input_chunks: Vec<T> = input_chunks.into_iter().collect();

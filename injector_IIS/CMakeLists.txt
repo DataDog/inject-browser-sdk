@@ -170,7 +170,6 @@ endif()
 target_include_directories(iis_injector-objects
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_BINARY_DIR}/generated
 )
 
 target_compile_options(iis_injector-objects

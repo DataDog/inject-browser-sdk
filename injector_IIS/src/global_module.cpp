@@ -168,10 +168,10 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
   return RumConfig{cfg_version, std::move(rum_sdk_opts)};
 }
 
-void update_module_context(ModuleContext &ctx, IHttpServer *server,
+void update_module_context(ModuleContext &ctx, IHttpServer &server,
                            PCWSTR config_path, std::shared_ptr<Logger> logger) {
 
-  auto config_options_opt = read_conf(*server, config_path);
+  auto config_options_opt = read_conf(server, config_path);
   if (!config_options_opt.has_value()) {
     logger->error("Failed to load RUM configuration");
     return;
@@ -262,7 +262,7 @@ GlobalModule::OnGlobalApplicationStart(
                             wstring_to_utf8(config_path),
                             wstring_to_utf8(app->GetApplicationId())));
 
-  update_module_context(*ctx, server_, config_path, logger_);
+  update_module_context(*ctx, *server_, config_path, logger_);
   app->GetModuleContextContainer()->SetModuleContext(ctx, g_module_id);
 
   // NOTE(@dmehala): Keep a reference on the module context for
@@ -314,7 +314,7 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
     // Question(@dmehala): should the default behaviour to keep the old setting
     // if there's an issue with the configuration?
     if (std::wstring_view(path).starts_with(cfg_path)) {
-      update_module_context(*ctx, server_, provider->GetChangePath(), logger_);
+      update_module_context(*ctx, *server_, provider->GetChangePath(), logger_);
     }
   }
 

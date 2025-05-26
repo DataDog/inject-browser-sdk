@@ -45,11 +45,8 @@ public:
 };
 
 struct RumConfig {
-    int version;
-    std::unordered_map<std::string, std::string> sdk_options;
-
-    RumConfig(int v, std::unordered_map<std::string, std::string> opts)
-        : version(v), sdk_options(std::move(opts)) {}
+  int version;
+  std::unordered_map<std::string, std::string> sdk_options;
 };
 
 } // namespace datadog::rum

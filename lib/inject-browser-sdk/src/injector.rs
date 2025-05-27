@@ -5,21 +5,31 @@
 // Copyright 2024-Present Datadog, Inc.
 use crate::injection_point_locator::InjectionPointLocator;
 
+#[derive(Debug, PartialEq, Eq)]
+enum InjectorState {
+    /// Still buffering input and searching for a valid injection point
+    Buffering,
+    /// Successfully injected the snippet at a valid injection point
+    SnippetInjected,
+    /// Searched through the buffer but no valid injection point was found
+    NoValidInjectionPoint,
+}
+
+const DOCUMENT_CHARSET_SCAN_LIMIT: usize = 1024;
+
 /// Stateful object used to inject the provided snippet within a streamed HTML document.
 pub struct Injector<'snippet> {
     /// Snippet to inject.
     snippet: &'snippet [u8],
 
-    /// True if we attempted to inject during `write` API; used to decide if `end` API should try.
-    tried_injected: bool,
+    /// Tracks the current state of the injection process.
+    /// Can be WaitingForMoreData (still buffering), Injected (successfully injected),
+    /// or InjectionPointNotFound (no valid injection point found).
+    injector_state: InjectorState,
 
-    /// True if the snippet was successfully injected; used to decide if `end` API should add extra padding space
-    injected: bool,
-
-    /// Buffers up to 1024 bytes before attempting injection.
-    /// According to the spec (https://html.spec.whatwg.org/multipage/semantics.html#the-meta-element),
-    /// meta charset tags must appear within the first 1024 bytes or they will be ignored by browsers.
-    /// The `<head>` tag is also typically found within this range.
+    /// Buffers incoming HTML data up to DOCUMENT_CHARSET_SCAN_LIMIT (1024) bytes before attempting injection.
+    /// This buffer is used to search for valid injection points (like <head> or <meta charset='...'> tags)
+    /// within the first 1024 bytes of the document, as per HTML spec requirements (https://html.spec.whatwg.org/multipage/semantics.html#the-meta-element).
     buffer: Vec<u8>,
 
     /// If we don't find any injection point, we need to pad the document with spaces, so the
@@ -31,21 +41,19 @@ impl<'snippet> Injector<'snippet> {
     pub fn new(snippet: &'snippet [u8]) -> Self {
         Self {
             snippet,
-            injected: false,
-            tried_injected: false,
+            injector_state: InjectorState::Buffering,
             padding_spaces: Vec::new(),
             buffer: Vec::new(),
         }
     }
-
     pub fn write<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
-        if self.tried_injected {
-            return self.create_result(&[chunk]);
+        if self.injector_state != InjectorState::Buffering {
+            self.create_result(&[chunk]);
         }
 
         self.buffer.extend_from_slice(chunk);
 
-        if self.buffer.len() >= 1024 {
+        if self.buffer.len() >= DOCUMENT_CHARSET_SCAN_LIMIT {
             return self.try_inject();
         }
 
@@ -53,13 +61,13 @@ impl<'snippet> Injector<'snippet> {
     }
 
     pub fn end(&mut self) -> Result<'_> {
-        if self.injected {
+        if self.injector_state == InjectorState::SnippetInjected {
             return self.create_result(&[]);
         }
 
         self.padding_spaces = vec![b' '; self.snippet.len()];
 
-        if !self.tried_injected {
+        if self.injector_state == InjectorState::Buffering {
             return self.try_inject();
         }
 
@@ -68,11 +76,11 @@ impl<'snippet> Injector<'snippet> {
 
     fn try_inject<'a>(&'a mut self) -> Result<'a> {
         let needed = self.buffer.len().min(1024);
-        let slice = &self.buffer[..needed];
-        self.tried_injected = true;
+        let slice: &[u8] = &self.buffer[..needed];
+        self.injector_state = InjectorState::NoValidInjectionPoint;
 
         if let Some(point) = InjectionPointLocator::find(slice) {
-            self.injected = true;
+            self.injector_state = InjectorState::SnippetInjected;
             return self.create_result(&[&slice[..point], self.snippet, &self.buffer[point..]]);
         }
 
@@ -95,7 +103,7 @@ impl<'snippet> Injector<'snippet> {
                 None => BytesSlice::default(),
             }),
             length,
-            injected: self.injected,
+            injected: self.injector_state == InjectorState::SnippetInjected,
         }
     }
 }
@@ -145,9 +153,9 @@ mod tests {
 
     #[test]
     fn meta_after_1_kb_fallback_to_head() {
-        let input = format!("<head></head>{}<meta charset='...'>def", "a".repeat(1024));
+        let input = format!("<head>{}<meta charset='...'></head>def", "a".repeat(1024));
         let expected = format!(
-            "<head>{}</head>{}<meta charset='...'>def",
+            "<head>{}{}<meta charset='...'></head>def",
             "{{SNIPPET}}",
             "a".repeat(1024)
         );

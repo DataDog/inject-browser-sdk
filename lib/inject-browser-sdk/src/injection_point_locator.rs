@@ -51,16 +51,7 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
             .iter()
             .position(|&b| b.is_ascii_whitespace() || b == b'>')?;
 
-        let tag_name = &rest[..name_end];
-        let relevant_tag_name = if compare_case_insensitive(tag_name, b"meta") {
-            Some(TagName::Meta)
-        } else if compare_case_insensitive(tag_name, b"head") {
-            Some(TagName::Head)
-        } else {
-            None
-        };
-
-        if let Some(relevant_tag_name) = relevant_tag_name {
+        if let Some(relevant_tag_name) = parse_tag_name(&rest[..name_end]) {
             return Some((relevant_tag_name, tag_start, tag_end));
         }
 
@@ -68,6 +59,16 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
     }
 
     None
+}
+
+fn parse_tag_name(input: &[u8]) -> Option<TagName> {
+    if compare_case_insensitive(input, b"meta") {
+        Some(TagName::Meta)
+    } else if compare_case_insensitive(input, b"head") {
+        Some(TagName::Head)
+    } else {
+        None
+    }
 }
 
 fn has_encoding_attributes(buffer: &[u8]) -> bool {

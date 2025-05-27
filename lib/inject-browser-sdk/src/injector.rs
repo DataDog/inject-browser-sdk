@@ -46,62 +46,73 @@ impl<'snippet> Injector<'snippet> {
             buffer: Vec::new(),
         }
     }
+
     pub fn write<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
         if self.injector_state != InjectorState::Buffering {
-            self.create_result(&[chunk]);
+            return self.create_result(&[BytesSlice::new(chunk, true)]);
+        }
+
+        if self.buffer.is_empty() && chunk.len() >= DOCUMENT_CHARSET_SCAN_LIMIT {
+            // Optimization: directly scan large chunk without buffering
+            return self.try_inject(Some(chunk), false);
         }
 
         self.buffer.extend_from_slice(chunk);
 
         if self.buffer.len() >= DOCUMENT_CHARSET_SCAN_LIMIT {
-            return self.try_inject();
+            return self.try_inject(None, false);
         }
 
         self.create_result(&[])
     }
 
     pub fn end(&mut self) -> Result<'_> {
-        if self.injector_state == InjectorState::SnippetInjected {
-            return self.create_result(&[]);
+        match self.injector_state {
+            InjectorState::Buffering => self.try_inject(None, true),
+            InjectorState::SnippetInjected => self.create_result(&[]),
+            InjectorState::NoValidInjectionPoint => {
+                self.padding_spaces = vec![b' '; self.snippet.len()];
+                self.create_result(&[BytesSlice::new(&self.padding_spaces, false)])
+            }
         }
-
-        self.padding_spaces = vec![b' '; self.snippet.len()];
-
-        if self.injector_state == InjectorState::Buffering {
-            return self.try_inject();
-        }
-
-        self.create_result(&[&self.padding_spaces])
     }
 
-    fn try_inject<'a>(&'a mut self) -> Result<'a> {
-        let needed = self.buffer.len().min(1024);
-        let slice: &[u8] = &self.buffer[..needed];
-        self.injector_state = InjectorState::NoValidInjectionPoint;
+    fn try_inject<'a>(&'a mut self, incoming_chunk: Option<&'a [u8]>, eof: bool) -> Result<'a> {
+        let from_incoming_chunk = incoming_chunk.is_some();
+        let chunk = incoming_chunk.unwrap_or(&self.buffer);
+        let needed = chunk.len().min(DOCUMENT_CHARSET_SCAN_LIMIT);
+        let slice = &chunk[..needed]; // Optimization: only scan the first 1024 bytes
 
         if let Some(point) = InjectionPointLocator::find(slice) {
             self.injector_state = InjectorState::SnippetInjected;
-            return self.create_result(&[&slice[..point], self.snippet, &self.buffer[point..]]);
+            self.create_result(&[
+                BytesSlice::new(&chunk[..point], from_incoming_chunk),
+                BytesSlice::new(self.snippet, false),
+                BytesSlice::new(&chunk[point..], from_incoming_chunk),
+            ])
+        } else {
+            self.injector_state = InjectorState::NoValidInjectionPoint;
+            if eof {
+                self.padding_spaces = vec![b' '; self.snippet.len()];
+            }
+            self.create_result(&[
+                BytesSlice::new(chunk, from_incoming_chunk),
+                BytesSlice::new(&self.padding_spaces, false),
+            ])
         }
-
-        self.create_result(&[&self.buffer, &self.padding_spaces])
     }
 
-    fn create_result<'a>(&'a self, slices: &[&'a [u8]]) -> Result<'a> {
+    fn create_result<'a>(&'a self, slices: &[BytesSlice<'a>]) -> Result<'a> {
+        let mut result_slices = [BytesSlice::default(); 4];
         let mut length = 0;
-        let mut non_empty_slices = slices.iter().filter(|slice| !slice.is_empty());
+
+        for slice in slices.iter().filter(|s| !s.bytes.is_empty()).take(4) {
+            result_slices[length] = *slice;
+            length += 1;
+        }
 
         Result {
-            slices: std::array::from_fn(|_| match non_empty_slices.next() {
-                Some(slice) => {
-                    length += 1;
-                    BytesSlice {
-                        bytes: slice,
-                        from_incoming_chunk: false,
-                    }
-                }
-                None => BytesSlice::default(),
-            }),
+            slices: result_slices,
             length,
             injected: self.injector_state == InjectorState::SnippetInjected,
         }
@@ -112,6 +123,15 @@ impl<'snippet> Injector<'snippet> {
 pub struct BytesSlice<'a> {
     pub bytes: &'a [u8],
     pub from_incoming_chunk: bool,
+}
+
+impl<'a> BytesSlice<'a> {
+    pub fn new(bytes: &'a [u8], from_incoming_chunk: bool) -> Self {
+        Self {
+            bytes,
+            from_incoming_chunk,
+        }
+    }
 }
 
 /// Stack allocated "array" of at most 4 references to byte slices.
@@ -144,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn head_after_1_kb() {
+    fn ignore_head_after_1_kb() {
         let input = "A".repeat(1024) + "<head>def";
         let expected = input.clone() + "           ";
 
@@ -161,6 +181,13 @@ mod tests {
         );
 
         test_injector([input], &expected);
+    }
+
+    #[test]
+    fn padding_at_eof_if_no_injection_point() {
+        let input = ["a".repeat(1024), String::from("bb")];
+        let expected = input.join("") + "           ";
+        test_injector(input, &expected);
     }
 
     #[test]

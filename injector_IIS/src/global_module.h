@@ -47,6 +47,7 @@ public:
 struct RumConfig {
   int version;
   std::unordered_map<std::string, std::string> sdk_options;
+  LogLevel log_level = LogLevel::Info;
 };
 
 } // namespace datadog::rum

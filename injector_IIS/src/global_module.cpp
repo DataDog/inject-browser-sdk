@@ -42,7 +42,7 @@ make_snippet(const int version,
 
   rapidjson::Value rum(rapidjson::kObjectType);
   for (const auto &[key, value] : opts) {
-    if (key == "majorVersion") {
+    if (key == "majorVersion" || key == "logLevel") {
       continue;
     } else if (key == "sessionSampleRate" || key == "sessionReplaySampleRate") {
       rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
@@ -118,6 +118,14 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
     cfg_version = get_property_value(*version_prop).iVal;
   }
 
+  LogLevel cfg_log_level = LogLevel::Info;
+  auto log_level_prop = get_property(cfg_root_elem, L"logLevel");
+  if (log_level_prop != nullptr) {
+    const auto defer_log_level_prop = defer([&] { log_level_prop->Release(); });
+    int log_level_int = get_property_value(*log_level_prop).lVal;
+    cfg_log_level = static_cast<LogLevel>(log_level_int);
+  }
+
   // Iterate on the SDK configuration
   std::unordered_map<std::string, std::string> rum_sdk_opts;
 
@@ -165,7 +173,7 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
     }
   }
 
-  return RumConfig{cfg_version, std::move(rum_sdk_opts)};
+  return RumConfig{cfg_version, std::move(rum_sdk_opts), cfg_log_level};
 }
 
 void update_module_context(ModuleContext &ctx, IHttpServer &server,
@@ -177,19 +185,28 @@ void update_module_context(ModuleContext &ctx, IHttpServer &server,
     return;
   }
   const RumConfig &loaded_config = config_options_opt.value();
+
+  ctx.log_level = loaded_config.log_level;
+
+  logger->info(
+      std::format("Configuration loaded with log level: {}",
+                  logger->log_level_to_string(loaded_config.log_level)),
+      &ctx);
+
   Snippet *snippet =
       make_snippet(loaded_config.version, loaded_config.sdk_options);
 
   if (snippet == nullptr) {
-    logger->error("Failed to create RUM snippet");
+    logger->error("Failed to create RUM snippet", &ctx);
     return;
   } else if (snippet->error_code != 0) {
-    logger->error(std::format("Failed to create RUM snippet: {}",
-                              snippet->error_message));
+    logger->error(
+        std::format("Failed to create RUM snippet: {}", snippet->error_message),
+        &ctx);
     return;
   }
 
-  logger->info("Configuration validated");
+  logger->info("Configuration validated", &ctx);
   ctx.js_snippet = snippet;
 
   if (auto appIdIt = loaded_config.sdk_options.find("applicationId");

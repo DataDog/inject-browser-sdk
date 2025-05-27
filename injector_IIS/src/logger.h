@@ -13,11 +13,12 @@
 #include <datadog/logger.h>
 #include <format>
 #include <sstream>
-#include <winreg.h>
 
 namespace datadog::rum {
 
 enum class LogLevel { Error = 0, Info = 1, Debug = 2 };
+
+struct ModuleContext;
 
 // Logger using the Event Logging API
 // <https://learn.microsoft.com/en-us/windows/win32/eventlog/event-logging>
@@ -27,63 +28,12 @@ enum class LogLevel { Error = 0, Info = 1, Debug = 2 };
 class Logger : public datadog::tracing::Logger {
   HANDLE m_eventLog;
   std::ostringstream m_stream;
-  LogLevel m_logLevel;
 
-  LogLevel ReadLogLevelFromRegistry() const {
-    HKEY hKey;
-    LONG result =
-        RegOpenKeyEx(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Datadog\\Datadog RUM", 0,
-                     KEY_READ, &hKey);
-
-    if (result != ERROR_SUCCESS) {
-      return LogLevel::Info;
-    }
-
-    wchar_t buffer[32];
-    DWORD bufferSize = sizeof(buffer);
-    DWORD type;
-
-    result = RegQueryValueEx(hKey, L"LogLevel", nullptr, &type, (LPBYTE)buffer,
-                             &bufferSize);
-    RegCloseKey(hKey);
-
-    if (result != ERROR_SUCCESS || type != REG_SZ) {
-      return LogLevel::Info;
-    }
-
-    if (_wcsicmp(buffer, L"debug") == 0) {
-      return LogLevel::Debug;
-    } else if (_wcsicmp(buffer, L"info") == 0) {
-      return LogLevel::Info;
-    } else if (_wcsicmp(buffer, L"error") == 0) {
-      return LogLevel::Error;
-    }
-
-    return LogLevel::Info;
-  }
-
-  const char *LogLevelToString(LogLevel level) const {
-    switch (level) {
-    case LogLevel::Debug:
-      return "debug";
-    case LogLevel::Info:
-      return "info";
-    case LogLevel::Error:
-      return "error";
-    default:
-      return "info";
-    }
-  }
+  LogLevel get_log_level(const ModuleContext *ctx = nullptr) const;
 
 public:
   Logger() {
     m_eventLog = RegisterEventSource(NULL, L"Datadog-RUM-Instrumentation");
-    m_logLevel = ReadLogLevelFromRegistry();
-
-    report_event(
-        std::format("Datadog RUM Logger initialized with log level: {}",
-                    LogLevelToString(m_logLevel)),
-        EVENTLOG_INFORMATION_TYPE, INJECTOR_CATEGORY, MSG_GENERIC_INFO);
   }
 
   virtual ~Logger() {
@@ -93,23 +43,23 @@ public:
     }
   }
 
-  virtual void info(std::string message) {
-    if (m_logLevel < LogLevel::Info)
+  virtual void info(std::string message, const ModuleContext *ctx = nullptr) {
+    if (get_log_level(ctx) < LogLevel::Info)
       return;
 
     report_event(std::move(message), EVENTLOG_INFORMATION_TYPE,
                  INJECTOR_CATEGORY, MSG_GENERIC_INFO);
   }
 
-  virtual void debug(std::string message) {
-    if (m_logLevel < LogLevel::Debug)
+  virtual void debug(std::string message, const ModuleContext *ctx = nullptr) {
+    if (get_log_level(ctx) < LogLevel::Debug)
       return;
 
     report_event(std::move(message), EVENTLOG_INFORMATION_TYPE,
                  INJECTOR_CATEGORY, MSG_GENERIC_DEBUG);
   }
 
-  virtual void error(std::string message) {
+  virtual void error(std::string message, const ModuleContext *ctx = nullptr) {
     report_event(std::move(message), EVENTLOG_ERROR_TYPE, INJECTOR_CATEGORY,
                  MSG_GENERIC_ERROR);
   }
@@ -152,6 +102,19 @@ public:
   void log_error(datadog::tracing::StringView sv) override {
     report_event(std::string(sv), EVENTLOG_ERROR_TYPE, TRACER_CATEGORY,
                  MSG_GENERIC_ERROR);
+  }
+
+  const char *log_level_to_string(LogLevel level) const {
+    switch (level) {
+    case LogLevel::Debug:
+      return "debug";
+    case LogLevel::Info:
+      return "info";
+    case LogLevel::Error:
+      return "error";
+    default:
+      return "info";
+    }
   }
 };
 } // namespace datadog::rum

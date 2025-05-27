@@ -29,9 +29,9 @@ class HttpModuleTest : public testing::Test,
 class SilentLogger : public datadog::rum::Logger {
 public:
   SilentLogger() = default;
-  void info(std::string) override{};
-  void debug(std::string) override{};
-  void error(std::string) override{};
+  void info(std::string, const ModuleContext *ctx) override {};
+  void debug(std::string, const ModuleContext *ctx) override {};
+  void error(std::string, const ModuleContext *ctx) override {};
 };
 
 TEST_P(HttpModuleTest, ShouldAttemptInjection_ContentType) {

@@ -167,8 +167,7 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
 
   bool injected = false;
 
-  // Write the existing data chunks to the injector, and then write the
-  // resulting byte slices into our new response string
+  size_t newLength = 0;
   for (int i = 0; i < pResponseStruct->EntityChunkCount; i++) {
     HTTP_DATA_CHUNK &dataChunk = pResponseStruct->pEntityChunks[i];
     if (dataChunk.DataChunkType != HttpDataChunkFromMemory) {
@@ -178,40 +177,74 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
       injector_cleanup(injector);
       return RQ_NOTIFICATION_CONTINUE;
     }
+    newLength += dataChunk.FromMemory.BufferLength;
+  }
+  newLength += snippet->length;
+  void *newBuffer = pHttpContext.AllocateRequestMemory(newLength);
+  auto *offset = (uint8_t *)newBuffer;
 
+  for (int i = 0; i < pResponseStruct->EntityChunkCount; i++) {
+    HTTP_DATA_CHUNK &dataChunk = pResponseStruct->pEntityChunks[i];
     auto chunkLength = dataChunk.FromMemory.BufferLength;
 
     auto injectorResult = injector_write(
         injector, (uint8_t *)dataChunk.FromMemory.pBuffer, chunkLength);
+
+    for (size_t j = 0; j < injectorResult.slices_length; ++j) {
+      const auto &slice = injectorResult.slices[j];
+      memcpy(offset, slice.start, slice.length);
+      offset += slice.length;
+    }
+
     if (injectorResult.injected) {
-      const size_t bufferLength =
-          sizeof(uint8_t) * (chunkLength + snippet->length);
-      void *buffer = pHttpContext.AllocateRequestMemory(bufferLength);
-
-      auto *offset = (uint8_t *)buffer;
-      for (size_t i = 0; i < injectorResult.slices_length; ++i) {
-        const auto &slice = injectorResult.slices[i];
-        memcpy(offset, slice.start, slice.length);
-        offset += slice.length;
-      }
-
-      dataChunk.FromMemory.pBuffer = (PVOID)buffer;
-      dataChunk.FromMemory.BufferLength = bufferLength;
-
       injected = true;
-
-      HRESULT result =
-          pHttpResponse.SetHeader(k_injection_header.data(), "1", 1, TRUE);
-      if (result != S_OK) {
-        logger.error("Error setting injection header: " +
-                     std::system_category().message(result));
-        return RQ_NOTIFICATION_CONTINUE;
+      for (++i; i < pResponseStruct->EntityChunkCount; ++i) {
+        HTTP_DATA_CHUNK &nextDataChunk = pResponseStruct->pEntityChunks[i];
+        memcpy(offset, nextDataChunk.FromMemory.pBuffer, nextDataChunk.FromMemory.BufferLength);
+        offset += nextDataChunk.FromMemory.BufferLength;
       }
       break;
     }
   }
 
+  if (!injected) {
+    auto injectorEndResult = injector_end(injector);
+    injected = injectorEndResult.injected;
+
+    if (injectorEndResult.slices_length > 0) {
+      for (size_t i = 0; i < injectorEndResult.slices_length; ++i) {
+        const auto &slice = injectorEndResult.slices[i];
+        memcpy(offset, slice.start, slice.length);
+        offset += slice.length;
+      }
+    }
+  }
+
   if (injected) {
+    HTTP_DATA_CHUNK dataChunk;
+    dataChunk.DataChunkType = HttpDataChunkFromMemory;
+    dataChunk.FromMemory.pBuffer = newBuffer;
+    dataChunk.FromMemory.BufferLength = newLength;
+
+    pResponseStruct->EntityChunkCount = 0;
+
+    HRESULT hr = pHttpResponse.WriteEntityChunks(
+        &dataChunk,
+        1,
+        FALSE,
+        FALSE,
+        0,
+        NULL
+    );
+
+    HRESULT result =
+          pHttpResponse.SetHeader(k_injection_header.data(), "1", 1, TRUE);
+    if (result != S_OK) {
+      logger.error("Error setting injection header: " +
+                    std::system_category().message(result));
+      return RQ_NOTIFICATION_CONTINUE;
+    }
+
     datadog::telemetry::counter::increment(
         telemetry::injection_succeed,
         telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
@@ -223,7 +256,7 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
 
   injector_cleanup(injector);
 
-  logger.debug("Writing new response");
+  logger.debug("Writing new response, injected: " + std::to_string(injected));
 
   DWORD bytesSent;
   HRESULT result = pHttpResponse.Flush(FALSE, FALSE, &bytesSent);

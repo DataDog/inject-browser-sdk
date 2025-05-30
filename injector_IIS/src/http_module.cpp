@@ -140,6 +140,36 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
   return true;
 }
 
+bool write_slices_into_chunk(const InjectorResult &injectorResult,
+                             const Snippet *snippet, IHttpContext &pHttpContext,
+                             HTTP_DATA_CHUNK &dataChunk,
+                             IHttpResponse &pHttpResponse, Logger &logger) {
+
+  auto chunkLength = dataChunk.FromMemory.BufferLength;
+  const size_t bufferLength = sizeof(uint8_t) * (chunkLength + snippet->length);
+  void *buffer = pHttpContext.AllocateRequestMemory(bufferLength);
+  auto *offset = (uint8_t *)buffer;
+
+  for (size_t i = 0; i < injectorResult.slices_length; ++i) {
+    const auto &slice = injectorResult.slices[i];
+    memcpy(offset, slice.start, slice.length);
+    offset += slice.length;
+  }
+
+  dataChunk.FromMemory.pBuffer = (PVOID)buffer;
+  dataChunk.FromMemory.BufferLength = bufferLength;
+
+  HRESULT result =
+      pHttpResponse.SetHeader(k_injection_header.data(), "1", 1, TRUE);
+  if (result != S_OK) {
+    logger.error("Error setting injection header: " +
+                 std::system_category().message(result));
+    return false;
+  }
+
+  return true;
+}
+
 REQUEST_NOTIFICATION_STATUS
 HttpModule::PerformInjection(IHttpContext &pHttpContext,
                              IHttpResponse &pHttpResponse, ModuleContext &ctx) {
@@ -166,6 +196,7 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
   }
 
   bool injected = false;
+  std::string possible_failure_reason = "missing_head_tag";
 
   // Write the existing data chunks to the injector, and then write the
   // resulting byte slices into our new response string
@@ -184,30 +215,27 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
     auto injectorResult = injector_write(
         injector, (uint8_t *)dataChunk.FromMemory.pBuffer, chunkLength);
     if (injectorResult.injected) {
-      const size_t bufferLength =
-          sizeof(uint8_t) * (chunkLength + snippet->length);
-      void *buffer = pHttpContext.AllocateRequestMemory(bufferLength);
-
-      auto *offset = (uint8_t *)buffer;
-      for (size_t i = 0; i < injectorResult.slices_length; ++i) {
-        const auto &slice = injectorResult.slices[i];
-        memcpy(offset, slice.start, slice.length);
-        offset += slice.length;
-      }
-
-      dataChunk.FromMemory.pBuffer = (PVOID)buffer;
-      dataChunk.FromMemory.BufferLength = bufferLength;
-
       injected = true;
-
-      HRESULT result =
-          pHttpResponse.SetHeader(k_injection_header.data(), "1", 1, TRUE);
-      if (result != S_OK) {
-        logger.error("Error setting injection header: " +
-                     std::system_category().message(result));
+      if (!write_slices_into_chunk(injectorResult, snippet, pHttpContext,
+                                   dataChunk, pHttpResponse, logger)) {
         return RQ_NOTIFICATION_CONTINUE;
       }
       break;
+    }
+  }
+
+  if (!injected) {
+    auto injectorEndResult = injector_end(injector);
+    if (injectorEndResult.injected && pResponseStruct->EntityChunkCount == 1) {
+      injected = true;
+      HTTP_DATA_CHUNK &dataChunk = pResponseStruct->pEntityChunks[0];
+      if (!write_slices_into_chunk(injectorEndResult, snippet, pHttpContext,
+                                   dataChunk, pHttpResponse, logger)) {
+        return RQ_NOTIFICATION_CONTINUE;
+      }
+    } else if (injectorEndResult.injected &&
+               pResponseStruct->EntityChunkCount != 1) {
+      possible_failure_reason = "too_many_chunks";
     }
   }
 
@@ -218,7 +246,8 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
   } else {
     datadog::telemetry::counter::increment(
         telemetry::injection_failed,
-        telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
+        telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag,
+                              "reason:" + possible_failure_reason));
   }
 
   injector_cleanup(injector);

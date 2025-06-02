@@ -9,6 +9,7 @@
 #include "injectbrowsersdk.h"
 #include "module_context.h"
 #include "telemetry.h"
+#include <algorithm>
 #include <cassert>
 #include <datadog/tracer_config.h>
 #include <format>
@@ -42,7 +43,7 @@ make_snippet(const int version,
 
   rapidjson::Value rum(rapidjson::kObjectType);
   for (const auto &[key, value] : opts) {
-    if (key == "majorVersion" || key == "logLevel") {
+    if (key == "majorVersion") {
       continue;
     } else if (key == "sessionSampleRate" || key == "sessionReplaySampleRate") {
       rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
@@ -86,6 +87,39 @@ VARIANT get_property_value(IAppHostProperty &property) {
   return v;
 }
 
+std::optional<ServerConfig> read_server_conf(IHttpServer &server,
+                                             std::shared_ptr<Logger> logger) {
+  auto admin_manager = server.GetAdminManager();
+  IAppHostElement *cfg_root_elem;
+
+  if (admin_manager == nullptr) {
+    return ServerConfig{LogLevel::Info};
+  }
+
+  auto res = admin_manager->GetAdminSection(
+      (BSTR)L"system.applicationHost/datadogRumServer",
+      (BSTR)L"MACHINE/WEBROOT/APPHOST", &cfg_root_elem);
+
+  if (res != S_OK) {
+    return ServerConfig{LogLevel::Info};
+  }
+
+  const auto defer_root = defer([&] { cfg_root_elem->Release(); });
+
+  LogLevel log_level = LogLevel::Info;
+  auto log_level_prop = get_property(cfg_root_elem, L"logLevel");
+  if (log_level_prop != nullptr) {
+    const auto defer_log_level_prop = defer([&] { log_level_prop->Release(); });
+    int log_level_int = get_property_value(*log_level_prop).lVal;
+    if (log_level_int <= static_cast<int>(LogLevel::Debug) &&
+        log_level_int >= static_cast<int>(LogLevel::Error)) {
+      log_level = static_cast<LogLevel>(log_level_int);
+    }
+  }
+
+  return ServerConfig{log_level};
+}
+
 std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
   auto admin_manager = server.GetAdminManager();
   IAppHostElement *cfg_root_elem;
@@ -116,14 +150,6 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
   if (version_prop != nullptr) {
     const auto defer_version_prop = defer([&] { version_prop->Release(); });
     cfg_version = get_property_value(*version_prop).iVal;
-  }
-
-  LogLevel cfg_log_level = LogLevel::Info;
-  auto log_level_prop = get_property(cfg_root_elem, L"logLevel");
-  if (log_level_prop != nullptr) {
-    const auto defer_log_level_prop = defer([&] { log_level_prop->Release(); });
-    int log_level_int = get_property_value(*log_level_prop).lVal;
-    cfg_log_level = static_cast<LogLevel>(log_level_int);
   }
 
   // Iterate on the SDK configuration
@@ -173,7 +199,7 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
     }
   }
 
-  return RumConfig{cfg_version, std::move(rum_sdk_opts), cfg_log_level};
+  return RumConfig{cfg_version, std::move(rum_sdk_opts)};
 }
 
 void update_module_context(ModuleContext &ctx, IHttpServer &server,
@@ -185,28 +211,19 @@ void update_module_context(ModuleContext &ctx, IHttpServer &server,
     return;
   }
   const RumConfig &loaded_config = config_options_opt.value();
-
-  ctx.log_level = loaded_config.log_level;
-
-  logger->info(
-      std::format("Configuration loaded with log level: {}",
-                  logger->log_level_to_string(loaded_config.log_level)),
-      &ctx);
-
   Snippet *snippet =
       make_snippet(loaded_config.version, loaded_config.sdk_options);
 
   if (snippet == nullptr) {
-    logger->error("Failed to create RUM snippet", &ctx);
+    logger->error("Failed to create RUM snippet");
     return;
   } else if (snippet->error_code != 0) {
-    logger->error(
-        std::format("Failed to create RUM snippet: {}", snippet->error_message),
-        &ctx);
+    logger->error(std::format("Failed to create RUM snippet: {}",
+                              snippet->error_message));
     return;
   }
 
-  logger->info("Configuration validated", &ctx);
+  logger->info("Configuration validated");
   ctx.js_snippet = snippet;
 
   if (auto appIdIt = loaded_config.sdk_options.find("applicationId");
@@ -223,6 +240,8 @@ GlobalModule::GlobalModule(IHttpServer *server, DWORD server_version,
                            std::shared_ptr<Logger> logger)
     : server_(server), logger_(std::move(logger)) {
   assert(server_ != nullptr);
+
+  update_server_log_level();
 
   // TODO(@dmehala): Add `rum` product in `app-started` event.
   datadog::telemetry::Configuration cfg;
@@ -258,6 +277,13 @@ GlobalModule::GlobalModule(IHttpServer *server, DWORD server_version,
 
     datadog::telemetry::init(*maybe_telemetry_cfg, logger_, dac.http_client,
                              dac.event_scheduler, dac.url, clock);
+  }
+}
+
+void GlobalModule::update_server_log_level() {
+  auto server_config = read_server_conf(*server_, logger_);
+  if (server_config.has_value()) {
+    logger_->set_log_level(server_config->log_level);
   }
 }
 
@@ -313,6 +339,12 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
 
   logger_->info(std::format("Dispatching configuration update (\"{}\")",
                             wstring_to_utf8(cfg_path)));
+
+  std::wstring_view change_path_view(cfg_path);
+  if (change_path_view.find(L"MACHINE/WEBROOT/APPHOST") !=
+      std::wstring_view::npos) {
+    update_server_log_level();
+  }
 
   // NOTE(@dmehala): There's a mismatch between the config path given in
   // `OnGlobalApplicationStart` and the one here. This path is the common parent

@@ -24,7 +24,6 @@ struct ModuleContext final : public IHttpStoredContext {
   Logger *logger = nullptr;
   std::string application_id_tag;
   std::string remote_config_tag;
-  LogLevel log_level = LogLevel::Info;
 
   void CleanupStoredContext() override {
     if (js_snippet != nullptr) {

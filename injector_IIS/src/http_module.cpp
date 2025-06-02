@@ -51,7 +51,7 @@ HttpModule::OnBeginRequest(IN IHttpContext *http_context,
 
   auto &ctx = *static_cast<ModuleContext *>(opaque_ptr);
   if (ctx.js_snippet == nullptr) {
-    ctx.logger->debug("Skipping RUM injection: disabled", &ctx);
+    ctx.logger->debug("Skipping RUM injection: disabled");
     return RQ_NOTIFICATION_CONTINUE;
   }
 
@@ -60,8 +60,7 @@ HttpModule::OnBeginRequest(IN IHttpContext *http_context,
   if (result != S_OK) {
     event_provider->SetErrorStatus(result);
     ctx.logger->error("Error setting request header: " +
-                          std::system_category().message(result),
-                      &ctx);
+                      std::system_category().message(result));
   }
 
   return RQ_NOTIFICATION_CONTINUE;
@@ -87,7 +86,7 @@ HttpModule::OnSendResponse(IN IHttpContext *http_context,
 
   auto &ctx = *static_cast<ModuleContext *>(opaque_ptr);
   if (ctx.js_snippet == nullptr) {
-    ctx.logger->debug("Skipping RUM injection: disabled", &ctx);
+    ctx.logger->debug("Skipping RUM injection: disabled");
     return RQ_NOTIFICATION_CONTINUE;
   }
 
@@ -112,8 +111,7 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
         telemetry::injection_skipped,
         telemetry::build_tags("reason:content-type", ctx.application_id_tag,
                               ctx.remote_config_tag));
-    ctx.logger->debug("Skipping RUM injection: content type is not text/html",
-                      &ctx);
+    ctx.logger->debug("Skipping RUM injection: content type is not text/html ");
     return false;
   }
 
@@ -123,8 +121,7 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
   // only inject if response code is 2xx, 4xx, 5xx
   if (statusCode < 200 || (statusCode >= 300 && statusCode < 400)) {
     ctx.logger->debug(
-        std::format("Skipping RUM injection: return code {}", statusCode),
-        &ctx);
+        std::format("Skipping RUM injection: return code {}", statusCode));
     return false;
   }
 
@@ -136,8 +133,7 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
         telemetry::build_tags("reason:already_injected", ctx.application_id_tag,
                               ctx.remote_config_tag));
     ctx.logger->debug("Skipping RUM injection: injection has "
-                      "already been attempted on this response",
-                      &ctx);
+                      "already been attempted on this response");
     return false;
   }
 
@@ -154,18 +150,18 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
 
   HTTP_RESPONSE *pResponseStruct = pHttpResponse.GetRawHttpResponse();
   if (pResponseStruct == nullptr) {
-    logger.debug("Raw HTTP response was null", &ctx);
+    logger.debug("Raw HTTP response was null");
     return RQ_NOTIFICATION_CONTINUE;
   }
 
   if (pResponseStruct->EntityChunkCount <= 0) {
-    logger.debug("Raw HTTP response does not contain any data", &ctx);
+    logger.debug("Raw HTTP response does not contain any data");
     return RQ_NOTIFICATION_CONTINUE;
   }
 
   Injector *injector = injector_create(snippet);
   if (injector == nullptr) {
-    logger.error("Error creating injector", &ctx);
+    logger.error("Error creating injector");
     return RQ_NOTIFICATION_CONTINUE;
   }
 
@@ -178,8 +174,7 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
     if (dataChunk.DataChunkType != HttpDataChunkFromMemory) {
       logger.debug(
           "Skipping response which is not in memory: response type = " +
-              std::to_string(dataChunk.DataChunkType),
-          &ctx);
+          std::to_string(dataChunk.DataChunkType));
       injector_cleanup(injector);
       return RQ_NOTIFICATION_CONTINUE;
     }
@@ -209,8 +204,7 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
           pHttpResponse.SetHeader(k_injection_header.data(), "1", 1, TRUE);
       if (result != S_OK) {
         logger.error("Error setting injection header: " +
-                         std::system_category().message(result),
-                     &ctx);
+                     std::system_category().message(result));
         return RQ_NOTIFICATION_CONTINUE;
       }
       break;
@@ -229,14 +223,13 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
 
   injector_cleanup(injector);
 
-  logger.debug("Writing new response", &ctx);
+  logger.debug("Writing new response");
 
   DWORD bytesSent;
   HRESULT result = pHttpResponse.Flush(FALSE, FALSE, &bytesSent);
   if (FAILED(result)) {
     logger.debug("Error while flushing response: " +
-                     std::system_category().message(result),
-                 &ctx);
+                 std::system_category().message(result));
   }
 
   return RQ_NOTIFICATION_FINISH_REQUEST;

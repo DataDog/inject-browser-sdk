@@ -146,7 +146,6 @@ target_sources(iis_injector-objects
     src/http_module.cpp
     src/module_context.cpp
     src/telemetry.cpp
-    src/logger.cpp
     src/ruminjector.rc
     ${CMAKE_BINARY_DIR}/generated/version.cpp
 )

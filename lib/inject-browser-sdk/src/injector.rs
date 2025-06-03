@@ -57,6 +57,18 @@ impl<'snippet> Injector<'snippet> {
             return self.try_inject(Some(chunk), false);
         }
 
+        // If buffer is empty and chunk is smaller than limit, try injection first
+        if self.buffer.is_empty() && chunk.len() < DOCUMENT_CHARSET_SCAN_LIMIT {
+            if let Some(point) = InjectionPointLocator::find(chunk) {
+                self.injector_state = InjectorState::SnippetInjected;
+                return self.create_result(&[
+                    BytesSlice::new(&chunk[..point], true),
+                    BytesSlice::new(self.snippet, false),
+                    BytesSlice::new(&chunk[point..], true),
+                ]);
+            }
+        }
+
         self.buffer.extend_from_slice(chunk);
 
         if self.buffer.len() >= DOCUMENT_CHARSET_SCAN_LIMIT {

@@ -64,7 +64,7 @@
 			DllEntry="WixQuietExec64"
 			Execute="deferred"
 			Return="check"
-			Impersonate="yes" />
+			Impersonate="no" />
 
 		<CustomAction Id="RunMigrationScript_Cmd"
 			Property="RunMigrationScript"
@@ -358,6 +358,12 @@
                         File='[InetsrvDir]config\applicationHost.config' Node='element'
                         ElementPath="/configuration/configSections/sectionGroup[\[]@name='system.applicationHost'[\]]" Sequence='104'
                         VerifyPath="/configuration/configSections/sectionGroup[\[]@name='system.applicationHost'[\]]/section[\[]@name='datadogRumServer'[\]]" />
+
+		  <!-- Remove the actual datadogRumServer configuration element -->
+		  <util:XmlConfig Id='DatadogRumServerElementRemove' On='uninstall' Action='delete'
+						  File='[InetsrvDir]config\applicationHost.config' Node='element'
+						  ElementPath="/configuration/system.applicationHost" Sequence='105'
+						  VerifyPath="/configuration/system.applicationHost/datadogRumServer" />
       </Component>
 		</Fragment>
 </Wix>

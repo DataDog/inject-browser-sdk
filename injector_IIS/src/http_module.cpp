@@ -125,6 +125,16 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
     return false;
   }
 
+  // Check if content is compressed, skip injection if Content-Encoding header exists
+  if (!get_header(pHttpResponse, "Content-Encoding").empty()) {
+    datadog::telemetry::counter::increment(
+        telemetry::injection_skipped,
+        telemetry::build_tags("reason:compressed_html", ctx.application_id_tag,
+                              ctx.remote_config_tag));
+    ctx.logger->debug("Skipping RUM injection: content is compressed");
+    return false;
+  }
+
   // We must also validate that another injector in this environment hasn't
   // previously attempted injection into this response
   if (!get_header(pHttpResponse, k_injection_header).empty()) {

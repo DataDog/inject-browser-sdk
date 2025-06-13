@@ -89,19 +89,20 @@ VARIANT get_property_value(IAppHostProperty &property) {
 
 std::optional<ServerConfig> read_server_conf(IHttpServer &server,
                                              std::shared_ptr<Logger> logger) {
+  ServerConfig default_config{LogLevel::Info};
   auto admin_manager = server.GetAdminManager();
-  IAppHostElement *cfg_root_elem;
 
   if (admin_manager == nullptr) {
-    return ServerConfig{LogLevel::Info};
+    return default_config;
   }
 
+  IAppHostElement *cfg_root_elem;
   auto res = admin_manager->GetAdminSection(
       (BSTR)L"system.applicationHost/datadogRumServer",
       (BSTR)L"MACHINE/WEBROOT/APPHOST", &cfg_root_elem);
 
   if (res != S_OK) {
-    return ServerConfig{LogLevel::Info};
+    return default_config;
   }
 
   const auto defer_root = defer([&] { cfg_root_elem->Release(); });

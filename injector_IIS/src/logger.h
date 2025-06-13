@@ -44,7 +44,7 @@ public:
 
   void set_log_level(LogLevel level) { m_logLevel = level; }
 
-  bool should_log(LogLevel level) const {
+  inline bool should_log(LogLevel level) const {
     return static_cast<int>(level) <= static_cast<int>(m_logLevel);
   }
 

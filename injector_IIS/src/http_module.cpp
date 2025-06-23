@@ -226,13 +226,10 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
         telemetry::injection_succeed,
         telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
   } else {
-    auto content_encoding = get_header(pHttpResponse, "Content-Encoding");
-    auto tags = content_encoding.empty()
-                    ? telemetry::build_tags(ctx.application_id_tag,
-                                            ctx.remote_config_tag)
-                    : telemetry::build_tags(
-                          ctx.application_id_tag, ctx.remote_config_tag,
-                          "content_encoding:" + std::string(content_encoding));
+    auto tags = telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag);
+    if (auto content_encoding = get_header(pHttpResponse, "Content-Encoding"); !content_encoding.empty()) {
+    tags.emplace_back("content_encoding:" + std::string(content_encoding));
+    }
 
     datadog::telemetry::counter::increment(telemetry::injection_failed, tags);
   }

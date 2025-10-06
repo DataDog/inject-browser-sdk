@@ -25,3 +25,4 @@ build-out/
 
 # Installer
 installer/proxy-configurator
+/.envrc.local

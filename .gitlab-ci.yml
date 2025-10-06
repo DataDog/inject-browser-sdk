@@ -1,4 +1,6 @@
 include:
+  - local: .adms/go/gitlab.yaml
+  - local: .adms/python/gitlab.yaml
   - local: .gitlab/iis.yml
   - local: .gitlab/java.yml
   - local: .gitlab/installer.yml
@@ -7,4 +9,3 @@ stages:
   - build
   - test
   - release
-

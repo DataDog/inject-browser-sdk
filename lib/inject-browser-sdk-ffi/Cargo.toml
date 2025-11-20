@@ -29,13 +29,3 @@ rand = "0.8.5"
 [build-dependencies]
 cbindgen = "0.26.0"
 csbindgen = "1.8.0"
-
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
-codegen-units = 1
-debug = "line-tables-only"
-lto = true
-opt-level = "s"  # Size optimization

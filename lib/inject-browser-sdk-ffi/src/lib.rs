@@ -77,8 +77,69 @@
 //!
 //!
 
-#![warn(missing_docs)]
 #![allow(deprecated)] // allow internal usage of deprecated things
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+#[global_allocator]
+static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
+
+#[cfg(all(not(feature = "std"), not(target_arch = "wasm32")))]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    unsafe {
+        let _ = rustix::io::write(
+            rustix::stdio::stderr(),
+            alloc::format!("Panic: {}\n", info).as_bytes(),
+        );
+    }
+    loop {}
+}
+
+#[cfg(all(not(feature = "std"), target_arch = "wasm32"))]
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
+
+#[cfg(all(not(feature = "std"), target_arch = "wasm32"))]
+#[no_mangle]
+pub extern "C" fn malloc(size: usize) -> *mut u8 {
+    let layout = unsafe { alloc::alloc::Layout::from_size_align_unchecked(size + 8, 8) };
+    let ptr = unsafe { alloc::alloc::alloc(layout) };
+    if ptr.is_null() {
+        return ptr;
+    }
+    unsafe {
+        // Store the size at the beginning
+        *(ptr as *mut usize) = size;
+        ptr.add(8)
+    }
+}
+
+#[cfg(all(not(feature = "std"), target_arch = "wasm32"))]
+#[no_mangle]
+pub extern "C" fn free(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let real_ptr = ptr.sub(8);
+        let size = *(real_ptr as *const usize);
+        let layout = alloc::alloc::Layout::from_size_align_unchecked(size + 8, 8);
+        alloc::alloc::dealloc(real_ptr, layout);
+    }
+}
+
+#[cfg(all(not(feature = "std"), not(test)))]
+#[no_mangle]
+pub extern "C" fn rust_eh_personality() {}
+
+#[cfg(test)]
+extern crate std;
+
 mod injector;
 mod snippet;
 

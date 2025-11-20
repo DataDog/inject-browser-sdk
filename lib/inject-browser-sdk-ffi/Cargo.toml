@@ -7,12 +7,20 @@ rust-version.workspace = true
 
 [lib]
 name="inject_browser_sdk_ffi"
-crate-type = ["staticlib", "lib"]
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[features]
+default = ["std"]
+std = ["inject-browser-sdk/std", "serde/std", "serde_json/std"]
+alloc = ["inject-browser-sdk/alloc", "serde/alloc", "serde_json/alloc"]
 
 [dependencies]
-inject-browser-sdk = { path = "../inject-browser-sdk" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+inject-browser-sdk = { path = "../inject-browser-sdk", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+dlmalloc = { version = "0.2", features = ["global"]  }
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rustix = { version = "0.38", default-features = false, features = ["mm", "stdio"] }
 
 [dev-dependencies]
 pretty_assertions = { version = "1.4.0", features = ["unstable"] }
@@ -21,3 +29,13 @@ rand = "0.8.5"
 [build-dependencies]
 cbindgen = "0.26.0"
 csbindgen = "1.8.0"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+debug = "line-tables-only"
+lto = true
+opt-level = "s"  # Size optimization

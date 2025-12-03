@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "lib/inject-browser-sdk",
   "lib/inject-browser-sdk-ffi",
+  "lib/inject-browser-sdk-wasm",
   "fuzz",
   "cmd/check_conf",
 ]

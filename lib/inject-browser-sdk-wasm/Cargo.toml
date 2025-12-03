@@ -1,0 +1,18 @@
+[package]
+name = "inject-browser-sdk-wasm"
+description = "WASM bindings for inject-browser-sdk (wazero compatible)"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "inject_browser_sdk_wasm"
+crate-type = ["cdylib"]
+
+[dependencies]
+inject-browser-sdk = { path = "../inject-browser-sdk" }
+serde_json = "1.0"
+
+[dev-dependencies]
+pretty_assertions = { version = "1.4.0", features = ["unstable"] }
+

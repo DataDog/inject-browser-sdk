@@ -130,6 +130,7 @@ pub fn validate_configuration(conf: &Configuration) -> Result<(), Error> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use alloc::vec;
     use pretty_assertions::assert_eq;
 
     #[test]

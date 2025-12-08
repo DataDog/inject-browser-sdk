@@ -89,6 +89,7 @@ fn format_cdn_url(major_version: u32, site: &str) -> Result<String, Error> {
 mod tests {
     use super::*;
     use crate::{configuration::PrivacyLevel, configuration::RumConfiguration};
+    use alloc::boxed::Box;
     use alloc::collections::BTreeMap;
     use pretty_assertions::assert_eq;
     use serde_json::json;

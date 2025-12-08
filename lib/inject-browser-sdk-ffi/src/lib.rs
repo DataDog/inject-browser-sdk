@@ -84,7 +84,7 @@ extern crate alloc;
 
 #[cfg(not(feature = "std"))]
 mod no_std_support {
-    #[cfg(target_os = "linux")] 
+    #[cfg(target_os = "linux")]
     #[global_allocator]
     static ALLOC: rustix_dlmalloc::GlobalDlmalloc = rustix_dlmalloc::GlobalDlmalloc;
 

@@ -8,7 +8,6 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-
 use crate::{configuration::validate_configuration, configuration::Configuration, error::Error};
 
 /// Generates the Datadog RUM SDK JavaScript snippet based on the provided configuration.

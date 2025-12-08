@@ -110,7 +110,6 @@ mod no_std_support {
     pub extern "C" fn rust_eh_personality() {}
 }
 
-
 mod injector;
 mod snippet;
 

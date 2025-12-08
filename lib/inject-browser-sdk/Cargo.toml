@@ -8,8 +8,6 @@ rust-version.workspace = true
 [features]
 default = []
 std = ["serde/std", "serde_json/std"]
-alloc = ["serde/alloc", "serde_json/alloc"]
-libc = []
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }

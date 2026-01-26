@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [lib]
 name="inject_browser_sdk_ffi"
-crate-type = ["staticlib", "cdylib", "lib"]
+crate-type = ["staticlib", "lib"]
 
 [features]
 # a single workspace run/bin can only use one set of features for its dependencies

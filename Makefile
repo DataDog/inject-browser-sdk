@@ -37,8 +37,4 @@ artifacts:
 
 .PHONY: artifacts-all
 artifacts-all:
-	docker buildx bake all
-
-.PHONY: symbols
-symbols:
-	docker buildx bake symbols
+	docker buildx bake artifacts-all

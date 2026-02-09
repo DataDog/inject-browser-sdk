@@ -9,21 +9,13 @@ cmake_minimum_required(VERSION 3.22)
 # Only declare a project when built standalone (not via FetchContent)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   project(InjectBrowserSDK LANGUAGES C CXX)
-endif()
 
-# ---------------------------------------------------------------------------
-# Rust toolchain check
-# ---------------------------------------------------------------------------
-find_program(_INJECT_SDK_CARGO cargo)
-if(NOT _INJECT_SDK_CARGO)
-  if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    message(WARNING "inject-browser-sdk: cargo not found, skipping (install Rust: https://rustup.rs)")
-    return()
-  else()
-    message(FATAL_ERROR "inject-browser-sdk: cargo not found. Install Rust: https://rustup.rs")
-  endif()
+  # Emit a minimal C++ compilation unit so that build-tracing tools
+  # (e.g. CodeQL autobuild) see at least one C++ compiler invocation.
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/_empty.cpp" "")
+  add_library(_inject_browser_sdk_probe STATIC
+              "${CMAKE_CURRENT_BINARY_DIR}/_empty.cpp")
 endif()
-unset(_INJECT_SDK_CARGO)
 
 # ---------------------------------------------------------------------------
 # Options

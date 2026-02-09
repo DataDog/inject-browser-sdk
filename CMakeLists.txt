@@ -12,6 +12,20 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 # ---------------------------------------------------------------------------
+# Rust toolchain check
+# ---------------------------------------------------------------------------
+find_program(_INJECT_SDK_CARGO cargo)
+if(NOT _INJECT_SDK_CARGO)
+  if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    message(WARNING "inject-browser-sdk: cargo not found, skipping (install Rust: https://rustup.rs)")
+    return()
+  else()
+    message(FATAL_ERROR "inject-browser-sdk: cargo not found. Install Rust: https://rustup.rs")
+  endif()
+endif()
+unset(_INJECT_SDK_CARGO)
+
+# ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
 set(INJECT_BROWSER_SDK_CORROSION_VERSION "v0.5"

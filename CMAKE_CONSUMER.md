@@ -3,7 +3,7 @@
 Consume `inject-browser-sdk-ffi` from your CMake project via `FetchContent`.
 The FFI crate is built in **no_std** mode by default.
 
-**Requires:** CMake 3.24+, Rust toolchain, `cbindgen`
+**Requires:** CMake 3.22+, Rust toolchain, `cbindgen`
 
 ## Usage
 

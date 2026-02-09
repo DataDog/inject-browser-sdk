@@ -10,10 +10,9 @@ name="inject_browser_sdk_ffi"
 crate-type = ["staticlib", "cdylib", "lib"]
 
 [features]
-# a single workspace run/bin can only use one set of features for its dependencies
-# for now to make the `fuzz` project work correctly we need to set std feature the default
+# Cargo default is std so that `cargo test` and fuzz work (test harness needs std).
+# Bazel builds override this via crate_features in BUILD.bazel.
 default = ["std"]
-# default = []
 std = ["inject-browser-sdk/std", "serde/std", "serde_json/std"]
 
 [dependencies]

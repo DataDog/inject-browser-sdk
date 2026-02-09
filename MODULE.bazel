@@ -1,0 +1,59 @@
+module(name = "inject-browser-sdk", version = "0.1.0")
+
+bazel_dep(name = "rules_rust", version = "0.68.1")
+
+# Rust toolchain — MSRV is 1.73.0, but serde 1.0.215 requires 1.74.0+ (Saturating<T>)
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(edition = "2021", versions = ["1.85.0"])
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
+# Dependency management via crate_universe.
+#
+# We use from_specs (not from_cargo) so that feature resolution is independent
+# of the Cargo workspace. The Cargo workspace includes cmd/* and fuzz members
+# whose serde/serde_json deps pull in "std" via workspace feature unification,
+# which would conflict with the no_std panic handler in the FFI crate.
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_specs(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+)
+
+# -- lib dependencies (no_std: alloc only, no std feature) --
+crate.spec(
+    package = "serde",
+    default_features = False,
+    features = ["derive", "alloc"],
+    version = "1.0",
+)
+crate.spec(
+    package = "serde_json",
+    default_features = False,
+    features = ["alloc"],
+    version = "1.0",
+)
+crate.spec(
+    package = "rustix",
+    default_features = False,
+    features = ["mm", "stdio"],
+    version = "0.38",
+)
+crate.spec(
+    package = "dlmalloc",
+    features = ["global"],
+    version = "0.2",
+)
+
+# -- dev/test dependencies --
+crate.spec(
+    package = "pretty_assertions",
+    features = ["unstable"],
+    version = "1.4",
+)
+crate.spec(
+    package = "rand",
+    version = "0.8",
+)
+
+use_repo(crate, "crates")

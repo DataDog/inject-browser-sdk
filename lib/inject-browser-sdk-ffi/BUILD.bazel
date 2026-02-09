@@ -1,0 +1,58 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_shared_library", "rust_static_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+_COMMON_SRCS = glob(["src/**/*.rs"])
+
+_COMMON_DEPS = [
+    "//lib/inject-browser-sdk",
+    "@crates//:serde",
+    "@crates//:serde_json",
+    "@crates//:rustix",
+    "@crates//:dlmalloc",
+]
+
+# no_std requires panic=abort (matches Cargo profile; no unwinding runtime)
+_NOSTD_RUSTC_FLAGS = ["-Cpanic=abort"]
+
+# rlib for Rust consumers (no_std)
+rust_library(
+    name = "inject-browser-sdk-ffi",
+    srcs = _COMMON_SRCS,
+    crate_features = [],
+    crate_name = "inject_browser_sdk_ffi",
+    deps = _COMMON_DEPS,
+    rustc_flags = _NOSTD_RUSTC_FLAGS,
+)
+
+# .a / .lib for C consumers (no_std)
+rust_static_library(
+    name = "inject_browser_sdk_ffi_static",
+    srcs = _COMMON_SRCS,
+    crate_features = [],
+    crate_name = "inject_browser_sdk_ffi",
+    deps = _COMMON_DEPS,
+    rustc_flags = _NOSTD_RUSTC_FLAGS,
+)
+
+# .so / .dylib / .dll for C consumers (no_std)
+rust_shared_library(
+    name = "inject_browser_sdk_ffi_shared",
+    srcs = _COMMON_SRCS,
+    crate_features = [],
+    crate_name = "inject_browser_sdk_ffi",
+    deps = _COMMON_DEPS,
+    rustc_flags = _NOSTD_RUSTC_FLAGS,
+)
+
+rust_test(
+    name = "inject-browser-sdk-ffi-test",
+    crate = ":inject-browser-sdk-ffi",
+    crate_features = ["std"],  # test harness requires std; gates out no_std panic handler
+    deps = [
+        "@crates//:pretty_assertions",
+        "@crates//:rand",
+    ],
+)

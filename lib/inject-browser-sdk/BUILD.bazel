@@ -1,0 +1,25 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "inject-browser-sdk",
+    srcs = glob(["src/**/*.rs"]),
+    crate_features = [],  # no_std (matches Cargo default = [])
+    crate_name = "inject_browser_sdk",
+    deps = [
+        "@crates//:serde",
+        "@crates//:serde_json",
+    ],
+)
+
+rust_test(
+    name = "inject-browser-sdk-test",
+    crate = ":inject-browser-sdk",
+    deps = [
+        "@crates//:pretty_assertions",
+        "@crates//:rand",
+    ],
+)

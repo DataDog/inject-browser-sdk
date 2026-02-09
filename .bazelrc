@@ -1,0 +1,8 @@
+common --enable_platform_specific_config
+common --lockfile_mode=off
+
+build --incompatible_disallow_empty_glob=true
+build --nobuild_runfile_links
+build --nolegacy_external_runfiles
+
+try-import %workspace%/user.bazelrc

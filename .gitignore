@@ -25,3 +25,8 @@ build-out/
 
 # Installer
 installer/proxy-configurator
+
+# Bazel
+/bazel-*
+MODULE.bazel.lock
+user.bazelrc

@@ -1,13 +1,15 @@
 ---
 .cmake_test_base:
-  image: registry.ddbuild.io/images/mirror/rust:1.73-slim-bookworm
+  image: registry.ddbuild.io/images/mirror/ubuntu:22.04
   tags: ["arch:amd64"]
   needs: []
   before_script:
-    - apt-get update && apt-get install -y --no-install-recommends cmake g++ git curl
-    - cargo install --locked cbindgen --version 0.26.0
+    - apt-get update && apt-get install -y --no-install-recommends build-essential cmake git curl ca-certificates
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.73.0
+    - . "$HOME/.cargo/env"
     - rustup toolchain install nightly
     - rustup component add rust-src --toolchain nightly
+    - cargo install --locked cbindgen --version 0.26.0
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
@@ -17,6 +19,8 @@
         - lib/**/*
         - Cargo.toml
         - Cargo.lock
+        - .gitlab/cmake.yml
+        - ci/cmake-consumer-test/**
 
 ########################################
 # Standalone build — cmake from repo root

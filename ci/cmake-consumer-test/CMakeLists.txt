@@ -9,7 +9,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(InjectBrowserSDK)
 
-add_executable(consumer_test main.c)
+add_executable(consumer_test main.cpp)
 target_link_libraries(consumer_test PRIVATE inject_browser_sdk_ffi)
 
 option(ENABLE_ASAN "Build with AddressSanitizer" OFF)

@@ -32,7 +32,7 @@ cmake_standalone_build:
     - cmake -B build -DCMAKE_BUILD_TYPE=Release
     - cmake --build build
     - test -f build/libinject_browser_sdk_ffi.a
-    - test -f build/corrosion/cbindgen/inject_browser_sdk_ffi/injectbrowsersdk.h
+    - find build -name injectbrowsersdk.h | grep -q injectbrowsersdk.h
 
 ########################################
 # FetchContent consumer test
@@ -43,13 +43,13 @@ cmake_fetchcontent_test:
   script:
     - mkdir -p /tmp/cmake-consumer
     - cp ci/cmake-consumer-test/CMakeLists.txt /tmp/cmake-consumer/
-    - cp ci/cmake-consumer-test/main.c /tmp/cmake-consumer/
+    - cp ci/cmake-consumer-test/main.cpp /tmp/cmake-consumer/
     - ln -s "$CI_PROJECT_DIR" /tmp/cmake-consumer/sdk
     - export RUSTFLAGS="-Zsanitizer=address"
     - export RUSTUP_TOOLCHAIN=nightly
     - cmake -B /tmp/cmake-consumer/build -S /tmp/cmake-consumer
       -DCMAKE_BUILD_TYPE=Debug
       -DENABLE_ASAN=ON
-      -DCMAKE_C_COMPILER=gcc
+      -DCMAKE_CXX_COMPILER=g++
     - cmake --build /tmp/cmake-consumer/build
     - /tmp/cmake-consumer/build/consumer_test

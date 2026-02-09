@@ -6,6 +6,8 @@
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends cmake g++ git curl
     - cargo install --locked cbindgen --version 0.26.0
+    - rustup toolchain install nightly
+    - rustup component add rust-src --toolchain nightly
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
@@ -39,6 +41,11 @@ cmake_fetchcontent_test:
     - cp ci/cmake-consumer-test/CMakeLists.txt /tmp/cmake-consumer/
     - cp ci/cmake-consumer-test/main.c /tmp/cmake-consumer/
     - ln -s "$CI_PROJECT_DIR" /tmp/cmake-consumer/sdk
-    - cmake -B /tmp/cmake-consumer/build -S /tmp/cmake-consumer -DCMAKE_BUILD_TYPE=Release
+    - export RUSTFLAGS="-Zsanitizer=address"
+    - export RUSTUP_TOOLCHAIN=nightly
+    - cmake -B /tmp/cmake-consumer/build -S /tmp/cmake-consumer
+      -DCMAKE_BUILD_TYPE=Debug
+      -DENABLE_ASAN=ON
+      -DCMAKE_C_COMPILER=gcc
     - cmake --build /tmp/cmake-consumer/build
     - /tmp/cmake-consumer/build/consumer_test

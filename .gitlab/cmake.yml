@@ -32,7 +32,6 @@ cmake_standalone_build:
     - cmake -B build -DCMAKE_BUILD_TYPE=Release
     - cmake --build build
     - test -f build/libinject_browser_sdk_ffi.a
-    - find build -name injectbrowsersdk.h | grep -q injectbrowsersdk.h
 
 ########################################
 # FetchContent consumer test

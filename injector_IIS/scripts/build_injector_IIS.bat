@@ -1,5 +1,11 @@
 if not exist c:\mnt\ goto nomntdir
 
+:: Authenticate with CI Identities if enabled
+if defined USE_WINDOWS_CODE_SIGNER (
+    echo Authenticating with CI Identities...
+    ci-identities-gitlab-job-client.exe assume-role || exit /b 1
+)
+
 :: Windows runners get re-used between jobs, so we must make sure to run our builds in a temporary location
 mkdir \build
 cd \build || exit /b 2

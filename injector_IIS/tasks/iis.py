@@ -151,7 +151,16 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
 
 
 def sign_binary(ctx, path):
-    if os.environ.get("SIGN_WINDOWS_DD_WCS", False):
-        print("Signing {}\n".format(path))
+    use_new_signer = os.environ.get("USE_WINDOWS_CODE_SIGNER", False)
+    use_legacy_signer = os.environ.get("SIGN_WINDOWS_DD_WCS", False)
+
+    if use_new_signer:
+        print("Signing {} with windows-code-signer\n".format(path))
+        # The windows-code-signer executable is copied to the build directory from ci-tools
+        signer_path = os.path.join("c:\\mnt", "ci-tools", "windows-code-signer.exe")
+        cmd = f'"{signer_path}" sign "{path}"'
+        ctx.run(cmd, hide=False, pty=False)
+    elif use_legacy_signer:
+        print("Signing {} with dd-wcs\n".format(path))
         cmd = f"dd-wcs sign --replace-signature {path}"
         ctx.run(cmd, hide=False, pty=False)

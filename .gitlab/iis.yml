@@ -2,7 +2,7 @@
 variables:
   WINDOWS_BUILD_IMAGE: datadog-agent-buildimages/windows_ltsc2022_x64
   CI_IMAGE_WIN_LTSC2022_X64_SUFFIX: ""
-  CI_IMAGE_WIN_LTSC2022_X64: v47979770-a5a4cfd0
+  CI_IMAGE_WIN_LTSC2022_X64: v94236382-f3eb3132
   E2E_RUNNER_IMAGE: test-infra-definitions/runner
   #E2E_RUNNER_IMAGE_VERSION: dfdd12299b97
   # To use images from test-infra-definitions dev branches, set the SUFFIX variable to -dev

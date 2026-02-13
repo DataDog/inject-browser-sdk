@@ -2,6 +2,7 @@ include:
   - local: .gitlab/iis.yml
   - local: .gitlab/java.yml
   - local: .gitlab/installer.yml
+  - local: .gitlab/cmake.yml
 
 stages:
   - build

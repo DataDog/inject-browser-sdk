@@ -91,11 +91,7 @@ manual_injector_IIS_build:
   tags: ["arch:amd64"]
   needs: []
   image: ${OLD_REGISTRY}/ci/${E2E_RUNNER_IMAGE}${TEST_INFRA_DEFINITIONS_BUILDIMAGES_SUFFIX}:${TEST_INFRA_DEFINITIONS_BUILDIMAGES}
-  id_tokens:
-    CI_IDENTITIES_GITLAB_ID_TOKEN:
-      aud: ci-identities
   variables:
-    AWS_SHARED_CREDENTIALS_FILE: ${CI_PROJECT_DIR}\.aws\credentials-by-job-id\${CI_JOB_ID}
     AWS_SSM_PREFIX: "ci.inject-browser-sdk."
     KEY_PAIR_NAME: "ci.inject-browser-sdk"
     KUBERNETES_MEMORY_REQUEST: 12Gi

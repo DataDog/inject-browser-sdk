@@ -5,13 +5,7 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-use alloc::{
-    boxed::Box,
-    ffi::CString,
-    format,
-    string::ToString,
-    vec::Vec,
-};
+use alloc::{boxed::Box, ffi::CString, format, string::ToString, vec::Vec};
 use core::{
     ffi::{c_char, CStr},
     ptr::null,

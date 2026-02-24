@@ -5,6 +5,7 @@ members = [
   "lib/inject-browser-sdk-ffi",
   "fuzz",
   "cmd/check_conf",
+  "cmd/test_inject",
   "xtask",
 ]
 

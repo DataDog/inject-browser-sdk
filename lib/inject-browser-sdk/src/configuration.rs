@@ -20,9 +20,9 @@ pub struct Configuration {
     pub rum: RumConfiguration,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(test, derive(Debug, Default, PartialEq))]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 /// Configuration settings for Real User Monitoring (RUM).
 ///
 /// This struct allows you to customize various aspect of RUM.
@@ -130,6 +130,7 @@ pub fn validate_configuration(conf: &Configuration) -> Result<(), Error> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use alloc::vec;
     use pretty_assertions::assert_eq;
 
     #[test]

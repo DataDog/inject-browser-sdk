@@ -30,3 +30,11 @@ push-ci-images:
 	docker buildx imagetools create -t $(DOCKER_REPO):builder-$(COMMIT_SHA) \
 			$(DOCKER_REPO):builder-$(COMMIT_SHA)-amd64 \
 			$(DOCKER_REPO):builder-$(COMMIT_SHA)-arm64
+
+.PHONY: artifacts
+artifacts:
+	docker buildx bake artifacts
+
+.PHONY: artifacts-all
+artifacts-all:
+	docker buildx bake artifacts-all

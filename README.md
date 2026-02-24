@@ -18,6 +18,33 @@ The project consists of several components:
 2. **Web Server Module**: Native module for IIS (Other proxies/web servers may live in different repos)
 3. **Installer Scripts**: For easy deployment and configuration
 
+## Building with Docker
+
+Build FFI library artifacts using Docker Buildx Bake:
+
+```bash
+# Build artifacts for current platform
+make artifacts
+
+# Build artifacts for all platforms (linux/amd64 and linux/arm64)
+make artifacts-all
+```
+
+Artifacts are exported to:
+```
+target/artifacts/
+├── linux-amd64/
+│   ├── libinjectbrowsersdk.a    # Static library
+│   ├── libinjectbrowsersdk.so   # Shared library
+│   └── injectbrowsersdk.h       # C header
+└── linux-arm64/
+    ├── libinjectbrowsersdk.a
+    ├── libinjectbrowsersdk.so
+    └── injectbrowsersdk.h
+```
+
+See `docker-bake.hcl` for configuration.
+
 ## Contributing
 
 We welcome contributions to the project! Please see our [Contributing Guide](CONTRIBUTING.md) for more information.

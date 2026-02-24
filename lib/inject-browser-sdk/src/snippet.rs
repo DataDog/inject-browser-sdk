@@ -8,7 +8,6 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-
 use crate::{configuration::validate_configuration, configuration::Configuration, error::Error};
 
 /// Generates the Datadog RUM SDK JavaScript snippet based on the provided configuration.
@@ -90,6 +89,7 @@ fn format_cdn_url(major_version: u32, site: &str) -> Result<String, Error> {
 mod tests {
     use super::*;
     use crate::{configuration::PrivacyLevel, configuration::RumConfiguration};
+    use alloc::boxed::Box;
     use alloc::collections::BTreeMap;
     use pretty_assertions::assert_eq;
     use serde_json::json;

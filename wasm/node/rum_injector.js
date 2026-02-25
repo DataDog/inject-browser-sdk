@@ -1,4 +1,5 @@
 const fs = require('fs');
+const path = require('path');
 
 /**
  * Loads the Wasm module and returns the middleware factory.
@@ -6,7 +7,11 @@ const fs = require('fs');
  * @returns {Promise<(config: {majorVersion: number, rum: {applicationId: string, clientToken: string, site?: string}}) => (req, res, next) => void>}
  */
 async function createRumInjector(wasmPath) {
-    const wasmBuffer = fs.readFileSync(wasmPath);
+    const resolvedPath = path.resolve(wasmPath);
+    if (!resolvedPath.endsWith('.wasm')) {
+        throw new Error(`Invalid WASM path: file must have a .wasm extension`);
+    }
+    const wasmBuffer = fs.readFileSync(resolvedPath);
     const { instance } = await WebAssembly.instantiate(wasmBuffer);
     const exports = instance.exports;
     const memory = exports.memory;

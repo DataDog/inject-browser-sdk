@@ -111,26 +111,28 @@ mod no_std_support {
         core::arch::wasm32::unreachable()
     }
 
+    const ALLOC_HEADER_SIZE: usize = 8;
+
     #[cfg(target_arch = "wasm32")]
     #[no_mangle]
     pub extern "C" fn malloc(size: usize) -> *mut u8 {
-        let total = match size.checked_add(8) {
+        let total = match size.checked_add(ALLOC_HEADER_SIZE) {
             Some(t) => t,
             None => return core::ptr::null_mut(),
         };
-        let layout = match alloc::alloc::Layout::from_size_align(total, 8) {
+        let layout = match alloc::alloc::Layout::from_size_align(total, ALLOC_HEADER_SIZE) {
             Ok(l) => l,
             Err(_) => return core::ptr::null_mut(),
         };
         let ptr = unsafe { alloc::alloc::alloc(layout) };
         if ptr.is_null() {
-            return ptr;
+            return core::ptr::null_mut();
         }
         unsafe {
             // Store the requested size in a header before the returned pointer.
             // The free() function reads this header to reconstruct the Layout for deallocation.
             *(ptr as *mut usize) = size;
-            ptr.add(8)
+            ptr.add(ALLOC_HEADER_SIZE)
         }
     }
 
@@ -141,9 +143,12 @@ mod no_std_support {
             return;
         }
         unsafe {
-            let real_ptr = ptr.sub(8);
+            let real_ptr = ptr.sub(ALLOC_HEADER_SIZE);
             let size = *(real_ptr as *const usize);
-            let layout = alloc::alloc::Layout::from_size_align_unchecked(size + 8, 8);
+            let layout = match alloc::alloc::Layout::from_size_align(size + ALLOC_HEADER_SIZE, ALLOC_HEADER_SIZE) {
+                Ok(l) => l,
+                Err(_) => core::arch::wasm32::unreachable(),
+            };
             alloc::alloc::dealloc(real_ptr, layout);
         }
     }

@@ -1,5 +1,5 @@
-const fs = require('fs');
-const path = require('path');
+const fs = require('node:fs');
+const path = require('node:path');
 
 /**
  * Loads the Wasm module and returns the middleware factory.
@@ -26,13 +26,14 @@ async function createRumInjector(wasmPath) {
     }
 
     const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
 
     function readCString(ptr) {
         const u8 = new Uint8Array(memory.buffer);
         const maxEnd = Math.min(ptr + 65536, u8.length);
         let end = ptr;
         while (end < maxEnd && u8[end] !== 0) end++;
-        return new TextDecoder().decode(u8.slice(ptr, end));
+        return decoder.decode(u8.slice(ptr, end));
     }
 
     function writeString(str) {
@@ -98,8 +99,8 @@ async function createRumInjector(wasmPath) {
         // and should be freed by the caller."
         exports.free(configPtr);
 
-        // snippetPtr is reused across all requests. It is created once and cleaned up when
-        // the middleware factory is no longer needed. See Snippet documentation.
+        // snippetPtr is reused across all requests. It is created once and intentionally
+        // never freed, since the snippet is expected to live for the entire process lifetime.
 
         return function middleware(req, res, next) {
             const originalWrite = res.write;
@@ -123,6 +124,7 @@ async function createRumInjector(wasmPath) {
                 //   slices_length (u32, 4) + slices ptr (u32, 4) + injected (bool, 1) + padding (3) = 12 bytes
                 injectorResultPtr = exports.malloc(12);
                 if (injectorResultPtr === 0) {
+                    console.error('[rum_injector] WASM malloc failed: could not allocate InjectorResult. Skipping injection.');
                     exports.injector_cleanup(injectorPtr);
                     injectorPtr = 0;
                     initialized = false;
@@ -157,12 +159,12 @@ async function createRumInjector(wasmPath) {
                     chunk = Buffer.from(chunk, encoding);
                 }
 
+                let chunkPtr = 0;
                 try {
-                    const chunkPtr = exports.malloc(chunk.length);
+                    chunkPtr = exports.malloc(chunk.length);
                     if (chunkPtr === 0) {
                         throw new Error(`WASM malloc failed: could not allocate ${chunk.length} bytes`);
                     }
-                    // chunk is guaranteed to be a Buffer at this point
                     new Uint8Array(memory.buffer, chunkPtr, chunk.length).set(chunk);
 
                     // In wasm32 C ABI, InjectorResult (12 bytes) is returned via a caller-allocated
@@ -170,6 +172,7 @@ async function createRumInjector(wasmPath) {
                     exports.injector_write(injectorResultPtr, injectorPtr, chunkPtr, chunk.length);
                     const result = readInjectorResult(injectorResultPtr);
                     exports.free(chunkPtr);
+                    chunkPtr = 0;
 
                     let writeResult = true;
                     for (const slice of result.slices) {
@@ -179,6 +182,8 @@ async function createRumInjector(wasmPath) {
                     if (callback) callback();
                     return writeResult;
                 } catch (err) {
+                    console.error('[rum_injector] Error during WASM injection in res.write, falling back to original response:', err);
+                    if (chunkPtr) exports.free(chunkPtr);
                     cleanupInjector();
                     return originalWrite.apply(res, arguments);
                 }
@@ -199,12 +204,17 @@ async function createRumInjector(wasmPath) {
                 }
 
                 if (!initialized) {
-                    return originalEnd.apply(res, arguments);
+                    return originalEnd.call(res, chunk, encoding, callback);
                 }
 
                 try {
                     if (chunk) {
                         res.write(chunk, encoding);
+                    }
+
+                    // After res.write, the injector may have been cleaned up due to an error.
+                    if (!injectorPtr) {
+                        return originalEnd.call(res, callback);
                     }
 
                     exports.injector_end(injectorResultPtr, injectorPtr);
@@ -213,13 +223,12 @@ async function createRumInjector(wasmPath) {
                     for (const slice of result.slices) {
                         originalWrite.call(res, slice);
                     }
-
-                    cleanupInjector();
-                    return originalEnd.call(res, callback);
                 } catch (err) {
+                    console.error('[rum_injector] Error during WASM injection in res.end, falling back to original response:', err);
+                } finally {
                     cleanupInjector();
-                    return originalEnd.call(res, callback);
                 }
+                return originalEnd.call(res, callback);
             };
 
             next();

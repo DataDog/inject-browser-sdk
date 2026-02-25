@@ -1,5 +1,5 @@
-const http = require('http');
-const path = require('path');
+const http = require('node:http');
+const path = require('node:path');
 const createRumInjector = require('./rum_injector');
 
 // Path to the compiled WASM file

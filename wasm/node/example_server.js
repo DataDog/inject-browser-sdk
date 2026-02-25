@@ -4,7 +4,7 @@ const createRumInjector = require('./rum_injector');
 
 // Path to the compiled WASM file
 // Ensure you have built the project with:
-// cargo build --target wasm32-unknown-unknown --package inject-browser-sdk-ffi --release --no-default-features --features alloc
+// cargo build --target wasm32-unknown-unknown --package inject-browser-sdk-ffi --release --no-default-features
 const wasmPath = path.resolve(
     __dirname,
     '../../target/wasm32-unknown-unknown/release/inject_browser_sdk_ffi.wasm',
@@ -33,17 +33,17 @@ const htmlContent = `
 
 async function startServer() {
     console.log('Loading WASM from:', wasmPath);
-    
+
     let rumFactory;
     try {
         rumFactory = await createRumInjector(wasmPath);
     } catch (error) {
         console.error('Failed to load WASM module:', error);
         console.error('Make sure you have built the WASM module:');
-        console.error('cargo build --target wasm32-unknown-unknown --package inject-browser-sdk-ffi --release --no-default-features --features alloc');
+        console.error('cargo build --target wasm32-unknown-unknown --package inject-browser-sdk-ffi --release --no-default-features');
         process.exit(1);
     }
-    
+
     // Create middleware with configuration
     const rumMiddleware = rumFactory({
         majorVersion: 5,
@@ -61,18 +61,13 @@ async function startServer() {
     });
 
     const server = http.createServer((req, res) => {
-        // Log request
-        // console.log(`${req.method} ${req.url}`);
-
-        // Helper to run the actual handler logic
         const handleRequest = () => {
             if (req.url === '/') {
                 res.setHeader('Content-Type', 'text/html; charset=utf-8');
-                
+
                 // Simulate streaming response
-                // The injector should handle this correctly
                 res.write(htmlContent.substring(0, 150));
-                
+
                 setTimeout(() => {
                     res.end(htmlContent.substring(150));
                 }, 0);
@@ -85,13 +80,13 @@ async function startServer() {
             }
         };
 
-        // Run middleware
         try {
             rumMiddleware(req, res, handleRequest);
-            // handleRequest();
         } catch (err) {
             console.error('Middleware error:', err);
-            res.writeHead(500);
+            if (!res.headersSent) {
+                res.writeHead(500);
+            }
             res.end('Internal Server Error');
         }
     });
@@ -103,4 +98,3 @@ async function startServer() {
 }
 
 startServer().catch(console.error);
-

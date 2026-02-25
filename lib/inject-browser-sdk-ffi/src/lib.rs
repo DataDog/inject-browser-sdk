@@ -18,6 +18,7 @@
 //! | Windows  | `target/release/injectbrowsersdk.dll`      |
 //! | Linux    | `target/release/libinjectbrowsersdk.so`    |
 //! | MacOS    | `target/release/libinjectbrowsersdk.dylib` |
+//! | WASM     | `target/wasm32-unknown-unknown/release/inject_browser_sdk_ffi.wasm` |
 //!
 //! ## Usage overview
 //!
@@ -107,19 +108,27 @@ mod no_std_support {
     #[cfg(target_arch = "wasm32")]
     #[panic_handler]
     fn panic(_info: &core::panic::PanicInfo) -> ! {
-        loop {}
+        core::arch::wasm32::unreachable()
     }
 
     #[cfg(target_arch = "wasm32")]
     #[no_mangle]
     pub extern "C" fn malloc(size: usize) -> *mut u8 {
-        let layout = unsafe { alloc::alloc::Layout::from_size_align_unchecked(size + 8, 8) };
+        let total = match size.checked_add(8) {
+            Some(t) => t,
+            None => return core::ptr::null_mut(),
+        };
+        let layout = match alloc::alloc::Layout::from_size_align(total, 8) {
+            Ok(l) => l,
+            Err(_) => return core::ptr::null_mut(),
+        };
         let ptr = unsafe { alloc::alloc::alloc(layout) };
         if ptr.is_null() {
             return ptr;
         }
         unsafe {
-            // Store the size at the beginning
+            // Store the requested size in a header before the returned pointer.
+            // The free() function reads this header to reconstruct the Layout for deallocation.
             *(ptr as *mut usize) = size;
             ptr.add(8)
         }
@@ -143,7 +152,6 @@ mod no_std_support {
     #[no_mangle]
     pub extern "C" fn rust_eh_personality() {}
 }
-
 
 mod injector;
 mod snippet;

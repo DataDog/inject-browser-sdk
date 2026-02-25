@@ -17,10 +17,11 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    BuildWasmFfi{
+    BuildWasmFfi {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-    }
+    },
+    TestWasm,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -39,7 +40,7 @@ fn main() -> anyhow::Result<()> {
             for target in targets {
                 println!("{}", target);
             }
-        },
+        }
         Commands::CrossBuildAll => {
             for target in targets {
                 println!("Building for target: {}", target);
@@ -49,15 +50,25 @@ fn main() -> anyhow::Result<()> {
                     cmd!(sh, "cross build --target {target}").run()?;
                 }
             }
-        },
+        }
         Commands::BuildThinFFI { args } => {
             println!("Building thin FFI");
-            cmd!(sh, "cross build --no-default-features -p inject-browser-sdk-ffi {args...}").run()?;
-        },
+            cmd!(
+                sh,
+                "cross build --no-default-features -p inject-browser-sdk-ffi {args...}"
+            )
+            .run()?;
+        }
         Commands::BuildWasmFfi { args } => {
             println!("Building WASM FFI");
             cmd!(sh, "cargo build --target wasm32-unknown-unknown --no-default-features -p inject-browser-sdk-ffi {args...}").run()?;
-        },
+        }
+        Commands::TestWasm => {
+            println!("Building WASM FFI (release)...");
+            cmd!(sh, "cargo build --target wasm32-unknown-unknown --no-default-features -p inject-browser-sdk-ffi --release").run()?;
+            println!("Running Node.js integration tests...");
+            cmd!(sh, "node --test wasm/node/test_integration.js").run()?;
+        }
     }
 
     Ok(())

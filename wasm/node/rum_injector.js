@@ -1,10 +1,9 @@
 const fs = require('fs');
-const path = require('path');
 
 /**
  * Loads the Wasm module and returns the middleware factory.
  * @param {string} wasmPath - Path to the .wasm file.
- * @returns {Promise<(config: object) => (req, res, next) => void>}
+ * @returns {Promise<(config: {majorVersion: number, rum: {applicationId: string, clientToken: string, site?: string}}) => (req, res, next) => void>}
  */
 async function createRumInjector(wasmPath) {
     const wasmBuffer = fs.readFileSync(wasmPath);
@@ -12,53 +11,58 @@ async function createRumInjector(wasmPath) {
     const exports = instance.exports;
     const memory = exports.memory;
 
-    // Helper to allocate memory
-    function malloc(size) {
-        return exports.malloc(size);
+    const requiredExports = ['memory', 'malloc', 'free', 'snippet_create_from_json',
+                             'snippet_cleanup', 'injector_create', 'injector_write',
+                             'injector_end', 'injector_cleanup'];
+    for (const name of requiredExports) {
+        if (!exports[name]) {
+            throw new Error(`WASM module is missing required export: '${name}'. Ensure the correct WASM file is being loaded.`);
+        }
     }
 
-    // Helper to free memory
-    function free(ptr) {
-        exports.free(ptr);
+    const encoder = new TextEncoder();
+
+    function readCString(ptr) {
+        const u8 = new Uint8Array(memory.buffer);
+        const maxEnd = Math.min(ptr + 65536, u8.length);
+        let end = ptr;
+        while (end < maxEnd && u8[end] !== 0) end++;
+        return new TextDecoder().decode(u8.slice(ptr, end));
     }
 
-    // Helper to write string to Wasm memory
     function writeString(str) {
-        const encoder = new TextEncoder();
         const bytes = encoder.encode(str);
-        // +1 for null terminator if needed, though snippet_create_from_json uses length from CStr?
-        // Rust CStr expects null terminator.
-        const ptr = malloc(bytes.length + 1);
+        // +1 for null terminator. The Rust FFI function uses CStr::from_ptr which expects a
+        // null-terminated string.
+        const ptr = exports.malloc(bytes.length + 1);
+        if (ptr === 0) {
+            throw new Error(`WASM malloc failed: could not allocate ${bytes.length + 1} bytes`);
+        }
         const buffer = new Uint8Array(memory.buffer, ptr, bytes.length + 1);
         buffer.set(bytes);
-        buffer[bytes.length] = 0; // Null terminate
+        buffer[bytes.length] = 0;
         return ptr;
     }
 
-    // Helper to read InjectorResult
-    // InjectorResult layout:
-    // 0: slices_length (u32)
-    // 4: slices (ptr)
-    // 8: injected (bool/u8)
+    // InjectorResult layout (repr(C), wasm32, total 12 bytes):
+    //   offset 0: slices_length (u32, 4 bytes)
+    //   offset 4: slices        (ptr, 4 bytes)
+    //   offset 8: injected      (bool, 1 byte + 3 bytes padding)
     function readInjectorResult(ptr) {
         const view = new DataView(memory.buffer);
-        const slicesLength = view.getUint32(ptr, true); // Little endian
+        const slicesLength = view.getUint32(ptr, true);
         const slicesPtr = view.getUint32(ptr + 4, true);
         const injected = view.getUint8(ptr + 8) !== 0;
-        
+
+        // BytesSlice layout (repr(C), wasm32, stride 12):
+        //   offset 0: length            (u32)
+        //   offset 4: start             (ptr)
+        //   offset 8: from_incoming_chunk (bool)
         const slices = [];
         for (let i = 0; i < slicesLength; i++) {
-            // BytesSlice layout:
-            // 0: length (u32)
-            // 4: start (ptr)
-            // 8: from_incoming_chunk (bool/u8)
-            // Stride: 12
             const sliceOffset = slicesPtr + (i * 12);
             const length = view.getUint32(sliceOffset, true);
             const start = view.getUint32(sliceOffset + 4, true);
-            
-            // Copy data out of Wasm memory
-            // We must copy because the memory buffer might change/grow or be reused
             const data = new Uint8Array(memory.buffer, start, length).slice();
             slices.push(data);
         }
@@ -70,78 +74,73 @@ async function createRumInjector(wasmPath) {
         const configStr = JSON.stringify(config);
         const configPtr = writeString(configStr);
         const snippetPtr = exports.snippet_create_from_json(configPtr);
-        
-        // Check for error
-        // Snippet layout:
-        // 0: error_code (u8)
-        // 4: error_message (ptr) - assuming padding after u8
-        // 8: length (u32)
-        // Wait, struct alignment.
-        // pub struct Snippet {
-        //     pub error_code: u8,
-        //     pub error_message: *const c_char,
-        //     pub length: u32,
-        // }
-        // u8 (1) -> padding (3) -> ptr (4) -> u32 (4). Total 12?
-        // Or u8 (1) -> ptr (4) (unaligned? No, usually aligned).
-        // Let's check Rust repr(C) alignment rules for this.
-        // u8, pointer(4), u32(4). Max align 4.
-        // error_code @ 0.
-        // error_message @ 4 (padding 1..3).
-        // length @ 8.
-        
+
+        // Snippet layout (repr(C), wasm32, total 12 bytes):
+        //   offset 0: error_code    (u8, 1 byte + 3 bytes padding)
+        //   offset 4: error_message (ptr, 4 bytes)
+        //   offset 8: length        (u32, 4 bytes)
         const view = new DataView(memory.buffer);
         const errorCode = view.getUint8(snippetPtr);
         if (errorCode !== 0) {
             const msgPtr = view.getUint32(snippetPtr + 4, true);
-            // Read C string
-            let msg = "";
-            let p = msgPtr;
-            const u8 = new Uint8Array(memory.buffer);
-            while (u8[p] !== 0) {
-                msg += String.fromCharCode(u8[p]);
-                p++;
-            }
-            free(configPtr); // Free the config string
+            const msg = readCString(msgPtr);
+            exports.free(configPtr);
             exports.snippet_cleanup(snippetPtr);
             throw new Error(`Failed to create snippet: ${msg}`);
         }
 
-        free(configPtr); // Free the config string once snippet is created? 
-        // "The json pointer is owned by the caller and should be freed by the caller. No reference to the provided memory is kept by the library."
-        
-        // We keep snippetPtr alive for the lifetime of the middleware (or per request?)
-        // Snippet is reusable.
+        // Free the config string. Per API docs: "The json pointer is owned by the caller
+        // and should be freed by the caller."
+        exports.free(configPtr);
+
+        // snippetPtr is reused across all requests. It is created once and cleaned up when
+        // the middleware factory is no longer needed. See Snippet documentation.
 
         return function middleware(req, res, next) {
-            // Check content type (simple check)
-            // We need to capture write/end to inspect headers and body
-            
             const originalWrite = res.write;
             const originalEnd = res.end;
-            
+
             let injectorPtr = 0;
             let injectorResultPtr = 0;
             let initialized = false;
 
             function initInjector() {
                 if (initialized) return true;
-                
-                // Check headers if set
+
                 const contentType = res.getHeader('content-type') || '';
                 if (!contentType.includes('text/html')) {
                     return false;
                 }
 
                 initialized = true;
-                // Initialize injector
                 injectorPtr = exports.injector_create(snippetPtr);
-                // Allocate space for result struct (12 bytes)
-                injectorResultPtr = malloc(12);
-                
-                // Remove content-length because we are modifying the body
+                // Allocate space for InjectorResult struct:
+                //   slices_length (u32, 4) + slices ptr (u32, 4) + injected (bool, 1) + padding (3) = 12 bytes
+                injectorResultPtr = exports.malloc(12);
+                if (injectorResultPtr === 0) {
+                    exports.injector_cleanup(injectorPtr);
+                    injectorPtr = 0;
+                    initialized = false;
+                    return false;
+                }
+
+                // Remove content-length rather than incrementing it by snippet length (as the API docs suggest).
+                // Removing is simpler for a streaming middleware where the final output size depends on whether
+                // injection actually occurred.
                 res.removeHeader('content-length');
                 return true;
+            }
+
+            function cleanupInjector() {
+                if (injectorPtr) {
+                    try { exports.injector_cleanup(injectorPtr); } catch (_) {}
+                    injectorPtr = 0;
+                }
+                if (injectorResultPtr) {
+                    try { exports.free(injectorResultPtr); } catch (_) {}
+                    injectorResultPtr = 0;
+                }
+                initialized = false;
             }
 
             res.write = function(chunk, encoding, callback) {
@@ -153,34 +152,34 @@ async function createRumInjector(wasmPath) {
                     chunk = Buffer.from(chunk, encoding);
                 }
 
-                // Write chunk to Wasm memory
-                // We assume chunk is Buffer or Uint8Array
-                const chunkPtr = malloc(chunk.length);
-                const chunkBuffer = new Uint8Array(memory.buffer, chunkPtr, chunk.length);
-                chunkBuffer.set(chunk);
+                try {
+                    const chunkPtr = exports.malloc(chunk.length);
+                    if (chunkPtr === 0) {
+                        throw new Error(`WASM malloc failed: could not allocate ${chunk.length} bytes`);
+                    }
+                    // chunk is guaranteed to be a Buffer at this point
+                    new Uint8Array(memory.buffer, chunkPtr, chunk.length).set(chunk);
 
-                // Call injector_write
-                // injector_write(ret_ptr, injector_ptr, chunk_ptr, length)
-                exports.injector_write(injectorResultPtr, injectorPtr, chunkPtr, chunk.length);
-                
-                // Read result
-                const result = readInjectorResult(injectorResultPtr);
-                
-                // Free the chunk passed to injector
-                free(chunkPtr);
+                    // In wasm32 C ABI, InjectorResult (12 bytes) is returned via a caller-allocated
+                    // pointer passed as the first argument (sret convention).
+                    exports.injector_write(injectorResultPtr, injectorPtr, chunkPtr, chunk.length);
+                    const result = readInjectorResult(injectorResultPtr);
+                    exports.free(chunkPtr);
 
-                // Write out slices
-                let writeResult = true;
-                for (const slice of result.slices) {
-                    writeResult = originalWrite.call(res, slice);
+                    let writeResult = true;
+                    for (const slice of result.slices) {
+                        writeResult = originalWrite.call(res, slice);
+                    }
+
+                    if (callback) callback();
+                    return writeResult;
+                } catch (err) {
+                    cleanupInjector();
+                    return originalWrite.apply(res, arguments);
                 }
-                
-                if (callback) callback();
-                return writeResult;
             };
 
             res.end = function(chunk, encoding, callback) {
-                // Normalize arguments
                 if (typeof chunk === 'function') {
                     callback = chunk;
                     chunk = null;
@@ -191,40 +190,30 @@ async function createRumInjector(wasmPath) {
                 }
 
                 if (!initialized && chunk) {
-                     // Try to init if we have a chunk
-                     const contentType = res.getHeader('content-type') || '';
-                     if (contentType.includes('text/html')) {
-                         initInjector();
-                     }
+                    initInjector();
                 }
 
                 if (!initialized) {
                     return originalEnd.apply(res, arguments);
                 }
 
-                if (chunk) {
-                    res.write(chunk, encoding);
-                }
+                try {
+                    if (chunk) {
+                        res.write(chunk, encoding);
+                    }
 
-                // Call injector_end
-                exports.injector_end(injectorResultPtr, injectorPtr);
-                
-                const result = readInjectorResult(injectorResultPtr);
-                
-                for (const slice of result.slices) {
-                    originalWrite.call(res, slice);
-                }
+                    exports.injector_end(injectorResultPtr, injectorPtr);
+                    const result = readInjectorResult(injectorResultPtr);
 
-                // Cleanup
-                exports.injector_cleanup(injectorPtr);
-                free(injectorResultPtr);
-                injectorPtr = 0;
-                injectorResultPtr = 0;
+                    for (const slice of result.slices) {
+                        originalWrite.call(res, slice);
+                    }
 
-                if (callback) {
+                    cleanupInjector();
                     return originalEnd.call(res, callback);
-                } else {
-                    return originalEnd.call(res);
+                } catch (err) {
+                    cleanupInjector();
+                    return originalEnd.call(res, callback);
                 }
             };
 
@@ -234,4 +223,3 @@ async function createRumInjector(wasmPath) {
 }
 
 module.exports = createRumInjector;
-

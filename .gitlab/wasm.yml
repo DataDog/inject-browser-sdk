@@ -14,12 +14,9 @@
 wasm_build:
   stage: build
   extends: .wasm_base
-  image: registry.ddbuild.io/images/mirror/ubuntu:22.04
+  image: registry.ddbuild.io/images/rust:ubuntu-22.04
   needs: []
   before_script:
-    - apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
-    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.73.0
-    - . "$HOME/.cargo/env"
     - rustup target add wasm32-unknown-unknown
   script:
     - cargo build --release --target wasm32-unknown-unknown -p inject-browser-sdk-ffi --no-default-features --features alloc
@@ -32,7 +29,7 @@ wasm_build:
 wasm_node_integration_test:
   stage: test
   extends: .wasm_base
-  image: registry.ddbuild.io/images/mirror/node:20
+  image: registry.ddbuild.io/images/nodejs:20.20.0-gbi-jammy
   needs: ["wasm_build"]
   script:
     - node --test wasm/node/test_integration.js

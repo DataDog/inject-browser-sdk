@@ -29,7 +29,7 @@ wasm_build:
 wasm_node_integration_test:
   stage: test
   extends: .wasm_base
-  image: registry.ddbuild.io/images/nodejs:20.20.0-gbi-jammy
+  image: registry.ddbuild.io/images/nodejs:24.13.1-gbi-noble
   needs: ["wasm_build"]
   script:
     - node --test wasm/node/test_integration.js

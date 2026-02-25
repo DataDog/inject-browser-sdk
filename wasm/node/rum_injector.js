@@ -133,11 +133,11 @@ async function createRumInjector(wasmPath) {
 
             function cleanupInjector() {
                 if (injectorPtr) {
-                    try { exports.injector_cleanup(injectorPtr); } catch (_) {}
+                    try { exports.injector_cleanup(injectorPtr); } catch (_) { /* best-effort cleanup */ }
                     injectorPtr = 0;
                 }
                 if (injectorResultPtr) {
-                    try { exports.free(injectorResultPtr); } catch (_) {}
+                    try { exports.free(injectorResultPtr); } catch (_) { /* best-effort cleanup */ }
                     injectorResultPtr = 0;
                 }
                 initialized = false;

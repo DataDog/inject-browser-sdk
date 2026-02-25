@@ -97,7 +97,7 @@ impl SnippetInternal {
 ///
 /// The JSON object must be an object with the following properties:
 ///
-/// * `majorVersion`: the major version of the Browser SDK to use. Currently, only `5` is supported.
+/// * `majorVersion`: the major version of the Browser SDK to use. Currently, `5` and `6` are supported.
 ///
 /// * `rum`: an object containing the RUM Browser SDK configuration. See [public documentation][1].
 /// The following parameters are the most common ones:

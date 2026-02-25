@@ -4,7 +4,7 @@ const createRumInjector = require('./rum_injector');
 
 // Path to the compiled WASM file
 // Ensure you have built the project with:
-// cargo build --target wasm32-unknown-unknown --package inject-browser-sdk-ffi --release --no-default-features
+// cargo build --target wasm32-unknown-unknown -p inject-browser-sdk-ffi --release --no-default-features --features alloc
 const wasmPath = path.resolve(
     __dirname,
     '../../target/wasm32-unknown-unknown/release/inject_browser_sdk_ffi.wasm',
@@ -40,7 +40,7 @@ async function startServer() {
     } catch (error) {
         console.error('Failed to load WASM module:', error);
         console.error('Make sure you have built the WASM module:');
-        console.error('cargo build --target wasm32-unknown-unknown --package inject-browser-sdk-ffi --release --no-default-features');
+        console.error('cargo build --target wasm32-unknown-unknown -p inject-browser-sdk-ffi --release --no-default-features --features alloc');
         process.exit(1);
     }
 
@@ -97,4 +97,7 @@ async function startServer() {
     });
 }
 
-startServer().catch(console.error);
+startServer().catch((err) => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+});

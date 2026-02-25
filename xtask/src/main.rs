@@ -65,7 +65,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::TestWasm => {
             println!("Building WASM FFI (release)...");
-            cmd!(sh, "cargo build --target wasm32-unknown-unknown --no-default-features -p inject-browser-sdk-ffi --release").run()?;
+            cmd!(sh, "cargo build --target wasm32-unknown-unknown --no-default-features --features alloc -p inject-browser-sdk-ffi --release").run()?;
             println!("Running Node.js integration tests...");
             cmd!(sh, "node --test wasm/node/test_integration.js").run()?;
         }

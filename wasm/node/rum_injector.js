@@ -29,10 +29,18 @@ async function createRumInjector(wasmPath) {
     const decoder = new TextDecoder();
 
     function readCString(ptr) {
+        if (ptr === 0) return '<null pointer>';
         const u8 = new Uint8Array(memory.buffer);
-        const maxEnd = Math.min(ptr + 65536, u8.length);
+        if (ptr >= u8.length) {
+            throw new Error(`readCString: pointer ${ptr} is out of WASM memory bounds (size: ${u8.length})`);
+        }
+        const maxLen = 65536;
+        const maxEnd = Math.min(ptr + maxLen, u8.length);
         let end = ptr;
         while (end < maxEnd && u8[end] !== 0) end++;
+        if (end === maxEnd && (end >= u8.length || u8[end] !== 0)) {
+            console.error(`[rum_injector] readCString: no null terminator found within ${maxLen} bytes at ptr=${ptr}, string may be truncated or pointer invalid`);
+        }
         return decoder.decode(u8.slice(ptr, end));
     }
 
@@ -60,15 +68,25 @@ async function createRumInjector(wasmPath) {
         const slicesPtr = view.getUint32(ptr + 4, true);
         const injected = view.getUint8(ptr + 8) !== 0;
 
+        if (slicesLength > 4) {
+            throw new Error(`readInjectorResult: slicesLength=${slicesLength} exceeds maximum of 4 ` +
+                `(ptr=${ptr}, slicesPtr=${slicesPtr}). Possible struct layout mismatch between JS and WASM.`);
+        }
+
         // BytesSlice layout (repr(C), wasm32, stride 12):
         //   offset 0: length            (u32)
         //   offset 4: start             (ptr)
         //   offset 8: from_incoming_chunk (bool)
+        const memSize = memory.buffer.byteLength;
         const slices = [];
         for (let i = 0; i < slicesLength; i++) {
             const sliceOffset = slicesPtr + (i * 12);
             const length = view.getUint32(sliceOffset, true);
             const start = view.getUint32(sliceOffset + 4, true);
+            if (start + length > memSize) {
+                throw new Error(`readInjectorResult: slice[${i}] out of bounds ` +
+                    `(start=${start}, length=${length}, memorySize=${memSize})`);
+            }
             const data = new Uint8Array(memory.buffer, start, length).slice();
             slices.push(data);
         }
@@ -113,7 +131,7 @@ async function createRumInjector(wasmPath) {
             function initInjector() {
                 if (initialized) return true;
 
-                const contentType = res.getHeader('content-type') || '';
+                const contentType = (res.getHeader('content-type') || '').toLowerCase();
                 if (!contentType.includes('text/html')) {
                     return false;
                 }
@@ -150,15 +168,8 @@ async function createRumInjector(wasmPath) {
                 initialized = false;
             }
 
-            res.write = function(chunk, encoding, callback) {
-                if (!initInjector()) {
-                    return originalWrite.apply(res, arguments);
-                }
-
-                if (typeof chunk === 'string') {
-                    chunk = Buffer.from(chunk, encoding);
-                }
-
+            // Core WASM write logic. Throws on error (caller decides fallback strategy).
+            function wasmWrite(chunk) {
                 let chunkPtr = 0;
                 try {
                     chunkPtr = exports.malloc(chunk.length);
@@ -178,12 +189,30 @@ async function createRumInjector(wasmPath) {
                     for (const slice of result.slices) {
                         writeResult = originalWrite.call(res, slice);
                     }
+                    return writeResult;
+                } catch (err) {
+                    if (chunkPtr) {
+                        try { exports.free(chunkPtr); } catch (freeErr) { console.error('[rum_injector] Failed to free chunk memory:', freeErr); }
+                    }
+                    throw err;
+                }
+            }
 
+            res.write = function(chunk, encoding, callback) {
+                if (!initInjector()) {
+                    return originalWrite.apply(res, arguments);
+                }
+
+                if (typeof chunk === 'string') {
+                    chunk = Buffer.from(chunk, encoding);
+                }
+
+                try {
+                    const writeResult = wasmWrite(chunk);
                     if (callback) callback();
                     return writeResult;
                 } catch (err) {
                     console.error('[rum_injector] Error during WASM injection in res.write, falling back to original response:', err);
-                    if (chunkPtr) exports.free(chunkPtr);
                     cleanupInjector();
                     return originalWrite.apply(res, arguments);
                 }
@@ -209,14 +238,13 @@ async function createRumInjector(wasmPath) {
 
                 try {
                     if (chunk) {
-                        res.write(chunk, encoding);
+                        if (typeof chunk === 'string') {
+                            chunk = Buffer.from(chunk, encoding);
+                        }
+                        wasmWrite(chunk);
                     }
 
-                    // After res.write, the injector may have been cleaned up due to an error.
-                    if (!injectorPtr) {
-                        return originalEnd.call(res, callback);
-                    }
-
+                    // sret convention, see wasmWrite above.
                     exports.injector_end(injectorResultPtr, injectorPtr);
                     const result = readInjectorResult(injectorResultPtr);
 
@@ -224,7 +252,8 @@ async function createRumInjector(wasmPath) {
                         originalWrite.call(res, slice);
                     }
                 } catch (err) {
-                    console.error('[rum_injector] Error during WASM injection in res.end, falling back to original response:', err);
+                    console.error('[rum_injector] Error during WASM injection in res.end. ' +
+                        'The response may be incomplete if injection was partially applied:', err);
                 } finally {
                     cleanupInjector();
                 }

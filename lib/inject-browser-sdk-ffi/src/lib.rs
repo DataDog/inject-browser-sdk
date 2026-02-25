@@ -10,8 +10,8 @@
 //!
 //! ## Build
 //!
-//! Build the library by using `cargo build --release`. The resulting artifact should be located
-//! in:
+//! Build the library by using `cargo build --release` (native targets). The resulting artifact
+//! should be located in:
 //!
 //! | Platform | Path                                       |
 //! |----------|--------------------------------------------|
@@ -19,6 +19,9 @@
 //! | Linux    | `target/release/libinjectbrowsersdk.so`    |
 //! | MacOS    | `target/release/libinjectbrowsersdk.dylib` |
 //! | WASM     | `target/wasm32-unknown-unknown/release/inject_browser_sdk_ffi.wasm` |
+//!
+//! For the WASM target, use:
+//! `cargo build --release --target wasm32-unknown-unknown -p inject-browser-sdk-ffi --no-default-features --features alloc`
 //!
 //! ## Usage overview
 //!

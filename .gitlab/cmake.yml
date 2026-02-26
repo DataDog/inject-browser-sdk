@@ -43,6 +43,7 @@ cmake_fetchcontent_test:
     - mkdir -p /tmp/cmake-consumer
     - cp ci/cmake-consumer-test/CMakeLists.txt /tmp/cmake-consumer/
     - cp ci/cmake-consumer-test/main.cpp /tmp/cmake-consumer/
+    - cp ci/cmake-consumer-test/validate_version.c /tmp/cmake-consumer/
     - ln -s "$CI_PROJECT_DIR" /tmp/cmake-consumer/sdk
     - export RUSTFLAGS="-Zsanitizer=address"
     - export RUSTUP_TOOLCHAIN=nightly
@@ -52,3 +53,4 @@ cmake_fetchcontent_test:
       -DCMAKE_CXX_COMPILER=g++
     - cmake --build /tmp/cmake-consumer/build
     - /tmp/cmake-consumer/build/consumer_test
+    - ctest --test-dir /tmp/cmake-consumer/build -R validate_version --output-on-failure

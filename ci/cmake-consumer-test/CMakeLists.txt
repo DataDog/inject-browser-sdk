@@ -31,14 +31,13 @@ message(STATUS "INJECT_BROWSER_SDK_GIT_SHA        = ${INJECT_BROWSER_SDK_GIT_SHA
 message(STATUS "INJECT_BROWSER_SDK_GIT_SHA_SHORT  = ${INJECT_BROWSER_SDK_GIT_SHA_SHORT}")
 message(STATUS "INJECT_BROWSER_SDK_VERSION        = ${INJECT_BROWSER_SDK_VERSION}")
 
-configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/version_config.h.in
-  ${CMAKE_CURRENT_BINARY_DIR}/version_config.h
-  @ONLY
-)
-
 add_executable(validate_version validate_version.c)
-target_include_directories(validate_version PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_compile_definitions(validate_version PRIVATE
+  INJECT_BROWSER_SDK_PKGID="${INJECT_BROWSER_SDK_PKGID}"
+  INJECT_BROWSER_SDK_GIT_SHA="${INJECT_BROWSER_SDK_GIT_SHA}"
+  INJECT_BROWSER_SDK_GIT_SHA_SHORT="${INJECT_BROWSER_SDK_GIT_SHA_SHORT}"
+  INJECT_BROWSER_SDK_VERSION="${INJECT_BROWSER_SDK_VERSION}"
+)
 
 enable_testing()
 add_test(NAME validate_version COMMAND validate_version)

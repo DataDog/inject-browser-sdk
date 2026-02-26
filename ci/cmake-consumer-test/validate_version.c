@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "version_config.h"
 
 static int check(const char *name, const char *value, int min_len) {
     int len = (int)strlen(value);

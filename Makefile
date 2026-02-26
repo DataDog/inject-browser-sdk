@@ -31,6 +31,10 @@ push-ci-images:
 			$(DOCKER_REPO):builder-$(COMMIT_SHA)-amd64 \
 			$(DOCKER_REPO):builder-$(COMMIT_SHA)-arm64
 
+.PHONY: test-cmake-version
+test-cmake-version:
+	ci/cmake-consumer-test/run_validate_version.sh
+
 .PHONY: artifacts
 artifacts:
 	docker buildx bake artifacts

@@ -1,0 +1,4 @@
+#pragma once
+
+// Auto-generated — do not edit.
+#define RUM_SDK_INJECTOR_VERSION "@RUM_SDK_INJECTOR_VERSION@"

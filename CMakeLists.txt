@@ -18,6 +18,41 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 # ---------------------------------------------------------------------------
+# Expose this library's version to consumers
+# ---------------------------------------------------------------------------
+execute_process(
+  COMMAND cargo pkgid --package inject-browser-sdk --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml"
+  OUTPUT_VARIABLE _INJECT_BROWSER_SDK_CARGO_PKGID
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+string(REGEX REPLACE ".*[#@](.*)" "\\1" INJECT_BROWSER_SDK_PKGID "${_INJECT_BROWSER_SDK_CARGO_PKGID}")
+set(INJECT_BROWSER_SDK_PKGID "${INJECT_BROWSER_SDK_PKGID}" PARENT_SCOPE)
+
+# ---------------------------------------------------------------------------
+# Expose this library's git SHA to consumers
+# ---------------------------------------------------------------------------
+execute_process(
+  COMMAND git rev-parse HEAD
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  OUTPUT_VARIABLE INJECT_BROWSER_SDK_GIT_SHA
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+set(INJECT_BROWSER_SDK_GIT_SHA "${INJECT_BROWSER_SDK_GIT_SHA}" PARENT_SCOPE)
+execute_process(
+  COMMAND git rev-parse --short HEAD
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  OUTPUT_VARIABLE INJECT_BROWSER_SDK_GIT_SHA_SHORT
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+set(INJECT_BROWSER_SDK_GIT_SHA_SHORT "${INJECT_BROWSER_SDK_GIT_SHA_SHORT}" PARENT_SCOPE)
+
+# ---------------------------------------------------------------------------
+# Combined version: semver + short SHA (e.g. "0.1.0+0b2cc63")
+# ---------------------------------------------------------------------------
+set(INJECT_BROWSER_SDK_VERSION "${INJECT_BROWSER_SDK_PKGID}+${INJECT_BROWSER_SDK_GIT_SHA_SHORT}")
+set(INJECT_BROWSER_SDK_VERSION "${INJECT_BROWSER_SDK_VERSION}" PARENT_SCOPE)
+
+# ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
 set(INJECT_BROWSER_SDK_CORROSION_VERSION "v0.5"

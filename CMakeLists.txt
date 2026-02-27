@@ -25,8 +25,8 @@ execute_process(
   OUTPUT_VARIABLE _INJECT_BROWSER_SDK_CARGO_PKGID
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
-string(REGEX REPLACE ".*[#@](.*)" "\\1" INJECT_BROWSER_SDK_PKGID "${_INJECT_BROWSER_SDK_CARGO_PKGID}")
-set(INJECT_BROWSER_SDK_PKGID "${INJECT_BROWSER_SDK_PKGID}" PARENT_SCOPE)
+string(REGEX REPLACE ".*[#@](.*)" "\\1" INJECT_BROWSER_SDK_VERSION "${_INJECT_BROWSER_SDK_CARGO_PKGID}")
+set(INJECT_BROWSER_SDK_VERSION "${INJECT_BROWSER_SDK_VERSION}" PARENT_SCOPE)
 
 # ---------------------------------------------------------------------------
 # Expose this library's git SHA to consumers
@@ -49,8 +49,8 @@ set(INJECT_BROWSER_SDK_GIT_SHA_SHORT "${INJECT_BROWSER_SDK_GIT_SHA_SHORT}" PAREN
 # ---------------------------------------------------------------------------
 # Combined version: semver + short SHA (e.g. "0.1.0+0b2cc63")
 # ---------------------------------------------------------------------------
-set(INJECT_BROWSER_SDK_VERSION "${INJECT_BROWSER_SDK_PKGID}+${INJECT_BROWSER_SDK_GIT_SHA_SHORT}")
-set(INJECT_BROWSER_SDK_VERSION "${INJECT_BROWSER_SDK_VERSION}" PARENT_SCOPE)
+set(INJECT_BROWSER_SDK_COMBINED_VERSION "${INJECT_BROWSER_SDK_VERSION}+${INJECT_BROWSER_SDK_GIT_SHA_SHORT}")
+set(INJECT_BROWSER_SDK_COMBINED_VERSION "${INJECT_BROWSER_SDK_COMBINED_VERSION}" PARENT_SCOPE)
 
 # ---------------------------------------------------------------------------
 # Options

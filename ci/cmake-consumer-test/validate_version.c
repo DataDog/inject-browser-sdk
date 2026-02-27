@@ -19,7 +19,7 @@ int main(void) {
     printf("=============================================\n");
 
     /* PKGID: semver extracted from cargo pkgid, e.g. "0.1.0" */
-    failures += check("INJECT_BROWSER_SDK_PKGID", INJECT_BROWSER_SDK_PKGID, 5);
+    failures += check("INJECT_BROWSER_SDK_VERSION", INJECT_BROWSER_SDK_VERSION, 5);
 
     /* GIT_SHA: full 40-char hex SHA */
     failures += check("INJECT_BROWSER_SDK_GIT_SHA", INJECT_BROWSER_SDK_GIT_SHA, 40);
@@ -33,9 +33,9 @@ int main(void) {
     failures += check("INJECT_BROWSER_SDK_GIT_SHA_SHORT", INJECT_BROWSER_SDK_GIT_SHA_SHORT, 7);
 
     /* VERSION: combined "semver+sha_short", e.g. "0.1.0+0b2cc63" */
-    failures += check("INJECT_BROWSER_SDK_VERSION", INJECT_BROWSER_SDK_VERSION, 13);
-    if (strchr(INJECT_BROWSER_SDK_VERSION, '+') == NULL) {
-        printf("FAIL: VERSION missing '+' separator: %s\n", INJECT_BROWSER_SDK_VERSION);
+    failures += check("INJECT_BROWSER_SDK_COMBINED_VERSION", INJECT_BROWSER_SDK_COMBINED_VERSION, 13);
+    if (strchr(INJECT_BROWSER_SDK_COMBINED_VERSION, '+') == NULL) {
+        printf("FAIL: VERSION missing '+' separator: %s\n", INJECT_BROWSER_SDK_COMBINED_VERSION);
         failures++;
     }
 

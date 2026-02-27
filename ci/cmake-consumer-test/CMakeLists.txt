@@ -26,17 +26,17 @@ endif()
 # ---------------------------------------------------------------------------
 # Version variable validation (C-only, no Rust toolchain needed at test-time)
 # ---------------------------------------------------------------------------
-message(STATUS "INJECT_BROWSER_SDK_PKGID          = ${INJECT_BROWSER_SDK_PKGID}")
+message(STATUS "INJECT_BROWSER_SDK_VERSION          = ${INJECT_BROWSER_SDK_VERSION}")
 message(STATUS "INJECT_BROWSER_SDK_GIT_SHA        = ${INJECT_BROWSER_SDK_GIT_SHA}")
 message(STATUS "INJECT_BROWSER_SDK_GIT_SHA_SHORT  = ${INJECT_BROWSER_SDK_GIT_SHA_SHORT}")
-message(STATUS "INJECT_BROWSER_SDK_VERSION        = ${INJECT_BROWSER_SDK_VERSION}")
+message(STATUS "INJECT_BROWSER_SDK_COMBINED_VERSION        = ${INJECT_BROWSER_SDK_COMBINED_VERSION}")
 
 add_executable(validate_version validate_version.c)
 target_compile_definitions(validate_version PRIVATE
-  INJECT_BROWSER_SDK_PKGID="${INJECT_BROWSER_SDK_PKGID}"
+  INJECT_BROWSER_SDK_VERSION="${INJECT_BROWSER_SDK_VERSION}"
   INJECT_BROWSER_SDK_GIT_SHA="${INJECT_BROWSER_SDK_GIT_SHA}"
   INJECT_BROWSER_SDK_GIT_SHA_SHORT="${INJECT_BROWSER_SDK_GIT_SHA_SHORT}"
-  INJECT_BROWSER_SDK_VERSION="${INJECT_BROWSER_SDK_VERSION}"
+  INJECT_BROWSER_SDK_COMBINED_VERSION="${INJECT_BROWSER_SDK_COMBINED_VERSION}"
 )
 
 enable_testing()

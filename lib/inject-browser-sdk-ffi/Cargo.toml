@@ -20,7 +20,7 @@ std = ["inject-browser-sdk/std", "serde/std", "serde_json/std"]
 inject-browser-sdk = { path = "../inject-browser-sdk" }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
-rustix = { version = "0.38", default-features = false, features = ["mm", "stdio"] }
+rustix = { version = "1.0", default-features = false, features = ["mm", "stdio"] }
 
 # on linux use rustix-dlmalloc
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -33,8 +33,8 @@ dlmalloc = { version = "0.2", features = ["global"] }
 
 [dev-dependencies]
 pretty_assertions = { version = "1.4.0", features = ["unstable"] }
-rand = "0.8.5"
+rand = "0.10.0"
 
 [build-dependencies]
-cbindgen = "0.26.0"
+cbindgen = "0.29.0"
 csbindgen = "1.8.0"

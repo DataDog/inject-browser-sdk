@@ -1,7 +1,7 @@
 # CMake Consumer Guide
 
 Consume `inject-browser-sdk-ffi` from your CMake project via `FetchContent`.
-The FFI crate is built in **no_std** mode by default.
+The CMake wrapper builds the FFI crate in **no_std** mode by default (by passing `NO_DEFAULT_FEATURES` to the Rust build).
 
 **Requires:** CMake 3.22+, Rust toolchain, `cbindgen`
 

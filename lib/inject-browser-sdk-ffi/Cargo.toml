@@ -15,11 +15,14 @@ crate-type = ["staticlib", "cdylib", "lib"]
 default = ["std"]
 # default = []
 std = ["inject-browser-sdk/std", "serde/std", "serde_json/std"]
+alloc = ["inject-browser-sdk/alloc", "serde/alloc", "serde_json/alloc"]
 
 [dependencies]
-inject-browser-sdk = { path = "../inject-browser-sdk" }
+inject-browser-sdk = { path = "../inject-browser-sdk", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rustix = { version = "0.38", default-features = false, features = ["mm", "stdio"] }
 
 # on linux use rustix-dlmalloc
@@ -29,7 +32,6 @@ rustix-dlmalloc = { version = "0.2.2", features = ["global"] }
 # on other platforms use dlmalloc
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 dlmalloc = { version = "0.2", features = ["global"] }
-
 
 [dev-dependencies]
 pretty_assertions = { version = "1.4.0", features = ["unstable"] }

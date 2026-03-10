@@ -1,0 +1,35 @@
+---
+.wasm_base:
+  tags: ["arch:amd64"]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - changes:
+        - lib/**/*
+        - wasm/**/*
+        - Cargo.toml
+        - Cargo.lock
+        - .gitlab/wasm.yml
+
+wasm_build:
+  stage: build
+  extends: .wasm_base
+  image: registry.ddbuild.io/images/rust:ubuntu-22.04
+  needs: []
+  before_script:
+    - rustup target add wasm32-unknown-unknown
+  script:
+    - cargo build --release --target wasm32-unknown-unknown -p inject-browser-sdk-ffi --no-default-features --features alloc
+    - test -f target/wasm32-unknown-unknown/release/inject_browser_sdk_ffi.wasm
+  artifacts:
+    expire_in: 2 weeks
+    paths:
+      - target/wasm32-unknown-unknown/release/inject_browser_sdk_ffi.wasm
+
+wasm_node_integration_test:
+  stage: test
+  extends: .wasm_base
+  image: registry.ddbuild.io/images/nodejs:24.13.1-gbi-noble
+  needs: ["wasm_build"]
+  script:
+    - node --test wasm/node/test_integration.js

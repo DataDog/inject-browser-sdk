@@ -4,7 +4,9 @@ members = [
   "lib/inject-browser-sdk",
   "lib/inject-browser-sdk-ffi",
   "fuzz",
-  "cmd/check_conf", "cmd/test_inject",
+  "cmd/check_conf",
+  "cmd/test_inject",
+  "xtask",
 ]
 
 [workspace.package]

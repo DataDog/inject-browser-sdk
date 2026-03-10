@@ -3,6 +3,7 @@ include:
   - local: .gitlab/java.yml
   - local: .gitlab/installer.yml
   - local: .gitlab/cmake.yml
+  - local: .gitlab/wasm.yml
 
 stages:
   - build

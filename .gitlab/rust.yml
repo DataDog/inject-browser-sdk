@@ -1,6 +1,6 @@
 ---
 .rust_base:
-  image: registry.ddbuild.io/images/mirror/rust:1.74.0
+  image: registry.ddbuild.io/images/mirror/rust:1.73
   tags: ["arch:amd64"]
   needs: []
   rules:

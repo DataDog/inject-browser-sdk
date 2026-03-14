@@ -19,7 +19,7 @@ installer_shellcheck:
   stage: check
   extends: .installer_rules
   image:
-    name: registry.ddbuild.io/images/mirror/koalaman/shellcheck-alpine:v0.9.0
+    name: registry.ddbuild.io/images/mirror/koalaman/shellcheck-alpine:v0.10.0
     entrypoint: [""]
   tags: ["arch:amd64"]
   needs: []
@@ -64,11 +64,11 @@ installer_build_arm64:
 installer_test:
   stage: test
   extends: .installer_rules
-  image: registry.ddbuild.io/images/mirror/docker:24-dind
+  image: docker:27-dind
   tags: ["arch:amd64"]
   needs: ["installer_build_amd64"]
   services:
-    - name: registry.ddbuild.io/images/mirror/docker:24-dind
+    - name: docker:27-dind
       alias: docker
   variables:
     DOCKER_HOST: tcp://docker:2376
@@ -96,11 +96,11 @@ installer_test:
 installer_download_test:
   stage: test
   extends: .installer_rules
-  image: registry.ddbuild.io/images/mirror/docker:24-dind
+  image: docker:27-dind
   tags: ["arch:amd64"]
   needs: []
   services:
-    - name: registry.ddbuild.io/images/mirror/docker:24-dind
+    - name: docker:27-dind
       alias: docker
   variables:
     DOCKER_HOST: tcp://docker:2376

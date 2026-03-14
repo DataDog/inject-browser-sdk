@@ -64,11 +64,11 @@ installer_build_arm64:
 installer_test:
   stage: test
   extends: .installer_rules
-  image: docker:27-dind
+  image: registry.ddbuild.io/images/docker:27.4.0-gbi-dind
   tags: ["arch:amd64"]
   needs: ["installer_build_amd64"]
   services:
-    - name: docker:27-dind
+    - name: registry.ddbuild.io/images/docker:27.4.0-gbi-dind
       alias: docker
   variables:
     DOCKER_HOST: tcp://docker:2376
@@ -96,11 +96,11 @@ installer_test:
 installer_download_test:
   stage: test
   extends: .installer_rules
-  image: docker:27-dind
+  image: registry.ddbuild.io/images/docker:27.4.0-gbi-dind
   tags: ["arch:amd64"]
   needs: []
   services:
-    - name: docker:27-dind
+    - name: registry.ddbuild.io/images/docker:27.4.0-gbi-dind
       alias: docker
   variables:
     DOCKER_HOST: tcp://docker:2376

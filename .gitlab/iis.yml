@@ -62,10 +62,9 @@ variables:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
     - changes:
+        - .gitlab/**/*
         - injector_IIS/**/*
         - lib/**/*
-        - .gitlab/iis.yml
-        - .gitlab-ci.yml
         - Dockerfile.windows
         - Makefile.windows
         - Makefile

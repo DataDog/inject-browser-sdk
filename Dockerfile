@@ -4,7 +4,7 @@
 #
 # Copyright 2024-Present Datadog, Inc.
 
-FROM public.ecr.aws/b1o7r7e0/nginx_musl_toolchain:latest
+FROM registry.ddbuild.io/ci/nginx-datadog/nginx_musl_toolchain
 
 ARG ARCH
 
@@ -14,7 +14,7 @@ RUN ~/.cargo/bin/rustup target add x86_64-pc-windows-msvc
 # Install Windows CRT
 ENV XWIN_VERSION=0.6.5
 ADD scripts/install-xwin-toolchain.py install-xwin-toolchain.py
-RUN ./install-xwin-toolchain --xwin-version ${XWIN_VERSION} --output-dir /xwin
+RUN python3 ./install-xwin-toolchain.py --xwin-version ${XWIN_VERSION} --output-dir /xwin
 
 ENV CC_x86_64_pc_windows_msvc="clang" \
     CXX_x86_64_pc_windows_msvc="clang" \
@@ -28,4 +28,3 @@ ENV CC_x86_64_pc_windows_msvc="clang" \
 # These are separate because docker won't resolve env var defined in the same ENV block
 ENV CFLAGS_x86_64_pc_windows_msvc="$CL_FLAGS" \
     CXXFLAGS_x86_64_pc_windows_msvc="$CL_FLAGS"
-

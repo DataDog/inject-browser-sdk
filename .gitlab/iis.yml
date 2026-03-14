@@ -16,6 +16,9 @@ variables:
   ARTIFACTS_DIR: artifacts
   REGISTRY: registry.ddbuild.io
   OLD_REGISTRY: 486234852809.dkr.ecr.us-east-1.amazonaws.com
+  # Keep this tag aligned with Makefile.windows and push-ci-windows-image.
+  WINDOWS_XCOMP_TAG: 7f22c91
+  WINDOWS_XCOMP_IMAGE: public.ecr.aws/b1o7r7e0/inject-browser-sdk:windows-builder-$WINDOWS_XCOMP_TAG
 
 ########################################
 # IIS build and test jobs
@@ -56,13 +59,16 @@ variables:
 
 .IIS_build_when:
   rules:
-    - changes:
-      - scheduled
+    - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
     - changes:
         - injector_IIS/**/*
         - lib/**/*
+        - .gitlab/iis.yml
         - .gitlab-ci.yml
+        - Dockerfile.windows
+        - Makefile.windows
+        - Makefile
 
 injector_IIS_build:
   extends:
@@ -173,3 +179,29 @@ promote_injector_IIS_release_candidate:
   script:
     - aws s3 cp --region us-east-1 --sse AES256 --acl public-read s3://$S3_BUCKET/iis/$RC_COMMIT/$ARCH/injector_IIS.msi injector_IIS.msi
     - aws s3 cp --region us-east-1 --sse AES256 --acl public-read injector_IIS.msi s3://$S3_BUCKET/iis/latest/$ARCH/
+
+injector_IIS_xcomp_build:
+  stage: build
+  extends: .IIS_build_when
+  image: $WINDOWS_XCOMP_IMAGE
+  tags: ["arch:amd64"]
+  needs: []
+  script:
+    - cd injector_IIS
+    - cmake --preset=ci-xcomp -B build -DCMAKE_BUILD_TYPE=Debug .
+    - cmake --build build -j
+  artifacts:
+    expire_in: 2 weeks
+    paths:
+      - injector_IIS/build/
+
+injector_IIS_unit_test:
+  stage: test
+  extends: .IIS_build_when
+  image: $WINDOWS_XCOMP_IMAGE
+  tags: ["arch:amd64"]
+  needs: ["injector_IIS_xcomp_build"]
+  variables:
+    WINEDEBUG: "-all"
+  script:
+    - wine64 injector_IIS/build/test/unittests/iis_injector_tests.exe

@@ -6,6 +6,111 @@ variables:
     value: null
     description: 'The release tag to use for the installer release'
 
+.installer_rules:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - changes:
+        - installer/**/*
+        - .gitlab/installer.yml
+        - .gitlab-ci.yml
+
+installer_shellcheck:
+  stage: check
+  extends: .installer_rules
+  image: registry.ddbuild.io/images/mirror/koalaman/shellcheck-alpine:v0.9.0
+  tags: ["arch:amd64"]
+  needs: []
+  entrypoint: [""]
+  script:
+    - find installer/ -type f -executable | xargs shellcheck
+
+installer_go_test:
+  stage: test
+  extends: .installer_rules
+  image: registry.ddbuild.io/images/mirror/golang:1.24
+  tags: ["arch:amd64"]
+  needs: []
+  script:
+    - go test -C ./installer/configurator -v
+
+installer_build_amd64:
+  stage: build
+  extends: .installer_rules
+  image: registry.ddbuild.io/images/mirror/golang:1.24
+  tags: ["arch:amd64"]
+  needs: []
+  script:
+    - CGO_ENABLED=0 GOARCH=amd64 go -C ./installer/configurator build -o proxy-configurator
+  artifacts:
+    expire_in: 2 weeks
+    paths:
+      - installer/configurator/proxy-configurator
+
+installer_build_arm64:
+  stage: build
+  extends: .installer_rules
+  image: registry.ddbuild.io/images/mirror/golang:1.24
+  tags: ["arch:amd64"]
+  needs: []
+  script:
+    - CGO_ENABLED=0 GOARCH=arm64 go -C ./installer/configurator build -o proxy-configurator-arm64
+  artifacts:
+    expire_in: 2 weeks
+    paths:
+      - installer/configurator/proxy-configurator-arm64
+
+installer_test:
+  stage: test
+  extends: .installer_rules
+  image: registry.ddbuild.io/images/mirror/docker:24-dind
+  tags: ["arch:amd64"]
+  needs: ["installer_build_amd64"]
+  services:
+    - name: registry.ddbuild.io/images/mirror/docker:24-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_TLS_VERIFY: 1
+    DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
+    DD_API_KEY: fakekey
+  parallel:
+    matrix:
+      - PROXY_KIND: nginx
+        PROXY_DOCKERFILE:
+          - nginx.bookworm.Dockerfile
+          - nginx.alpine.Dockerfile
+          - nginx.al2023.Dockerfile
+      - PROXY_KIND: httpd
+        PROXY_DOCKERFILE:
+          - httpd.bookworm.Dockerfile
+          - httpd.alpine.Dockerfile
+          - httpd.al2023.Dockerfile
+  before_script:
+    - cp installer/configurator/proxy-configurator installer/proxy-configurator
+  script:
+    - docker compose -f installer/test/docker-compose.yml up --build --exit-code-from proxy
+
+installer_download_test:
+  stage: test
+  extends: .installer_rules
+  image: registry.ddbuild.io/images/mirror/docker:24-dind
+  tags: ["arch:amd64"]
+  needs: []
+  services:
+    - name: registry.ddbuild.io/images/mirror/docker:24-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_TLS_VERIFY: 1
+    DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
+    DD_API_KEY: fakekey
+    NGINX_DOCKERFILE: nginx.bookworm.Dockerfile
+  script:
+    - docker compose -f installer/test/docker-compose-download.yml up --build --exit-code-from nginx
+
 .installer_release:
   stage: release
   tags: ["arch:amd64"]

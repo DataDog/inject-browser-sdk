@@ -10,8 +10,7 @@
           "XWIN_ROOT": "/xwin",
           "TOOLCHAIN_ROOT": "/usr/bin/",
           "IIS_INJECTOR_STATIC_CRT": "1",
-          "IIS_BUILD_TESTS": "1",
-          "IIS_INJECTOR_TEST_DIR": "C:/Users/circleci/project/injector_IIS/test"
+          "IIS_BUILD_TESTS": "1"
         }
       },
       {

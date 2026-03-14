@@ -23,5 +23,8 @@ build_out/
 build-out/
 *.msi
 
+# Windows cross-compilation
+.docker-stamps/
+
 # Installer
 installer/proxy-configurator

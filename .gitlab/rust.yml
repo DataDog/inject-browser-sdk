@@ -1,0 +1,24 @@
+---
+.rust_base:
+  image: registry.ddbuild.io/images/mirror/rust:1.74.0
+  tags: ["arch:amd64"]
+  needs: []
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_success
+
+rust_lint:
+  stage: check
+  extends: .rust_base
+  script:
+    - rustup component add rustfmt
+    - rustup component add clippy
+    - ./scripts/codestyle.sh lint
+
+rust_build_and_test:
+  stage: build
+  extends: .rust_base
+  script:
+    - cargo build --verbose
+    - cargo test --verbose

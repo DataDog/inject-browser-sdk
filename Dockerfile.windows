@@ -1,0 +1,59 @@
+# Dockerfile for Windows cross-compilation toolchain and test runner
+# This image provides the build environment with Wine for testing
+#
+# Build: cross-compiles Windows binaries using clang-cl + xwin
+# Test:  runs Windows executables via Wine
+#
+# Usage:
+#   docker build -f Dockerfile.windows -t inject-browser-sdk:windows-builder .
+#   docker run --rm -v $(pwd):/work -w /work inject-browser-sdk:windows-builder \
+#       cmake --preset=ci-xcomp -B build -S injector_IIS -DCMAKE_BUILD_TYPE=Debug .
+#   docker run --rm -v $(pwd):/work -w /work inject-browser-sdk:windows-builder \
+#       wine64 injector_IIS/build/test/unittests/iis_injector_tests.exe
+
+FROM messense/cargo-xwin:latest
+
+# Install build tools and Wine for testing
+# lld-19 provides lld-link for Windows linking
+RUN apt-get update && apt-get install -y \
+    ninja-build \
+    git \
+    lld-19 \
+    curl \
+    wine64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install CMake 3.24+ (required by injector_IIS)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then CMAKE_ARCH="linux-x86_64"; \
+    elif [ "$ARCH" = "aarch64" ]; then CMAKE_ARCH="linux-aarch64"; \
+    else echo "Unsupported architecture: $ARCH" && exit 1; fi && \
+    curl -fsSL "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-${CMAKE_ARCH}.sh" -o /tmp/cmake.sh && \
+    chmod +x /tmp/cmake.sh && \
+    /tmp/cmake.sh --skip-license --prefix=/usr/local && \
+    rm /tmp/cmake.sh && \
+    cmake --version
+
+# Create symlinks so TOOLCHAIN_ROOT=/usr/bin works with our cmake toolchain file
+RUN ln -sf /usr/lib/llvm-19/bin/clang /usr/bin/clang-cl && \
+    ln -sf /usr/lib/llvm-19/bin/lld-link /usr/bin/lld-link && \
+    ln -sf /usr/lib/llvm-19/bin/llvm-lib /usr/bin/llvm-lib && \
+    ln -sf /usr/lib/llvm-19/bin/llvm-ar /usr/bin/llvm-ar && \
+    ln -sf /usr/lib/llvm-19/bin/llvm-nm /usr/bin/llvm-nm && \
+    ln -sf /usr/lib/llvm-19/bin/llvm-mt /usr/bin/llvm-mt && \
+    ln -sf /usr/lib/llvm-19/bin/llvm-ranlib /usr/bin/llvm-ranlib && \
+    ln -sf /usr/lib/llvm-19/bin/llvm-rc /usr/bin/llvm-rc
+
+# Install xwin and download Windows SDK/CRT
+RUN cargo install xwin && \
+    xwin --accept-license splat --include-debug-libs --include-debug-symbols --output /xwin
+
+# Add Rust Windows target for corrosion cross-compilation
+RUN rustup target add x86_64-pc-windows-msvc
+
+# Set Wine to quiet mode
+ENV WINEDEBUG=-all
+ENV XDG_RUNTIME_DIR=/tmp/runtime-root
+RUN mkdir -p /tmp/runtime-root
+
+WORKDIR /work

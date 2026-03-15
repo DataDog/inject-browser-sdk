@@ -18,7 +18,7 @@ variables:
   OLD_REGISTRY: 486234852809.dkr.ecr.us-east-1.amazonaws.com
   # Keep this tag aligned with Makefile.windows and push-ci-windows-image.
   WINDOWS_XCOMP_TAG: 7f22c91
-  WINDOWS_XCOMP_IMAGE: public.ecr.aws/b1o7r7e0/inject-browser-sdk:windows-builder-$WINDOWS_XCOMP_TAG
+  WINDOWS_XCOMP_IMAGE: registry.ddbuild.io/ci/injecto-browser-sdk/images/windows-builder:$WINDOWS_XCOMP_TAG
 
 ########################################
 # IIS build and test jobs

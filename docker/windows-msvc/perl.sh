@@ -18,7 +18,7 @@ main() {
     td="$(mktemp -d)"
 
     pushd "${td}"
-    wget "${url}"
+    wget --no-check-certificate "${url}"
     unzip "${file}" -d /opt/perl
 
     local src=/opt/perl/perl/bin

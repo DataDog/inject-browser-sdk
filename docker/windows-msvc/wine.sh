@@ -5,28 +5,16 @@ set -euo pipefail
 
 . /lib.sh
 
+# Ubuntu 24.04 ships Wine 9.0 which includes bcryptprimitives.dll and other
+# system DLLs required by modern MSVC binaries.
+# Note: wine32/wine32:i386 was replaced by libwine:i386 in noble.
 main() {
-    local version=9.0.0.0~focal-1
-
-    install_packages wget
     dpkg --add-architecture i386
-
-    wget -nc https://dl.winehq.org/wine-builds/winehq.key
-    mkdir -p /etc/apt/keyrings
-    mv winehq.key /etc/apt/keyrings/winehq-archive.key
-
-    wget -nc https://dl.winehq.org/wine-builds/ubuntu/dists/focal/winehq-focal.sources
-    mv winehq-focal.sources /etc/apt/sources.list.d/
-    sed -i 's@/usr/share/keyrings/@/etc/apt/keyrings/@' /etc/apt/sources.list.d/winehq-focal.sources || true
-
     apt-get update
     apt-get install --assume-yes --no-install-recommends \
-        "wine-stable=${version}" \
-        "wine-stable-amd64=${version}" \
-        "wine-stable-i386=${version}" \
-        "winehq-stable=${version}"
-
-    purge_packages
+        wine \
+        wine64
+    rm -rf /var/lib/apt/lists/*
 }
 
 main "${@}"

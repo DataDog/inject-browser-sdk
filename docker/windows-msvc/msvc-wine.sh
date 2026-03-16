@@ -8,14 +8,15 @@ set -euo pipefail
 main() {
     local commit=34d9736591b691c6bdaab8e6036e1f5b47f956f5
 
+    # ca-certificates is already installed by common.sh — do NOT list it here,
+    # because purge_packages would remove it and break HTTPS for later steps.
     install_packages python3 \
         python3-pip \
         msitools \
         python3-simplejson \
-        ca-certificates \
         winbind
 
-    python3 -m pip install six
+    python3 -m pip install --break-system-packages six
 
     local td
     td="$(mktemp -d)"
@@ -29,7 +30,7 @@ main() {
     ./install.sh /opt/msvc
     popd
 
-    python3 -m pip uninstall six --yes
+    python3 -m pip uninstall --break-system-packages six --yes
     purge_packages
     rm -rf "${td}"
     rm "${0}"

@@ -55,7 +55,8 @@ DOCKER_WIN_STAMP     := $(DOCKER_WIN_STAMP_DIR)/windows-builder
 .PHONY: iis-build iis-configure iis-build-step iis-test iis-clean windows-shell
 
 # Build the Docker image (only if Dockerfile changed)
-$(DOCKER_WIN_STAMP): Dockerfile.windows
+DOCKER_WIN_SCRIPTS := $(wildcard docker/windows-msvc/*.sh)
+$(DOCKER_WIN_STAMP): Dockerfile.windows $(DOCKER_WIN_SCRIPTS)
 ifeq ($(IN_DOCKER_WIN),false)
 	@echo "==> Building Windows cross-compilation toolchain image..."
 	docker build --platform $(DOCKER_WIN_PLATFORM) -t $(DOCKER_WIN_IMAGE) -f Dockerfile.windows .
@@ -79,7 +80,7 @@ iis-build-step: $(DOCKER_WIN_STAMP)
 # Build and run unit tests via Wine
 iis-test: iis-build
 	@echo "==> Running IIS injector unit tests via Wine..."
-	$(DOCKER_WIN_RUN) wine64 $(IIS_BUILD_DIR)/test/unittests/iis_injector_tests.exe
+	$(DOCKER_WIN_RUN) wine $(IIS_BUILD_DIR)/test/unittests/iis_injector_tests.exe
 
 # Clean build artifacts
 iis-clean:

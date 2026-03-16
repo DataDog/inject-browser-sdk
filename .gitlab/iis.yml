@@ -182,7 +182,9 @@ promote_injector_IIS_release_candidate:
 injector_IIS_xcomp_build:
   stage: build
   extends: .IIS_build_when
-  image: $WINDOWS_XCOMP_IMAGE
+  image:
+    name: $WINDOWS_XCOMP_IMAGE
+    entrypoint: ["/msvc-windows-entry.sh"]
   tags: ["arch:amd64"]
   needs: []
   script:
@@ -197,10 +199,10 @@ injector_IIS_xcomp_build:
 injector_IIS_unit_test:
   stage: test
   extends: .IIS_build_when
-  image: $WINDOWS_XCOMP_IMAGE
+  image:
+    name: $WINDOWS_XCOMP_IMAGE
+    entrypoint: ["/msvc-windows-entry.sh"]
   tags: ["arch:amd64"]
   needs: ["injector_IIS_xcomp_build"]
-  variables:
-    WINEDEBUG: "-all"
   script:
-    - wine64 injector_IIS/build/test/unittests/iis_injector_tests.exe
+    - wine injector_IIS/build/test/unittests/iis_injector_tests.exe

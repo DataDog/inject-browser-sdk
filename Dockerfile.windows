@@ -3,8 +3,9 @@
 # This vendors the cross-rs MSVC/Wine setup so Cargo and CMake both use the
 # real Microsoft toolchain for x86_64-pc-windows-msvc builds.
 
-FROM ubuntu:20.04
+FROM registry.ddbuild.io/images/base/gbi-ubuntu_2404:release
 
+USER root
 ARG DEBIAN_FRONTEND=noninteractive
 ARG RUST_VERSION=1.89.0
 ARG ARCH=x64
@@ -29,7 +30,7 @@ COPY docker/windows-msvc/msvc-wine-symlink.sh /
 RUN bash /msvc-wine-symlink.sh "$ARCH"
 
 RUN apt-get update && \
-    apt-get install --assume-yes --no-install-recommends ninja-build && \
+    apt-get install --assume-yes --no-install-recommends ca-certificates curl ninja-build && \
     rm -rf /var/lib/apt/lists/*
 
 ENV RUSTUP_HOME=/usr/local/rustup
@@ -49,6 +50,7 @@ RUN mkdir -p /usr/lib/binfmt-support/ && \
     ln -s /usr/bin/wine /usr/bin/run-detectors
 
 COPY docker/windows-msvc/msvc-windows-entry.sh /
+RUN chmod +x /msvc-windows-entry.sh
 ENTRYPOINT ["/msvc-windows-entry.sh"]
 
 ENV CROSS_SYSROOT=/opt/msvc/vc/tools/msvc/latest

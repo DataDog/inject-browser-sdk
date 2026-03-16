@@ -4,7 +4,9 @@
 #
 # Copyright 2024-Present Datadog, Inc.
 
-# the name of the target operating system
+# Native Windows MSVC toolchain — used by the ci-native preset on real Windows
+# runners where cl.exe, link.exe, and mt.exe all run natively.
+
 set(CMAKE_SYSTEM_NAME Windows)
 set(CMAKE_SYSTEM_VERSION 10.0)
 set(CMAKE_SYSTEM_PROCESSOR x86_64)

@@ -2,6 +2,14 @@
 #
 # This vendors the cross-rs MSVC/Wine setup so Cargo and CMake both use the
 # real Microsoft toolchain for x86_64-pc-windows-msvc builds.
+#
+# Published images (update WINDOWS_XCOMP_TAG in Makefile, Makefile.windows,
+# and .gitlab/iis.yml when rebuilding):
+#   ghcr.io/datadog/inject-browser-sdk/windows-builder:<tag>
+#   registry.ddbuild.io/ci/injecto-browser-sdk/images/windows-builder:<tag>
+#
+# Build & push:
+#   make push-ci-windows-image
 
 FROM registry.ddbuild.io/images/base/gbi-ubuntu_2404:release
 

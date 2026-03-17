@@ -2,6 +2,7 @@ COMMIT_SHA ?= $(shell git rev-parse --short HEAD)
 DOCKER_REPO ?= public.ecr.aws/b1o7r7e0/inject-browser-sdk
 WINDOWS_XCOMP_TAG ?= 7f22c91
 WINDOWS_XCOMP_REPO ?= registry.ddbuild.io/ci/injecto-browser-sdk/images/windows-builder
+WINDOWS_XCOMP_GHCR ?= ghcr.io/datadog/inject-browser-sdk/windows-builder
 
 include Makefile.windows
 
@@ -29,8 +30,12 @@ push-ci-images:
 
 .PHONY: push-ci-windows-image
 push-ci-windows-image:
-	docker build --progress=plain --platform linux/amd64 -t $(WINDOWS_XCOMP_REPO):$(WINDOWS_XCOMP_TAG) -f Dockerfile.windows .
+	docker build --progress=plain --platform linux/amd64 \
+		-t $(WINDOWS_XCOMP_REPO):$(WINDOWS_XCOMP_TAG) \
+		-t $(WINDOWS_XCOMP_GHCR):$(WINDOWS_XCOMP_TAG) \
+		-f Dockerfile.windows .
 	docker push $(WINDOWS_XCOMP_REPO):$(WINDOWS_XCOMP_TAG)
+	docker push $(WINDOWS_XCOMP_GHCR):$(WINDOWS_XCOMP_TAG)
 
 .PHONY: artifacts
 artifacts:

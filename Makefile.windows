@@ -19,7 +19,7 @@ IN_DOCKER_WIN ?= $(shell if [ -f /.dockerenv ] || \
 
 # Docker configuration
 # Force x86_64 platform - Wine needs native x86_64 to run Windows executables
-WINDOWS_XCOMP_TAG ?= 7f22c91
+WINDOWS_XCOMP_TAG ?= 5956608
 WINDOWS_XCOMP_REPO ?= registry.ddbuild.io/ci/injecto-browser-sdk/images/windows-builder
 DOCKER_WIN_PLATFORM  := linux/amd64
 # Keep this tag aligned with .gitlab/iis.yml and push-ci-windows-image.

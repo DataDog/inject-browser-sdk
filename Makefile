@@ -1,6 +1,6 @@
 COMMIT_SHA ?= $(shell git rev-parse --short HEAD)
 DOCKER_REPO ?= public.ecr.aws/b1o7r7e0/inject-browser-sdk
-WINDOWS_XCOMP_TAG ?= 7f22c91
+WINDOWS_XCOMP_TAG ?= 5956608
 WINDOWS_XCOMP_REPO ?= registry.ddbuild.io/ci/injecto-browser-sdk/images/windows-builder
 WINDOWS_XCOMP_GHCR ?= ghcr.io/datadog/inject-browser-sdk/windows-builder
 

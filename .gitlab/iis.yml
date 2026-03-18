@@ -15,7 +15,6 @@ variables:
   CI_IMAGE_AGENT_DEPLOY: v47979770-a5a4cfd0
   ARTIFACTS_DIR: artifacts
   REGISTRY: registry.ddbuild.io
-  OLD_REGISTRY: 486234852809.dkr.ecr.us-east-1.amazonaws.com
   # Keep this tag aligned with Makefile.windows and push-ci-windows-image.
   WINDOWS_XCOMP_TAG: 5956608
   WINDOWS_XCOMP_IMAGE: registry.ddbuild.io/ci/injecto-browser-sdk/images/windows-builder:$WINDOWS_XCOMP_TAG
@@ -93,7 +92,7 @@ manual_injector_IIS_build:
   stage: test
   tags: ["arch:amd64"]
   needs: []
-  image: ${OLD_REGISTRY}/ci/${E2E_RUNNER_IMAGE}${TEST_INFRA_DEFINITIONS_BUILDIMAGES_SUFFIX}:${TEST_INFRA_DEFINITIONS_BUILDIMAGES}
+  image: ${REGISTRY}/ci/${E2E_RUNNER_IMAGE}${TEST_INFRA_DEFINITIONS_BUILDIMAGES_SUFFIX}:${TEST_INFRA_DEFINITIONS_BUILDIMAGES}
   variables:
     AWS_SSM_PREFIX: "ci.inject-browser-sdk."
     KEY_PAIR_NAME: "ci.inject-browser-sdk"

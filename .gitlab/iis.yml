@@ -71,13 +71,21 @@ variables:
 
 .IIS_build_when:
   rules:
-    - changes:
-      - scheduled
+    - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      changes:
+        compare_to: refs/heads/main
+        paths:
+          - injector_IIS/**/*
+          - lib/**/*
+          - .gitlab-ci.yml
+          - .gitlab/iis.yml
     - changes:
         - injector_IIS/**/*
         - lib/**/*
         - .gitlab-ci.yml
+        - .gitlab/iis.yml
 
 injector_IIS_build:
   extends:

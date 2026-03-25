@@ -60,7 +60,7 @@ jobs:
 
   build-iis:
     docker:
-      - image: public.ecr.aws/b1o7r7e0/inject-browser-sdk:builder-7f22c91
+      - image: ghcr.io/datadog/inject-browser-sdk:builder-7f22c91
     parameters:
       build-type:
         type: enum

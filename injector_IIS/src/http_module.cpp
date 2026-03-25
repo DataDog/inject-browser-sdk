@@ -8,6 +8,8 @@
 #include "module_context.h"
 #include "telemetry.h"
 #include <cassert>
+#include <cerrno>
+#include <cstdlib>
 #include <datadog/telemetry/telemetry.h>
 #include <format>
 #include <string>
@@ -175,27 +177,7 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  // Update Content-Length upfront to account for the snippet size.
-  // If injection fails, injector_end() returns padding spaces to fill the
-  // difference, keeping the body size consistent with the declared length.
-  // When Transfer-Encoding: chunked is used, Content-Length is absent and
-  // no update is needed.
-  bool output_padding = false;
-  USHORT contentLengthHeaderLength;
-  PCSTR contentLengthValue =
-      pHttpResponse.GetHeader("Content-Length", &contentLengthHeaderLength);
-  if (contentLengthValue != nullptr && contentLengthHeaderLength > 0) {
-    output_padding = true;
-    auto originalLength = std::stoull(
-        std::string(contentLengthValue, contentLengthHeaderLength));
-    auto newLength = originalLength + snippet->length;
-    auto newLengthStr = std::to_string(newLength);
-    pHttpResponse.SetHeader("Content-Length", newLengthStr.c_str(),
-                            static_cast<USHORT>(newLengthStr.size()), TRUE);
-  }
-
   bool injected = false;
-  int lastChunkIndex = -1;
 
   // Write the existing data chunks to the injector, and then write the
   // resulting byte slices into our new response string
@@ -209,7 +191,6 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
       return RQ_NOTIFICATION_CONTINUE;
     }
 
-    lastChunkIndex = i;
     auto chunkLength = dataChunk.FromMemory.BufferLength;
 
     auto injectorResult = injector_write(
@@ -242,41 +223,37 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
     }
   }
 
+  // Update Content-Length after the chunk loop so that early returns from
+  // non-memory chunks don't leave an inflated header on an unmodified body.
+  // When Transfer-Encoding: chunked is used, Content-Length is absent and
+  // no update is needed.
   if (injected) {
+    USHORT contentLengthHeaderLength;
+    PCSTR contentLengthValue =
+        pHttpResponse.GetHeader("Content-Length", &contentLengthHeaderLength);
+    if (contentLengthValue != nullptr && contentLengthHeaderLength > 0) {
+      auto headerStr =
+          std::string(contentLengthValue, contentLengthHeaderLength);
+      char *endPtr = nullptr;
+      unsigned long long originalLength =
+          strtoull(headerStr.c_str(), &endPtr, 10);
+      if (endPtr != headerStr.c_str() && errno != ERANGE) {
+        auto newLengthStr =
+            std::to_string(originalLength + snippet->length);
+        HRESULT hr = pHttpResponse.SetHeader(
+            "Content-Length", newLengthStr.c_str(),
+            static_cast<USHORT>(newLengthStr.size()), TRUE);
+        if (hr != S_OK) {
+          logger.error("Error setting Content-Length header: " +
+                       std::system_category().message(hr));
+        }
+      }
+    }
+
     datadog::telemetry::counter::increment(
         telemetry::injection_succeed,
         telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
   } else {
-    // No injection point found. Call injector_end() to get padding spaces
-    // that keep the body size consistent with the already-updated
-    // Content-Length header.
-    if (output_padding && lastChunkIndex >= 0) {
-      auto endResult = injector_end(injector);
-      if (endResult.slices_length > 0) {
-        HTTP_DATA_CHUNK &lastChunk =
-            pResponseStruct->pEntityChunks[lastChunkIndex];
-        auto originalLength = lastChunk.FromMemory.BufferLength;
-
-        size_t totalLength = originalLength;
-        for (size_t i = 0; i < endResult.slices_length; ++i) {
-          totalLength += endResult.slices[i].length;
-        }
-
-        void *buffer = pHttpContext.AllocateRequestMemory(totalLength);
-        auto *offset = (uint8_t *)buffer;
-        memcpy(offset, lastChunk.FromMemory.pBuffer, originalLength);
-        offset += originalLength;
-        for (size_t i = 0; i < endResult.slices_length; ++i) {
-          const auto &slice = endResult.slices[i];
-          memcpy(offset, slice.start, slice.length);
-          offset += slice.length;
-        }
-
-        lastChunk.FromMemory.pBuffer = (PVOID)buffer;
-        lastChunk.FromMemory.BufferLength = totalLength;
-      }
-    }
-
     auto tags =
         telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag);
     if (auto content_encoding =

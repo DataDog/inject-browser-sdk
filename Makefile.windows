@@ -1,0 +1,93 @@
+# Makefile.windows - Windows cross-compilation and testing using Docker
+#
+# Provides targets for building and testing the IIS injector using a Docker
+# container with the Windows cross-compilation toolchain and Wine.
+#
+# Usage:
+#   make -f Makefile.windows iis-build        # Cross-compile IIS injector
+#   make -f Makefile.windows iis-test         # Build + run unit tests via Wine
+#   make -f Makefile.windows windows-shell    # Shell in build container
+#
+# Or include in main Makefile:
+#   include Makefile.windows
+
+# Detect if running inside Docker
+IN_DOCKER_WIN ?= $(shell if [ -f /.dockerenv ] || \
+                    grep -q docker /proc/1/cgroup 2>/dev/null || \
+                    [ "$(KUBERNETES_SERVICE_PORT_HTTPS)" ]; then echo "true"; \
+                    else echo "false"; fi)
+
+# Docker configuration
+# Force x86_64 platform - Wine needs native x86_64 to run Windows executables
+WINDOWS_XCOMP_TAG ?= 5956608
+WINDOWS_XCOMP_REPO ?= registry.ddbuild.io/ci/injecto-browser-sdk/images/windows-builder
+DOCKER_WIN_PLATFORM  := linux/amd64
+# Keep this tag aligned with .gitlab/iis.yml and push-ci-windows-image.
+DOCKER_WIN_IMAGE     ?= $(WINDOWS_XCOMP_REPO):$(WINDOWS_XCOMP_TAG)
+
+# On Linux, run as current user to avoid permission issues
+ifeq ($(shell uname -s),Linux)
+  DOCKER_WIN_USER := --user "$(shell id -u):$(shell id -g)"
+else
+  DOCKER_WIN_USER :=
+endif
+
+DOCKER_WIN_RUN_FLAGS := --rm -t --platform $(DOCKER_WIN_PLATFORM) \
+  $(DOCKER_WIN_USER) \
+  -v $(CURDIR):/work -w /work \
+  $(DOCKER_WIN_IMAGE)
+
+ifeq ($(IN_DOCKER_WIN),false)
+  DOCKER_WIN_RUN   := docker run $(DOCKER_WIN_RUN_FLAGS)
+  DOCKER_WIN_RUN_I := docker run -i $(DOCKER_WIN_RUN_FLAGS)
+else
+  DOCKER_WIN_RUN   :=
+  DOCKER_WIN_RUN_I :=
+endif
+
+# Build output
+IIS_BUILD_DIR := injector_IIS/build
+
+# Stamp to track Docker image builds
+DOCKER_WIN_STAMP_DIR := .docker-stamps
+DOCKER_WIN_STAMP     := $(DOCKER_WIN_STAMP_DIR)/windows-builder
+
+.PHONY: iis-build iis-configure iis-build-step iis-test iis-clean windows-shell
+
+# Build the Docker image (only if Dockerfile changed)
+DOCKER_WIN_SCRIPTS := $(wildcard docker/windows-msvc/*.sh)
+$(DOCKER_WIN_STAMP): Dockerfile.windows $(DOCKER_WIN_SCRIPTS)
+ifeq ($(IN_DOCKER_WIN),false)
+	@echo "==> Building Windows cross-compilation toolchain image..."
+	docker build --platform $(DOCKER_WIN_PLATFORM) -t $(DOCKER_WIN_IMAGE) -f Dockerfile.windows .
+	@mkdir -p $(DOCKER_WIN_STAMP_DIR)
+	@touch $@
+endif
+
+# Configure + build
+iis-build: $(DOCKER_WIN_STAMP) iis-configure iis-build-step
+
+# Configure with CMake using the ci-xcomp preset
+iis-configure: $(DOCKER_WIN_STAMP)
+	@echo "==> Configuring IIS injector (cross-compile)..."
+	$(DOCKER_WIN_RUN) cmake --preset=ci-xcomp -B $(IIS_BUILD_DIR) -DCMAKE_BUILD_TYPE=Debug injector_IIS
+
+# Build
+iis-build-step: $(DOCKER_WIN_STAMP)
+	@echo "==> Building IIS injector..."
+	$(DOCKER_WIN_RUN) cmake --build $(IIS_BUILD_DIR) -j
+
+# Build and run unit tests via Wine
+iis-test: iis-build
+	@echo "==> Running IIS injector unit tests via Wine..."
+	$(DOCKER_WIN_RUN) wine $(IIS_BUILD_DIR)/test/unittests/iis_injector_tests.exe
+
+# Clean build artifacts
+iis-clean:
+	rm -rf $(IIS_BUILD_DIR)
+	rm -rf $(DOCKER_WIN_STAMP_DIR)
+
+# Open a shell in the build container
+windows-shell: $(DOCKER_WIN_STAMP)
+	@echo "==> Opening shell in Windows build container..."
+	$(DOCKER_WIN_RUN_I) bash

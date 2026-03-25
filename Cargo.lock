@@ -90,7 +90,7 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "check_conf"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "inject-browser-sdk",
  "serde",
@@ -208,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "inject-browser-sdk"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "pretty_assertions",
  "rand",
@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "inject-browser-sdk-ffi"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "cbindgen",
  "csbindgen",
@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "inject-browser-sdk-fuzz"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "inject-browser-sdk",
  "libfuzzer-sys",
@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "test_inject"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "inject-browser-sdk",
 ]

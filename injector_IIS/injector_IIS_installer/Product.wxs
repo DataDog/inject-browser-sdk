@@ -10,25 +10,30 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
 	 xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
 
-	 <!-- This section will allow us to set the msi version based on values set on the command
-	      line (which in turn would be derived from the git version).  Use a default value so
-		  that dev building still functions -->
+	 <!-- Version is derived from Cargo.toml via the build system.
+	      MAJ_VER, MIN_VER, PATCH_VER, VERSION_PRE are passed from MSBuild. -->
 	<?if $(var.MAJ_VER) and $(var.MAJ_VER) != "" ?>
 		<?define VERSION_MAJOR = $(var.MAJ_VER) ?>
 		<?define VERSION_MINOR = $(var.MIN_VER) ?>
 		<?define VERSION_PATCH = $(var.PATCH_VER) ?>
 		<?define VERSION_NUMBER = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH).0 ?>
-		<?else ?>
-		<?define VERSION_MAJOR =0 ?>
-		<?define VERSION_MINOR =97 ?>
-		<?define VERSION_PATCH =1 ?>
-		<?define VERSION_NUMBER = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH).0 ?>
-    <?endif ?>
+	<?else ?>
+		<?define VERSION_MAJOR = 0 ?>
+		<?define VERSION_MINOR = 0 ?>
+		<?define VERSION_PATCH = 0 ?>
+		<?define VERSION_NUMBER = 0.0.0.0 ?>
+	<?endif ?>
+
+	<?if $(var.VERSION_PRE) and $(var.VERSION_PRE) != "" ?>
+		<?define VERSION_DISPLAY = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH)-$(var.VERSION_PRE) ?>
+	<?else ?>
+		<?define VERSION_DISPLAY = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH) ?>
+	<?endif ?>
+
 	<?define UPGRADE_CODE=A5E2C93A-4340-4D15-BA17-F3CA858D09CA?>
 	<!-- Define the product details -->
-	<!--compiler generates-->
 	<Product Id="*"
-             Name="!(loc.ProductName)"
+             Name="!(loc.ProductName) $(var.VERSION_DISPLAY)"
              Language="!(loc.LANG)"
              Version="$(var.VERSION_NUMBER)"
              Manufacturer="!(loc.ManufacturerName)"
@@ -37,7 +42,7 @@
 		<Package Id="*"
              Keywords="Installer"
              Comments="!(loc.InstallerComment)"
-             Description="!(loc.ProductName) $(var.VERSION_NUMBER)"
+             Description="!(loc.ProductName) $(var.VERSION_DISPLAY)"
              Manufacturer="!(loc.ManufacturerName)"
              InstallScope="perMachine"
              InstallerVersion="400"

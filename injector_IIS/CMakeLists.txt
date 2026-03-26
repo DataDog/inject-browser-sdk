@@ -6,20 +6,25 @@
 
 cmake_minimum_required(VERSION 3.24)
 
-set(IIS_INJECTOR_VERSION_MAJ $ENV{MAJ_VER})
-if (NOT IIS_INJECTOR_VERSION_MAJ)
-  set(IIS_INJECTOR_VERSION_MAJ 1)
-endif ()
-
-set(IIS_INJECTOR_VERSION_MIN $ENV{MIN_VER})
-if (NOT IIS_INJECTOR_VERSION_MIN)
-  set(IIS_INJECTOR_VERSION_MIN 2)
-endif ()
-
-set(IIS_INJECTOR_VERSION_PATCH $ENV{PATCH_VER})
-if (NOT IIS_INJECTOR_VERSION_PATCH)
-  set(IIS_INJECTOR_VERSION_PATCH 1)
-endif ()
+# Extract version from Cargo.toml via cargo pkgid (single source of truth).
+# The Python build system also reads Cargo.toml and passes MAJ_VER/MIN_VER/PATCH_VER
+# as env vars, which override these defaults via compiler defines.
+execute_process(
+  COMMAND cargo pkgid --package inject-browser-sdk --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/../Cargo.toml"
+  OUTPUT_VARIABLE _IIS_CARGO_PKGID
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+string(REGEX REPLACE ".*@" "" _IIS_VERSION_FULL "${_IIS_CARGO_PKGID}")
+if(_IIS_VERSION_FULL MATCHES "([0-9]+)\\.([0-9]+)\\.([0-9]+)(-(.+))?")
+  set(IIS_INJECTOR_VERSION_MAJ "${CMAKE_MATCH_1}")
+  set(IIS_INJECTOR_VERSION_MIN "${CMAKE_MATCH_2}")
+  set(IIS_INJECTOR_VERSION_PATCH "${CMAKE_MATCH_3}")
+  set(IIS_INJECTOR_VERSION_PRE "${CMAKE_MATCH_5}")
+else()
+  message(FATAL_ERROR "Could not parse version from cargo pkgid: '${_IIS_VERSION_FULL}'")
+endif()
+unset(_IIS_CARGO_PKGID)
+unset(_IIS_VERSION_FULL)
 
 set(IIS_INJECTOR_VERSION ${IIS_INJECTOR_VERSION_MAJ}.${IIS_INJECTOR_VERSION_MIN}.${IIS_INJECTOR_VERSION_PATCH})
 
@@ -115,21 +120,8 @@ corrosion_experimental_cbindgen(
   FLAGS --config ${CMAKE_SOURCE_DIR}/cbindgen.toml
 )
 
-execute_process (
-  COMMAND cargo pkgid --package inject-browser-sdk --manifest-path "${CMAKE_SOURCE_DIR}/../Cargo.toml"
-  OUTPUT_VARIABLE RUM_SDK_INJECTOR_PKGID
-)
-
-string(REGEX REPLACE ".*@" "" _VERSION_STRING_CANDIDATE "${RUM_SDK_INJECTOR_PKGID}")
-if(_VERSION_STRING_CANDIDATE MATCHES "([0-9]+\\.[0-9]+\\.[0-9]+)")
-  set(RUM_SDK_INJECTOR_VERSION "${CMAKE_MATCH_1}")
-else()
-  message(FATAL_ERROR "Could not extract a maj.min.patch version from string: '${_VERSION_STRING_CANDIDATE}' derived from PkgID: '${RUM_SDK_INJECTOR_PKGID}'")
-endif()
-string(STRIP "${RUM_SDK_INJECTOR_VERSION}" RUM_SDK_INJECTOR_VERSION)
-
-unset(_VERSION_STRING_CANDIDATE)
-unset(RUM_SDK_INJECTOR_PKGID)
+# RUM_SDK_INJECTOR_VERSION is used by version.cpp.in template
+set(RUM_SDK_INJECTOR_VERSION "${IIS_INJECTOR_VERSION}")
 
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/version.cpp.in
@@ -181,6 +173,7 @@ target_compile_options(iis_injector-objects
     /DMAJ_VER=${IIS_INJECTOR_VERSION_MAJ}
     /DMIN_VER=${IIS_INJECTOR_VERSION_MIN}
     /DPATCH_VER=${IIS_INJECTOR_VERSION_PATCH}
+    /DVERSION_PRE="${IIS_INJECTOR_VERSION_PRE}"
 )
 
 if (IIS_INJECTOR_DEBUG_BREAK)

@@ -79,11 +79,15 @@ variables:
         paths:
           - injector_IIS/**/*
           - lib/**/*
+          - Cargo.toml
+          - Cargo.lock
           - .gitlab-ci.yml
           - .gitlab/iis.yml
     - changes:
         - injector_IIS/**/*
         - lib/**/*
+        - Cargo.toml
+        - Cargo.lock
         - .gitlab-ci.yml
         - .gitlab/iis.yml
 

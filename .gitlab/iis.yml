@@ -104,6 +104,10 @@ manual_injector_IIS_build:
   stage: test
   tags: ["arch:amd64"]
   needs: []
+  retry:
+    max: 2
+    when:
+      - script_failure
   image: ${REGISTRY}/ci/${E2E_RUNNER_IMAGE}${TEST_INFRA_DEFINITIONS_BUILDIMAGES_SUFFIX}:${TEST_INFRA_DEFINITIONS_BUILDIMAGES}
   variables:
     AWS_SSM_PREFIX: "ci.inject-browser-sdk."

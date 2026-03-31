@@ -5,11 +5,13 @@
 // Copyright 2024-Present Datadog, Inc.
 
 #include "http_module.h"
+#include "config_reader.h"
 #include "module_context.h"
 #include "telemetry.h"
 #include <cassert>
 #include <datadog/telemetry/telemetry.h>
 #include <format>
+#include <memory>
 #include <string>
 
 namespace datadog::rum {
@@ -76,25 +78,56 @@ HttpModule::OnSendResponse(IN IHttpContext *http_context,
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  auto opaque_ptr = http_context->GetApplication()
-                        ->GetModuleContextContainer()
-                        ->GetModuleContext(g_module_id);
-  if (opaque_ptr == nullptr) {
+  // Get app-level context (always needed for logger, server, tags).
+  auto *app_opaque = http_context->GetApplication()
+                         ->GetModuleContextContainer()
+                         ->GetModuleContext(g_module_id);
+  if (app_opaque == nullptr) {
     assert(true);
     return RQ_NOTIFICATION_CONTINUE;
   }
+  auto &app_ctx = *static_cast<ModuleContext *>(app_opaque);
 
-  auto &ctx = *static_cast<ModuleContext *>(opaque_ptr);
-  if (ctx.js_snippet == nullptr) {
-    ctx.logger->debug("Skipping RUM injection: disabled");
+  // Per-request metadata path — IIS resolves <location> overrides.
+  // Cache the resolved ModuleContext on the metadata context container
+  // so subsequent requests to the same path skip config reading.
+  ModuleContext *ctx = &app_ctx;
+  auto *metadata = http_context->GetMetadata();
+  if (metadata != nullptr) {
+    auto *meta_container = metadata->GetModuleContextContainer();
+    auto *meta_cached = meta_container->GetModuleContext(g_module_id);
+
+    if (meta_cached != nullptr) {
+      ctx = static_cast<ModuleContext *>(meta_cached);
+    } else {
+      // Cache miss — read config for this request's effective path.
+      auto *meta_path = metadata->GetMetaPath();
+      auto *new_ctx = new ModuleContext;
+      new_ctx->logger = app_ctx.logger;
+      new_ctx->server = app_ctx.server;
+      new_ctx->application_id_tag = app_ctx.application_id_tag;
+      new_ctx->remote_config_tag = app_ctx.remote_config_tag;
+
+      // Non-owning shared_ptr for the logger (lifetime managed by GlobalModule).
+      auto logger_ptr =
+          std::shared_ptr<Logger>(app_ctx.logger, [](Logger *) {});
+      update_module_context(*new_ctx, *app_ctx.server, meta_path, logger_ptr);
+
+      meta_container->SetModuleContext(new_ctx, g_module_id);
+      ctx = new_ctx;
+    }
+  }
+
+  if (ctx->js_snippet == nullptr) {
+    ctx->logger->debug("Skipping RUM injection: disabled");
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  if (!ShouldAttemptInjection(*http_response, ctx)) {
+  if (!ShouldAttemptInjection(*http_response, *ctx)) {
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  return PerformInjection(*http_context, *http_response, ctx);
+  return PerformInjection(*http_context, *http_response, *ctx);
 }
 
 bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,

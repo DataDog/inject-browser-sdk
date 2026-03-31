@@ -19,7 +19,7 @@
 #include <string>
 
 namespace datadog::rum {
-namespace {
+namespace { // anonymous helpers
 
 std::string wstring_to_utf8(const std::wstring &wstr) {
   if (wstr.empty())
@@ -106,6 +106,8 @@ VARIANT get_property_value(IAppHostProperty &property) {
   property.get_Value(&v);
   return v;
 }
+
+} // end anonymous namespace
 
 std::optional<ServerConfig> read_server_conf(IHttpServer &server,
                                              std::shared_ptr<Logger> logger) {
@@ -255,7 +257,6 @@ void update_module_context(ModuleContext &ctx, IHttpServer &server,
   auto rcUsed = loaded_config.sdk_options.count("remoteConfigurationId") > 0;
   ctx.remote_config_tag = std::format("remote_config_used:{}", rcUsed);
 }
-} // namespace
 
 GlobalModule::GlobalModule(IHttpServer *server, DWORD server_version,
                            std::shared_ptr<Logger> logger)
@@ -317,6 +318,7 @@ GlobalModule::OnGlobalApplicationStart(
 
   auto ctx = new ModuleContext;
   ctx->logger = logger_.get();
+  ctx->server = server_;
 
   auto app = provider->GetApplication();
   assert(app);

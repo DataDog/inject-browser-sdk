@@ -57,6 +57,11 @@ RUN mkdir -p /usr/lib/binfmt-support/ && \
     ln -s /usr/bin/wine /usr/lib/binfmt-support/run-detectors && \
     ln -s /usr/bin/wine /usr/bin/run-detectors
 
+# IIS Express for integration testing. Placed late so changes here don't
+# invalidate the toolchain/Rust layers above.
+COPY docker/windows-msvc/iis-express.sh /
+RUN bash /iis-express.sh
+
 COPY docker/windows-msvc/msvc-windows-entry.sh /
 RUN chmod +x /msvc-windows-entry.sh
 ENTRYPOINT ["/msvc-windows-entry.sh"]
@@ -71,7 +76,7 @@ ENV VSINSTALLDIR=/opt/msvc
 ENV VCINSTALLDIR=/opt/msvc/vc
 ENV VSCMD_ARG_TGT_ARCH=${ARCH}
 ENV WINEDEBUG=-all
-ENV WINEPATH=C:/windows/syswow64\;C:/windows/system32\;/opt/msvc/bin/${ARCH}
+ENV WINEPATH=C:/windows/syswow64\;C:/windows/system32\;/opt/msvc/bin/${ARCH}\;/opt/iis_express
 ENV CROSS_WINDOWS_PERL=1
 
 WORKDIR /work

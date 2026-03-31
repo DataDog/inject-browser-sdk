@@ -15,12 +15,14 @@ target_sources(iis_injector_tests
   PRIVATE
     test_entrypoint.cpp
     test_http_module.cpp
+    test_injection_pipeline.cpp
 )
 
 target_compile_options(iis_injector_tests
   PRIVATE
     /W4
     /DUNICODE
+    /bigobj
 )
 
 target_link_libraries(

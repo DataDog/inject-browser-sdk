@@ -52,7 +52,7 @@ IIS_BUILD_DIR := injector_IIS/build
 DOCKER_WIN_STAMP_DIR := .docker-stamps
 DOCKER_WIN_STAMP     := $(DOCKER_WIN_STAMP_DIR)/windows-builder
 
-.PHONY: iis-build iis-configure iis-build-step iis-test iis-clean windows-shell
+.PHONY: iis-build iis-configure iis-build-step iis-test iis-integration-test iis-clean windows-shell
 
 # Build the Docker image (only if Dockerfile changed)
 DOCKER_WIN_SCRIPTS := $(wildcard docker/windows-msvc/*.sh)
@@ -81,6 +81,11 @@ iis-build-step: $(DOCKER_WIN_STAMP)
 iis-test: iis-build
 	@echo "==> Running IIS injector unit tests via Wine..."
 	$(DOCKER_WIN_RUN) wine $(IIS_BUILD_DIR)/test/unittests/iis_injector_tests.exe
+
+# Build and run IIS Express integration test via Wine
+iis-integration-test: iis-build
+	@echo "==> Running IIS Express integration test via Wine..."
+	$(DOCKER_WIN_RUN) bash injector_IIS/test/integration/run_iisexpress_test.sh
 
 # Clean build artifacts
 iis-clean:

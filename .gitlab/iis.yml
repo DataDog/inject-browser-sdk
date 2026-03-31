@@ -206,3 +206,20 @@ injector_IIS_unit_test:
   needs: ["injector_IIS_xcomp_build"]
   script:
     - wine injector_IIS/build/test/unittests/iis_injector_tests.exe
+
+injector_IIS_integration_test:
+  stage: test
+  extends: .IIS_build_when
+  image:
+    name: $WINDOWS_XCOMP_IMAGE
+    entrypoint: ["/msvc-windows-entry.sh"]
+  tags: ["arch:amd64"]
+  needs: ["injector_IIS_xcomp_build"]
+  script:
+    - bash injector_IIS/test/integration/run_iisexpress_test.sh
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - injector_IIS/test/integration/test_output/
+  allow_failure: true

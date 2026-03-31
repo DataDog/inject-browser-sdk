@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "config_reader.h"
 #include "framework.h"
 #include "logger.h"
 #include "module_context.h"
@@ -45,15 +46,6 @@ public:
 
 private:
   void update_server_log_level();
-};
-
-struct RumConfig {
-  int version;
-  std::unordered_map<std::string, std::string> sdk_options;
-};
-
-struct ServerConfig {
-  LogLevel log_level;
 };
 
 } // namespace datadog::rum

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Minimal applicationHost.config for IIS Express integration testing.
+  Tokens @@DLL_PATH@@, @@SITE_ROOT@@, and @@PORT@@ are replaced at test time.
+-->
+<configuration>
+  <configSections>
+    <sectionGroup name="system.applicationHost">
+      <section name="applicationPools" allowDefinition="AppHostOnly" overrideModeDefault="Deny" />
+      <section name="sites" allowDefinition="AppHostOnly" overrideModeDefault="Deny" />
+      <section name="datadogRumServer" allowDefinition="AppHostOnly" overrideModeDefault="Deny" />
+    </sectionGroup>
+    <sectionGroup name="system.webServer">
+      <section name="defaultDocument" overrideModeDefault="Allow" />
+      <section name="directoryBrowse" overrideModeDefault="Allow" />
+      <section name="globalModules" allowDefinition="AppHostOnly" overrideModeDefault="Deny" />
+      <section name="handlers" overrideModeDefault="Allow" />
+      <section name="modules" allowDefinition="MachineToApplication" overrideModeDefault="Allow" />
+      <section name="staticContent" overrideModeDefault="Allow" />
+      <section name="datadogRum" overrideModeDefault="Allow" />
+    </sectionGroup>
+  </configSections>
+
+  <system.applicationHost>
+    <applicationPools>
+      <add name="IntegrationTestPool" managedRuntimeVersion="" managedPipelineMode="Integrated" autoStart="true" />
+    </applicationPools>
+    <sites>
+      <site name="TestSite" id="1">
+        <application path="/" applicationPool="IntegrationTestPool">
+          <virtualDirectory path="/" physicalPath="@@SITE_ROOT@@" />
+        </application>
+        <bindings>
+          <binding protocol="http" bindingInformation="*:@@PORT@@:localhost" />
+        </bindings>
+      </site>
+    </sites>
+  </system.applicationHost>
+
+  <system.webServer>
+    <globalModules>
+      <add name="StaticFileModule" image="%IIS_BIN%\static.dll" />
+      <add name="DefaultDocumentModule" image="%IIS_BIN%\defdoc.dll" />
+      <add name="DirectoryListingModule" image="%IIS_BIN%\dirlist.dll" />
+      <add name="DDRumModule" image="@@DLL_PATH@@" />
+    </globalModules>
+
+    <modules>
+      <add name="StaticFileModule" />
+      <add name="DefaultDocumentModule" />
+      <add name="DirectoryListingModule" />
+      <add name="DDRumModule" />
+    </modules>
+
+    <handlers>
+      <add name="StaticFile" path="*" verb="*" modules="StaticFileModule,DefaultDocumentModule,DirectoryListingModule" resourceType="Either" requireAccess="Read" />
+    </handlers>
+
+    <staticContent>
+      <mimeMap fileExtension=".html" mimeType="text/html" />
+      <mimeMap fileExtension=".htm" mimeType="text/html" />
+    </staticContent>
+
+    <defaultDocument>
+      <files>
+        <add value="index.html" />
+      </files>
+    </defaultDocument>
+  </system.webServer>
+</configuration>

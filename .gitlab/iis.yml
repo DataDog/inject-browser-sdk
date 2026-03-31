@@ -201,7 +201,7 @@ promote_injector_IIS_release_candidate:
     entrypoint: ["/msvc-windows-entry.sh"]
   tags: ["arch:amd64"]
   variables:
-    GIT_CLONE_PATH: $CI_BUILDS_DIR/work
+    GIT_CLONE_PATH: /work
 
 injector_IIS_xcomp_build:
   stage: build

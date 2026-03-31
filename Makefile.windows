@@ -52,7 +52,9 @@ IIS_BUILD_DIR := injector_IIS/build
 DOCKER_WIN_STAMP_DIR := .docker-stamps
 DOCKER_WIN_STAMP     := $(DOCKER_WIN_STAMP_DIR)/windows-builder
 
-.PHONY: iis-build iis-configure iis-build-step iis-test iis-integration-test iis-clean windows-shell
+.PHONY: iis-build iis-configure iis-build-step iis-test iis-integration-test iis-clean windows-shell \
+        iis-build-native iis-configure-native iis-test-native windows-shell-native \
+        iis-install-native iis-uninstall-native
 
 # Build the Docker image (only if Dockerfile changed)
 DOCKER_WIN_SCRIPTS := $(wildcard docker/windows-msvc/*.sh)
@@ -86,6 +88,42 @@ iis-test: iis-build
 iis-integration-test: iis-build
 	@echo "==> Running IIS Express integration test via Wine..."
 	$(DOCKER_WIN_RUN) bash injector_IIS/test/integration/run_iisexpress_test.sh
+
+## Native Windows build targets (no Docker/Wine required, runs MSVC directly)
+## Requires: VS 2022 Build Tools + Rust installed
+## Usage: make -f Makefile.windows iis-build-native
+
+PWSH := powershell.exe -ExecutionPolicy Bypass -File
+
+# Configure only
+iis-configure-native:
+	@echo "==> Configuring IIS injector (native MSVC)..."
+	$(PWSH) scripts\iis-native.ps1 configure
+
+# Configure + build
+iis-build-native:
+	@echo "==> Building IIS injector (native MSVC)..."
+	$(PWSH) scripts\iis-native.ps1 build
+
+# Run unit tests
+iis-test-native: iis-build-native
+	@echo "==> Running IIS injector unit tests (native)..."
+	$(PWSH) scripts\iis-native.ps1 test
+
+# Open a VS Developer PowerShell
+windows-shell-native:
+	@echo "==> Opening VS Developer shell..."
+	$(PWSH) scripts\iis-native.ps1 shell
+
+# Install DLL + register with IIS (requires admin)
+iis-install-native: iis-build-native
+	@echo "==> Installing IIS injector (requires admin)..."
+	$(PWSH) scripts\iis-native.ps1 install
+
+# Unregister and remove
+iis-uninstall-native:
+	@echo "==> Uninstalling IIS injector..."
+	$(PWSH) scripts\iis-native.ps1 uninstall
 
 # Clean build artifacts
 iis-clean:

@@ -192,16 +192,16 @@ promote_injector_IIS_release_candidate:
     - aws s3 cp --region us-east-1 --sse AES256 --acl public-read s3://$S3_BUCKET/iis/$RC_COMMIT/$ARCH/injector_IIS.msi injector_IIS.msi
     - aws s3 cp --region us-east-1 --sse AES256 --acl public-read injector_IIS.msi s3://$S3_BUCKET/iis/latest/$ARCH/
 
-# Wine's cl.exe wrapper misinterprets paths like /go/src/... as Windows
-# flags.  GIT_CLONE_PATH keeps the workspace at /work where the toolchain
-# expects it.
+# Wine's cl.exe wrapper can misinterpret long /go/src/... paths.
+# Symlink the checkout to /work so all build paths stay short and
+# Wine-friendly.
 .xcomp_common:
   image:
     name: $WINDOWS_XCOMP_IMAGE
     entrypoint: ["/msvc-windows-entry.sh"]
   tags: ["arch:amd64"]
-  variables:
-    GIT_CLONE_PATH: /work
+  before_script:
+    - ln -sfn "$CI_PROJECT_DIR" /work
 
 injector_IIS_xcomp_build:
   stage: build
@@ -210,7 +210,7 @@ injector_IIS_xcomp_build:
     - .IIS_build_when
   needs: []
   script:
-    - cd injector_IIS
+    - cd /work/injector_IIS
     - cmake --preset=ci-xcomp -B build -DCMAKE_BUILD_TYPE=Debug .
     - cmake --build build -j
   artifacts:
@@ -225,7 +225,7 @@ injector_IIS_unit_test:
     - .IIS_build_when
   needs: ["injector_IIS_xcomp_build"]
   script:
-    - wine injector_IIS/build/test/unittests/iis_injector_tests.exe
+    - wine /work/injector_IIS/build/test/unittests/iis_injector_tests.exe
 
 injector_IIS_integration_test:
   stage: test
@@ -234,7 +234,7 @@ injector_IIS_integration_test:
     - .IIS_build_when
   needs: ["injector_IIS_xcomp_build"]
   script:
-    - bash injector_IIS/test/integration/run_iisexpress_test.sh
+    - bash /work/injector_IIS/test/integration/run_iisexpress_test.sh
   artifacts:
     when: always
     expire_in: 1 week

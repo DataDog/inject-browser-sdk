@@ -200,9 +200,6 @@ promote_injector_IIS_release_candidate:
     name: $WINDOWS_XCOMP_IMAGE
     entrypoint: ["/msvc-windows-entry.sh"]
   tags: ["arch:amd64"]
-  before_script:
-    - rm -rf /work && ln -s "$CI_PROJECT_DIR" /work
-
 injector_IIS_xcomp_build:
   stage: build
   extends:
@@ -210,9 +207,11 @@ injector_IIS_xcomp_build:
     - .IIS_build_when
   needs: []
   script:
+    - cp -a "$CI_PROJECT_DIR" /work
     - cd /work/injector_IIS
     - cmake --preset=ci-xcomp -B build -DCMAKE_BUILD_TYPE=Debug .
     - cmake --build build -j
+    - cp -a /work/injector_IIS/build "$CI_PROJECT_DIR/injector_IIS/"
   artifacts:
     expire_in: 2 weeks
     paths:
@@ -225,7 +224,7 @@ injector_IIS_unit_test:
     - .IIS_build_when
   needs: ["injector_IIS_xcomp_build"]
   script:
-    - wine /work/injector_IIS/build/test/unittests/iis_injector_tests.exe
+    - wine injector_IIS/build/test/unittests/iis_injector_tests.exe
 
 injector_IIS_integration_test:
   stage: test
@@ -234,7 +233,7 @@ injector_IIS_integration_test:
     - .IIS_build_when
   needs: ["injector_IIS_xcomp_build"]
   script:
-    - bash /work/injector_IIS/test/integration/run_iisexpress_test.sh
+    - bash injector_IIS/test/integration/run_iisexpress_test.sh
   artifacts:
     when: always
     expire_in: 1 week

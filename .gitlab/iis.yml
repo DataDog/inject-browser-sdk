@@ -192,13 +192,22 @@ promote_injector_IIS_release_candidate:
     - aws s3 cp --region us-east-1 --sse AES256 --acl public-read s3://$S3_BUCKET/iis/$RC_COMMIT/$ARCH/injector_IIS.msi injector_IIS.msi
     - aws s3 cp --region us-east-1 --sse AES256 --acl public-read injector_IIS.msi s3://$S3_BUCKET/iis/latest/$ARCH/
 
-injector_IIS_xcomp_build:
-  stage: build
-  extends: .IIS_build_when
+# Wine's cl.exe wrapper misinterprets paths like /go/src/... as Windows
+# flags.  GIT_CLONE_PATH keeps the workspace at /work where the toolchain
+# expects it.
+.xcomp_common:
   image:
     name: $WINDOWS_XCOMP_IMAGE
     entrypoint: ["/msvc-windows-entry.sh"]
   tags: ["arch:amd64"]
+  variables:
+    GIT_CLONE_PATH: $CI_BUILDS_DIR/work
+
+injector_IIS_xcomp_build:
+  stage: build
+  extends:
+    - .xcomp_common
+    - .IIS_build_when
   needs: []
   script:
     - cd injector_IIS
@@ -211,22 +220,18 @@ injector_IIS_xcomp_build:
 
 injector_IIS_unit_test:
   stage: test
-  extends: .IIS_build_when
-  image:
-    name: $WINDOWS_XCOMP_IMAGE
-    entrypoint: ["/msvc-windows-entry.sh"]
-  tags: ["arch:amd64"]
+  extends:
+    - .xcomp_common
+    - .IIS_build_when
   needs: ["injector_IIS_xcomp_build"]
   script:
     - wine injector_IIS/build/test/unittests/iis_injector_tests.exe
 
 injector_IIS_integration_test:
   stage: test
-  extends: .IIS_build_when
-  image:
-    name: $WINDOWS_XCOMP_IMAGE
-    entrypoint: ["/msvc-windows-entry.sh"]
-  tags: ["arch:amd64"]
+  extends:
+    - .xcomp_common
+    - .IIS_build_when
   needs: ["injector_IIS_xcomp_build"]
   script:
     - bash injector_IIS/test/integration/run_iisexpress_test.sh

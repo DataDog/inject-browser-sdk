@@ -192,26 +192,18 @@ promote_injector_IIS_release_candidate:
     - aws s3 cp --region us-east-1 --sse AES256 --acl public-read s3://$S3_BUCKET/iis/$RC_COMMIT/$ARCH/injector_IIS.msi injector_IIS.msi
     - aws s3 cp --region us-east-1 --sse AES256 --acl public-read injector_IIS.msi s3://$S3_BUCKET/iis/latest/$ARCH/
 
-# Wine's cl.exe wrapper can misinterpret long /go/src/... paths.
-# Symlink the checkout to /work so all build paths stay short and
-# Wine-friendly.
-.xcomp_common:
+injector_IIS_xcomp_build:
+  stage: build
+  extends: .IIS_build_when
   image:
     name: $WINDOWS_XCOMP_IMAGE
     entrypoint: ["/msvc-windows-entry.sh"]
   tags: ["arch:amd64"]
-injector_IIS_xcomp_build:
-  stage: build
-  extends:
-    - .xcomp_common
-    - .IIS_build_when
   needs: []
   script:
-    - cp -a "$CI_PROJECT_DIR" /work
-    - cd /work/injector_IIS
+    - cd injector_IIS
     - cmake --preset=ci-xcomp -B build -DCMAKE_BUILD_TYPE=Debug .
     - cmake --build build -j
-    - cp -a /work/injector_IIS/build "$CI_PROJECT_DIR/injector_IIS/"
   artifacts:
     expire_in: 2 weeks
     paths:
@@ -219,18 +211,22 @@ injector_IIS_xcomp_build:
 
 injector_IIS_unit_test:
   stage: test
-  extends:
-    - .xcomp_common
-    - .IIS_build_when
+  extends: .IIS_build_when
+  image:
+    name: $WINDOWS_XCOMP_IMAGE
+    entrypoint: ["/msvc-windows-entry.sh"]
+  tags: ["arch:amd64"]
   needs: ["injector_IIS_xcomp_build"]
   script:
     - wine injector_IIS/build/test/unittests/iis_injector_tests.exe
 
 injector_IIS_integration_test:
   stage: test
-  extends:
-    - .xcomp_common
-    - .IIS_build_when
+  extends: .IIS_build_when
+  image:
+    name: $WINDOWS_XCOMP_IMAGE
+    entrypoint: ["/msvc-windows-entry.sh"]
+  tags: ["arch:amd64"]
   needs: ["injector_IIS_xcomp_build"]
   script:
     - bash injector_IIS/test/integration/run_iisexpress_test.sh

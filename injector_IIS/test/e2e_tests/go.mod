@@ -20,7 +20,7 @@ require (
 	github.com/DataDog/datadog-agent/test/fakeintake v0.57.1 // indirect
 	github.com/DataDog/datadog-api-client-go/v2 v2.27.0 // indirect
 	github.com/DataDog/mmh3 v0.0.0-20210722141835-012dc69a9e49 // indirect
-	github.com/DataDog/test-infra-definitions v0.0.7-0.20260324181217-9b0704a99b4a // indirect
+	github.com/DataDog/test-infra-definitions v0.0.4-0.20250702174234-ef809e329658 // indirect
 	github.com/DataDog/zstd v1.5.5 // indirect
 	github.com/DataDog/zstd_0 v0.0.0-20210310093942-586c1286621f // indirect
 	github.com/Masterminds/semver v1.5.0 // indirect
@@ -136,12 +136,18 @@ require (
 	github.com/pulumi/esc v0.17.0 // indirect
 	github.com/pulumi/pulumi-aws/sdk/v6 v6.66.2 // indirect
 	github.com/pulumi/pulumi-awsx/sdk/v2 v2.19.0 // indirect
+	github.com/pulumi/pulumi-azure-native-sdk/authorization/v2 v2.81.0 // indirect
+	github.com/pulumi/pulumi-azure-native-sdk/compute/v2 v2.81.0 // indirect
+	github.com/pulumi/pulumi-azure-native-sdk/containerservice/v2 v2.81.0 // indirect
+	github.com/pulumi/pulumi-azure-native-sdk/managedidentity/v2 v2.81.0 // indirect
+	github.com/pulumi/pulumi-azure-native-sdk/network/v2 v2.81.0 // indirect
 	github.com/pulumi/pulumi-azure-native-sdk/v2 v2.81.0 // indirect
 	github.com/pulumi/pulumi-command/sdk v1.0.1 // indirect
 	github.com/pulumi/pulumi-docker/sdk/v4 v4.9.0 // indirect
 	github.com/pulumi/pulumi-eks/sdk/v3 v3.7.0 // indirect
 	github.com/pulumi/pulumi-gcp/sdk/v7 v7.38.0 // indirect
 	github.com/pulumi/pulumi-kubernetes/sdk/v4 v4.23.0 // indirect
+	github.com/pulumi/pulumi-libvirt/sdk v0.5.4 // indirect
 	github.com/pulumi/pulumi-random/sdk/v4 v4.18.4 // indirect
 	github.com/pulumi/pulumi-tls/sdk/v4 v4.11.1 // indirect
 	github.com/pulumi/pulumi/sdk/v3 v3.190.0 // indirect

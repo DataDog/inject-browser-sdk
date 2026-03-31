@@ -9,7 +9,7 @@ variables:
   # and check the job creating the image to make sure you have the right SHA prefix
   TEST_INFRA_DEFINITIONS_BUILDIMAGES_SUFFIX: ""
   # Make sure to update test-infra-definitions version in go.mod as well
-  TEST_INFRA_DEFINITIONS_BUILDIMAGES: e79f06b7fce3
+  TEST_INFRA_DEFINITIONS_BUILDIMAGES: 9b0704a99b4a
   AGENT_DEPLOY_IMAGE: datadog-agent-buildimages/gitlab_agent_deploy
   CI_IMAGE_AGENT_DEPLOY_SUFFIX: ""
   CI_IMAGE_AGENT_DEPLOY: v47979770-a5a4cfd0

@@ -2,7 +2,7 @@
 variables:
   WINDOWS_BUILD_IMAGE: datadog-agent-buildimages/windows_ltsc2022_x64
   CI_IMAGE_WIN_LTSC2022_X64_SUFFIX: ""
-  CI_IMAGE_WIN_LTSC2022_X64: v47979770-a5a4cfd0
+  CI_IMAGE_WIN_LTSC2022_X64: v94236382-f3eb3132
   E2E_RUNNER_IMAGE: test-infra-definitions/runner
   #E2E_RUNNER_IMAGE_VERSION: dfdd12299b97
   # To use images from test-infra-definitions dev branches, set the SUFFIX variable to -dev
@@ -28,12 +28,23 @@ variables:
   stage: build
   tags: ["windows-v2:2022"]
   needs: []
+  id_tokens:
+    CI_IDENTITIES_GITLAB_ID_TOKEN:
+      aud: ci-identities
   variables:
     BUILD_CONFIGURATION: Release
     ARCH: x64
     GIT_DEPTH: 500 #Default is 20
     GIT_SUBMODULE_STRATEGY: recursive
+    WINDOWS_CODE_SIGNER_IMAGE: registry.ddbuild.io/windows-code-signer/go:latest
   script:
+    # Download windows-code-signer by extracting it from the container image
+    - mkdir -Force ci-tools
+    - docker pull ${WINDOWS_CODE_SIGNER_IMAGE}
+    - docker create --name temp-signer ${WINDOWS_CODE_SIGNER_IMAGE}
+    - docker cp temp-signer:C:/windows-code-signer/windows-code-signer.exe ci-tools\
+    - docker rm temp-signer
+    # Clean and run the build
     - if (Test-Path build-out) { remove-item -recurse -force build-out }
     - >
       docker run --rm
@@ -44,8 +55,10 @@ variables:
       -e ARCH=$ARCH
       -e TEST_DIR="c:\mnt\injector_IIS\test\"
       -e WINDOWS_BUILDER=true
-      -e SIGN_WINDOWS_DD_WCS=true
-      -e AWS_NETWORKING=true
+      -e USE_WINDOWS_CODE_SIGNER=true
+      -e CI_IDENTITIES_GITLAB_ID_TOKEN=${CI_IDENTITIES_GITLAB_ID_TOKEN}
+      -e CI_JOB_ID=${CI_JOB_ID}
+      -e CI_PROJECT_NAME=${CI_PROJECT_NAME}
       ${REGISTRY}/ci/${WINDOWS_BUILD_IMAGE}${CI_IMAGE_WIN_LTSC2022_X64_SUFFIX}:${CI_IMAGE_WIN_LTSC2022_X64}
       c:\mnt\injector_IIS\scripts\build_injector_IIS.bat
     # Copy output files to artifacts dir for use in later jobs

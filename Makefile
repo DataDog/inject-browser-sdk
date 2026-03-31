@@ -37,6 +37,10 @@ push-ci-windows-image:
 	docker push $(WINDOWS_XCOMP_REPO):$(WINDOWS_XCOMP_TAG)
 	docker push $(WINDOWS_XCOMP_GHCR):$(WINDOWS_XCOMP_TAG)
 
+.PHONY: test-cmake-version
+test-cmake-version:
+	ci/cmake-consumer-test/run_validate_version.sh
+
 .PHONY: artifacts
 artifacts:
 	docker buildx bake artifacts

@@ -14,12 +14,14 @@ ARG ARCH
 # Install clang/lld for Windows cross-compilation, python3 for xwin
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang \
+    clang-tools \
     curl \
     lld \
     llvm \
     make \
     python3 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf clang-cl-14 /usr/bin/clang-cl
 
 # Install CMake >= 3.31 (required by CMakePresets version 8)
 ARG CMAKE_VERSION=3.31.6

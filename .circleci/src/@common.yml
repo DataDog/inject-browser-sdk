@@ -14,7 +14,7 @@ parameters:
 jobs:
   check:
     docker:
-      - image: rust:1.74.0
+      - image: rust:1.94.1
     steps:
       - checkout
       - run:
@@ -48,7 +48,7 @@ jobs:
   # TODO(@dmehala): add cargo-llvm-cov
   build-and-test-rum-framework:
     docker:
-      - image: rust:1.74.0
+      - image: rust:1.94.1
     steps:
       - checkout
       - run:

@@ -1,7 +1,7 @@
 jobs:
     build-and-test-rum-framework:
         docker:
-            - image: rust:1.74.0
+            - image: rust:1.94.1
         steps:
             - checkout
             - run:
@@ -68,7 +68,7 @@ jobs:
                 path: ./installer/install-proxy-datadog.sh
     check:
         docker:
-            - image: rust:1.74.0
+            - image: rust:1.94.1
         steps:
             - checkout
             - run:

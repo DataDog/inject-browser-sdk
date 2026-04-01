@@ -81,9 +81,6 @@ def build(ctx, out_dir="../build_out", debug=False, vstudio_root=None, test_dir=
         print(f"Could not find the injector DLL at {dllpath}")
         raise Exit(code=1)
 
-    ## sign the resulting injection DLL
-    sign_binary(ctx, dllpath)
-
     package(ctx, out_dir, iis_dll=dllpath, debug=debug, vstudio_root=vstudio_root)
 
 
@@ -107,11 +104,6 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
         raise Exit(code=1)
 
     env, fullver, vs_env_bat = do_get_build_env(ctx, vstudio_root=vstudio_root)
-
-    ## sign the powershell add-on script.  This is a bit weird, because it will sign the file in place, resulting in
-    ## a changed file.  In the CI this is ok, because it's not checked in.  Could lead to issues if this is run locally
-    sign_binary(ctx, os.path.join(".", "resources", "modules", "Datadog.RUM.psm1"))
-    sign_binary(ctx, os.path.join(".", "resources", "modules", "Datadog.RUM.psd1"))
 
     # copy the dll
     dllpath = os.path.join(out_dir, "injector_IIS.dll")
@@ -143,28 +135,8 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
         print("Missing installer")
         raise Exit(code=1)
 
-    sign_binary(ctx, msipath)
-
     ## copy the newly built file into the target directory
     target_filename = "injector_IIS_installer.msi"
     shutil.copy2(msipath, os.path.join(out_dir, target_filename))
 
 
-def sign_binary(ctx, path):
-    use_new_signer = os.environ.get("USE_WINDOWS_CODE_SIGNER", False)
-    use_legacy_signer = os.environ.get("SIGN_WINDOWS_DD_WCS", False)
-
-    if use_new_signer:
-        print("Signing {} with windows-code-signer\n".format(path))
-        # The windows-code-signer executable is copied to the build directory from ci-tools
-        signer_path = os.path.join("c:\\mnt", "ci-tools", "windows-code-signer.exe")
-        # Escape double quotes in path for Windows command line
-        escaped_path = path.replace('"', '""')
-        cmd = f'"{signer_path}" sign "{escaped_path}"'
-        ctx.run(cmd, hide=False, pty=False)
-    elif use_legacy_signer:
-        print("Signing {} with dd-wcs\n".format(path))
-        # Escape double quotes in path for Windows command line
-        escaped_path = path.replace('"', '""')
-        cmd = f'dd-wcs sign --replace-signature "{escaped_path}"'
-        ctx.run(cmd, hide=False, pty=False)

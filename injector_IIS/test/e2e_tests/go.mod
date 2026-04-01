@@ -4,7 +4,7 @@ go 1.24.9
 
 require (
 	github.com/DataDog/datadog-agent/test/new-e2e v0.60.0-devel.0.20241010150338-ad37c41830ba
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 )
 
 require (

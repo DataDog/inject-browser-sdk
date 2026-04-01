@@ -15,7 +15,7 @@ jobs:
             - environment:
                 CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
                 RUSTFLAGS: -Lnative=/xwin/crt/lib/x86_64 -Lnative=/xwin/sdk/lib/ucrt/x86_64 -Lnative=/xwin/sdk/lib/um/x86_64
-              image: ghcr.io/datadog/inject-browser-sdk:builder-a142311
+              image: ghcr.io/datadog/inject-browser-sdk:builder-2b96f8f
         parameters:
             build-type:
                 enum:

@@ -12,7 +12,10 @@ jobs:
                 name: Test
     build-iis:
         docker:
-            - image: public.ecr.aws/b1o7r7e0/inject-browser-sdk:builder-7f22c91
+            - environment:
+                CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
+                RUSTFLAGS: -Lnative=/xwin/crt/lib/x86_64 -Lnative=/xwin/sdk/lib/ucrt/x86_64 -Lnative=/xwin/sdk/lib/um/x86_64
+              image: ghcr.io/datadog/inject-browser-sdk:builder-7f22c91
         parameters:
             build-type:
                 enum:
@@ -138,14 +141,27 @@ jobs:
                 command: .\injector_IIS\build\test\unittests\iis_injector_tests.exe
                 name: Run Unit Tests
             - run:
-                command: choco install -y wixtoolset
+                command: |
+                    choco install -y wixtoolset
+                    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
                 name: Install Dependencies
             - run:
-                command: "& 'C:\\\\Program Files (x86)\\\\Microsoft Visual Studio\\\\2019\\\\Community\\\\Common7\\\\Tools\\\\Launch-VsDevShell.ps1' \nMSBuild.exe injector_IIS\\injector_IIS_installer\\injector_IIS_installer.wixproj /m:4 /p:Configuration=Debug /p:Platform=x64 /p:InjectorDll=${pwd}\\injector_IIS\\build\\iis_injector.dll\n"
+                command: |
+                    $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+                    $env:VSTUDIO_ROOT = 'C:\Program Files (x86)\Microsoft Visual Studio\2019\Community'
+                    $env:OutDir = (Join-Path (Split-Path ${pwd}) "build_out") + "\"
+                    uv run --with invoke invoke iis.package --iis-dll ${pwd}\build\iis_injector.dll --out-dir $env:OutDir --debug
                 name: Build .msi package
+                working_directory: injector_IIS
             - store_artifacts:
                 destination: injector_IIS_installer.msi
-                path: injector_IIS\injector_IIS_installer\bin\x64\Debug\en-us\injector_IIS_installer.msi
+                path: build_out\injector_IIS_installer.msi
+            - run:
+                command: |
+                    $ErrorActionPreference = "Stop"
+                    New-Item -ItemType Directory -Force -Path injector_IIS\injector_IIS_installer\bin\x64\Debug\en-us
+                    Copy-Item build_out\injector_IIS_installer.msi injector_IIS\injector_IIS_installer\bin\x64\Debug\en-us\
+                name: Copy MSI to path expected by setup script
             - run:
                 command: docker run -e WEBSERVER-FLAVOR=iis -v ${pwd}:C:\inject-browser-sdk datadog/docker-library:rum-auto-instrumentation-windows-iis-latest powershell -Command "C:\inject-browser-sdk\injector_IIS\scripts\SetupIntegrationTestEnvironment.ps1; pytest C:\inject-browser-sdk\tests\integration_tests\scenario -v"
                 name: Run End-to-End Tests

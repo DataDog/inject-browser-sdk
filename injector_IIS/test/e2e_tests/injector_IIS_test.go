@@ -222,7 +222,7 @@ func (v *rumvmSuite) testInstall() {
     v.T().Logf("Found %s", iname)
   }
   vm.CopyFile(iname, remoteFilePath)
-  v.doTestInstall(remoteFilePath, "1.2.0", false)
+  v.doTestInstall(remoteFilePath, "1.2.1", false)
 }
 
 func (v *rumvmSuite) installOldVersionForUpgrade() {

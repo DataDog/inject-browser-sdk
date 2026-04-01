@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"gotest.tools/assert"
+	"gotest.tools/v3/assert"
 )
 
 type FileInfo struct {

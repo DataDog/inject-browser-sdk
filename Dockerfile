@@ -11,14 +11,19 @@ FROM rust:1.94-slim-bookworm
 
 ARG ARCH
 
-# Install clang/lld for Windows cross-compilation, cmake for the build, python3 for xwin
+# Install clang/lld for Windows cross-compilation, python3 for xwin
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang \
-    cmake \
+    curl \
     lld \
     llvm \
     python3 \
     && rm -rf /var/lib/apt/lists/*
+
+# Install CMake >= 3.31 (required by CMakePresets version 8)
+ARG CMAKE_VERSION=3.31.6
+RUN curl -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz" \
+    | tar xz --strip-components=1 -C /usr/local
 
 # Install cross-compilation targets
 RUN rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc

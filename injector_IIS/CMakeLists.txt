@@ -3,6 +3,7 @@
 # Datadog (https://www.datadoghq.com/).
 #
 # Copyright 2024-Present Datadog, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.24)
 

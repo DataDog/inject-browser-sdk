@@ -49,8 +49,15 @@ variables:
     - if (Test-Path $ARTIFACTS_DIR) { remove-item -recurse -force $ARTIFACTS_DIR }
     - mkdir $ARTIFACTS_DIR
     - xcopy /e/s build-out\${CI_JOB_ID}\*.* $ARTIFACTS_DIR
-    # Sign artifacts on the host using dd-wcs (available on Windows runners)
-    - powershell -ExecutionPolicy Bypass -File injector_IIS\scripts\sign_artifacts.ps1 -ArtifactsDir $ARTIFACTS_DIR
+    # Sign artifacts using dd-wcs from the build image
+    - >
+      docker run --rm
+      -v "$(Get-Location)\${ARTIFACTS_DIR}:c:\artifacts"
+      -v "$(Get-Location)\injector_IIS\scripts:c:\scripts"
+      -e AWS_NETWORKING=true
+      -e CI=true
+      ${WINDOWS_BUILD_IMAGE}
+      powershell -ExecutionPolicy Bypass -File c:\scripts\sign_artifacts.ps1 -ArtifactsDir c:\artifacts
   artifacts:
     expire_in: 2 weeks
     paths:

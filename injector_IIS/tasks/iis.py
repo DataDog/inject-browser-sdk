@@ -81,6 +81,8 @@ def build(ctx, out_dir="../build_out", debug=False, vstudio_root=None, test_dir=
         print(f"Could not find the injector DLL at {dllpath}")
         raise Exit(code=1)
 
+    sign_binary(ctx, dllpath)
+
     package(ctx, out_dir, iis_dll=dllpath, debug=debug, vstudio_root=vstudio_root)
 
 
@@ -104,6 +106,9 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
         raise Exit(code=1)
 
     env, fullver, vs_env_bat = do_get_build_env(ctx, vstudio_root=vstudio_root)
+
+    sign_binary(ctx, os.path.join(".", "resources", "modules", "Datadog.RUM.psm1"))
+    sign_binary(ctx, os.path.join(".", "resources", "modules", "Datadog.RUM.psd1"))
 
     # copy the dll
     dllpath = os.path.join(out_dir, "injector_IIS.dll")
@@ -135,8 +140,19 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
         print("Missing installer")
         raise Exit(code=1)
 
+    sign_binary(ctx, msipath)
+
     ## copy the newly built file into the target directory
     target_filename = "injector_IIS_installer.msi"
     shutil.copy2(msipath, os.path.join(out_dir, target_filename))
+
+
+def sign_binary(ctx, path):
+    if os.environ.get("SIGN_WINDOWS_DD_WCS"):
+        print(f"Signing {path} with dd-wcs")
+        escaped_path = path.replace('"', '""')
+        ctx.run(f'dd-wcs sign --replace-signature "{escaped_path}"', hide=False, pty=False)
+    else:
+        print(f"Skipping code signing for {path} (SIGN_WINDOWS_DD_WCS not set)")
 
 

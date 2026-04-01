@@ -41,6 +41,9 @@ variables:
       -e ARCH=$ARCH
       -e TEST_DIR="c:\mnt\injector_IIS\test\"
       -e WINDOWS_BUILDER=true
+      -e SIGN_WINDOWS_DD_WCS=true
+      -e AWS_NETWORKING=true
+      -e CI=true
       -e CI_JOB_ID=${CI_JOB_ID}
       -e CI_PROJECT_NAME=${CI_PROJECT_NAME}
       ${WINDOWS_BUILD_IMAGE}
@@ -49,15 +52,6 @@ variables:
     - if (Test-Path $ARTIFACTS_DIR) { remove-item -recurse -force $ARTIFACTS_DIR }
     - mkdir $ARTIFACTS_DIR
     - xcopy /e/s build-out\${CI_JOB_ID}\*.* $ARTIFACTS_DIR
-    # Sign artifacts using dd-wcs from the build image
-    - >
-      docker run --rm
-      -v "$(Get-Location)\${ARTIFACTS_DIR}:c:\artifacts"
-      -v "$(Get-Location)\injector_IIS\scripts:c:\scripts"
-      -e AWS_NETWORKING=true
-      -e CI=true
-      ${WINDOWS_BUILD_IMAGE}
-      powershell -ExecutionPolicy Bypass -File c:\scripts\sign_artifacts.ps1 -ArtifactsDir c:\artifacts
   artifacts:
     expire_in: 2 weeks
     paths:

@@ -4,17 +4,29 @@
 #
 # Copyright 2024-Present Datadog, Inc.
 
-FROM public.ecr.aws/b1o7r7e0/nginx_musl_toolchain:latest
+# Builder image for cross-compiling the IIS injector to Windows.
+# Uses the same Rust base as Dockerfile.artifacts.
+
+FROM rust:1.94-slim-bookworm
 
 ARG ARCH
 
-# Install std crate for x86_64-windows
-RUN ~/.cargo/bin/rustup target add x86_64-pc-windows-msvc
+# Install clang/lld for Windows cross-compilation, cmake for the build, python3 for xwin
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang \
+    cmake \
+    lld \
+    llvm \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Windows CRT
+# Install cross-compilation targets
+RUN rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+
+# Install Windows CRT/SDK via xwin
 ENV XWIN_VERSION=0.6.5
 ADD scripts/install-xwin-toolchain.py install-xwin-toolchain.py
-RUN ./install-xwin-toolchain --xwin-version ${XWIN_VERSION} --output-dir /xwin
+RUN python3 install-xwin-toolchain.py --xwin-version ${XWIN_VERSION} --output-dir /xwin
 
 ENV CC_x86_64_pc_windows_msvc="clang" \
     CXX_x86_64_pc_windows_msvc="clang" \
@@ -28,4 +40,3 @@ ENV CC_x86_64_pc_windows_msvc="clang" \
 # These are separate because docker won't resolve env var defined in the same ENV block
 ENV CFLAGS_x86_64_pc_windows_msvc="$CL_FLAGS" \
     CXXFLAGS_x86_64_pc_windows_msvc="$CL_FLAGS"
-

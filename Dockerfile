@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     clang \
     clang-tools \
     curl \
+    git \
     lld \
     llvm \
     make \

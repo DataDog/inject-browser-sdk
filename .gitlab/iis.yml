@@ -3,7 +3,7 @@ variables:
   WINDOWS_BUILD_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64:v105206457-cb3f8790
   # Make sure to update test-infra-definitions version in go.mod as well
   E2E_RUNNER_IMAGE: registry.ddbuild.io/ci/test-infra-definitions/runner:ef809e329658
-  AGENT_DEPLOY_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/gitlab_agent_deploy:v105206457-cb3f8790
+  IIS_AGENT_DEPLOY_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/gitlab_agent_deploy:v105206457-cb3f8790
   ARTIFACTS_DIR: artifacts
 
 ########################################
@@ -94,35 +94,30 @@ injector_IIS_unit_test:
   stage: test
   extends: .IIS_build_when
   tags: ["windows-v2:2022"]
-  variables:
-    OVERRIDE_GIT_STRATEGY: clone
-  needs: ["injector_IIS_build"]
+  needs: []
   script:
     - >
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
-      -v "$(Get-Location)\${ARTIFACTS_DIR}:c:\artifacts"
       ${WINDOWS_BUILD_IMAGE}
-      c:\mnt\injector_IIS\scripts\unit_test_injector_IIS.bat
+      powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
     - If ($lastExitCode -ne 0) { exit $lastExitCode }
 
 injector_IIS_unit_test_asan:
   stage: test
   extends: .IIS_build_when
   tags: ["windows-v2:2022"]
-  variables:
-    OVERRIDE_GIT_STRATEGY: clone
   needs: []
   allow_failure: true
   script:
-    - $ErrorActionPreference = "Stop"
     - >
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
       ${WINDOWS_BUILD_IMAGE}
-      powershell -Command "$ErrorActionPreference='Stop'; cd c:\mnt\injector_IIS; cmake --preset=ci-native-asan -B build-asan -DCMAKE_BUILD_TYPE=Debug; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cmake --build build-asan -j; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; .\build-asan\test\unittests\iis_injector_tests.exe"
+      powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
+      -Preset ci-native-asan -BuildDir build-asan -BuildType Debug
     - If ($lastExitCode -ne 0) { exit $lastExitCode }
 
 .injector_IIS_e2e_test_template:
@@ -186,7 +181,7 @@ manual_injector_IIS_e2e_test:
   stage: release
   tags: ["arch:amd64"]
   needs: []
-  image: $AGENT_DEPLOY_IMAGE
+  image: $IIS_AGENT_DEPLOY_IMAGE
   when: manual
   allow_failure: false
   script:
@@ -217,10 +212,11 @@ manual_injector_IIS_release:
     BUILD_CONFIGURATION: Release
     ARCH: x64
 
+
 promote_injector_IIS_release_candidate:
   stage: release
   tags: ["arch:amd64"]
-  image: $AGENT_DEPLOY_IMAGE
+  image: $IIS_AGENT_DEPLOY_IMAGE
   when: manual
   variables:
     RC_COMMIT: ""

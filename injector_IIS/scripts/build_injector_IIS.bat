@@ -20,8 +20,7 @@ popd
 dir %outdir%
 
 if not exist %BUILD_OUTDIR% (mkdir %BUILD_OUTDIR%)
-copy /y %outdir%\*.msi %BUILD_OUTDIR%	
-copy /y %outdir%\unit_tests.exe %BUILD_OUTDIR%	
+copy /y %outdir%\*.msi %BUILD_OUTDIR%
 
 goto :EOF
 

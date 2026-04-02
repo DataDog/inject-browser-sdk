@@ -14,7 +14,7 @@ parameters:
 jobs:
   check:
     docker:
-      - image: rust:1.74.0
+      - image: rust:1.94.1
     steps:
       - checkout
       - run:
@@ -48,7 +48,7 @@ jobs:
   # TODO(@dmehala): add cargo-llvm-cov
   build-and-test-rum-framework:
     docker:
-      - image: rust:1.74.0
+      - image: rust:1.94.1
     steps:
       - checkout
       - run:
@@ -60,7 +60,7 @@ jobs:
 
   build-iis:
     docker:
-      - image: ghcr.io/datadog/inject-browser-sdk:builder-7f22c91
+      - image: ghcr.io/datadog/inject-browser-sdk:builder-a502380
         environment:
           CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
           RUSTFLAGS: "-Lnative=/xwin/crt/lib/x86_64 -Lnative=/xwin/sdk/lib/ucrt/x86_64 -Lnative=/xwin/sdk/lib/um/x86_64"

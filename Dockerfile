@@ -21,7 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     llvm \
     make \
     python3 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/clang-cl clang-cl /usr/bin/clang-cl-19 100
 
 # Install cross-compilation targets
 RUN rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc

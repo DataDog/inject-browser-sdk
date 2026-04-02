@@ -15,20 +15,30 @@ target_sources(iis_injector_tests
   PRIVATE
     test_entrypoint.cpp
     test_http_module.cpp
+    test_injection_pipeline.cpp
 )
+
+option(IIS_ENABLE_ASAN "Enable Address Sanitizer for tests" OFF)
 
 target_compile_options(iis_injector_tests
   PRIVATE
     /W4
     /DUNICODE
+    /bigobj
 )
+
+if (IIS_ENABLE_ASAN)
+  target_compile_options(iis_injector_tests PRIVATE /fsanitize=address)
+  target_link_options(iis_injector_tests PRIVATE /fsanitize=address)
+endif()
 
 target_link_libraries(
   iis_injector_tests
   iis_injector::obj
   GTest::gmock
   GTest::gtest
-  GTest::gtest_main)
+  GTest::gtest_main
+  oleaut32)
 
 if (NOT CMAKE_CROSSCOMPILING)
   include(GoogleTest)

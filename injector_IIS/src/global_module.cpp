@@ -17,9 +17,10 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <string>
+#include <type_traits>
 
 namespace datadog::rum {
-namespace {
+namespace { // anonymous helpers
 
 std::string wstring_to_utf8(const std::wstring &wstr) {
   if (wstr.empty())
@@ -101,11 +102,27 @@ IAppHostProperty *get_property(IAppHostElement *xmlElement,
   return property;
 }
 
+// Returns VT_EMPTY on failure — callers must check v.vt before accessing
+// union members.
 VARIANT get_property_value(IAppHostProperty &property) {
   VARIANT v;
-  property.get_Value(&v);
+  VariantInit(&v);
+  HRESULT hr = property.get_Value(&v);
+  if (FAILED(hr)) {
+    VariantInit(&v);
+  }
   return v;
 }
+
+template <typename T>
+std::optional<T> get_property_int(IAppHostProperty &property) {
+  auto v = get_property_value(property);
+  if (v.vt == VT_EMPTY) return std::nullopt;
+  if constexpr (std::is_same_v<T, int>) return static_cast<int>(v.lVal);
+  else return static_cast<T>(v.iVal);
+}
+
+} // end anonymous namespace
 
 std::optional<ServerConfig> read_server_conf(IHttpServer &server,
                                              std::shared_ptr<Logger> logger) {
@@ -128,13 +145,12 @@ std::optional<ServerConfig> read_server_conf(IHttpServer &server,
   const auto defer_root = defer([&] { cfg_root_elem->Release(); });
 
   LogLevel log_level = LogLevel::Info;
-  auto log_level_prop = get_property(cfg_root_elem, L"logLevel");
-  if (log_level_prop != nullptr) {
-    const auto defer_log_level_prop = defer([&] { log_level_prop->Release(); });
-    int log_level_int = get_property_value(*log_level_prop).lVal;
-    if (log_level_int <= static_cast<int>(LogLevel::Debug) &&
-        log_level_int >= static_cast<int>(LogLevel::Error)) {
-      log_level = static_cast<LogLevel>(log_level_int);
+  if (auto *prop = get_property(cfg_root_elem, L"logLevel")) {
+    const auto d = defer([&] { prop->Release(); });
+    if (auto val = get_property_int<int>(*prop);
+        val && *val <= static_cast<int>(LogLevel::Debug) &&
+        *val >= static_cast<int>(LogLevel::Error)) {
+      log_level = static_cast<LogLevel>(*val);
     }
   }
 
@@ -143,6 +159,10 @@ std::optional<ServerConfig> read_server_conf(IHttpServer &server,
 
 std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
   auto admin_manager = server.GetAdminManager();
+  if (admin_manager == nullptr) {
+    return std::nullopt;
+  }
+
   IAppHostElement *cfg_root_elem;
   auto res = admin_manager->GetAdminSection(
       (BSTR)L"system.webServer/datadogRum", const_cast<BSTR>(cfg_path),
@@ -161,16 +181,20 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
 
   const auto defer_enabled_prop = defer([&] { enabled_prop->Release(); });
 
-  const auto is_enabled = get_property_value(*enabled_prop).boolVal;
-  if (!is_enabled) {
+  auto enabled_val = get_property_value(*enabled_prop);
+  if (enabled_val.vt == VT_EMPTY) {
     return std::nullopt;
+  }
+  if (!enabled_val.boolVal) {
+    return RumConfig{0, {}}; // disabled — distinct from nullopt (read error)
   }
 
   int cfg_version = 6;
-  auto version_prop = get_property(cfg_root_elem, L"version");
-  if (version_prop != nullptr) {
-    const auto defer_version_prop = defer([&] { version_prop->Release(); });
-    cfg_version = get_property_value(*version_prop).iVal;
+  if (auto *prop = get_property(cfg_root_elem, L"version")) {
+    const auto d = defer([&] { prop->Release(); });
+    if (auto val = get_property_int<short>(*prop)) {
+      cfg_version = *val;
+    }
   }
 
   // Iterate on the SDK configuration
@@ -204,8 +228,11 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
         continue;
       }
       const auto defer_name_property = defer([&] { name_property->Release(); });
-      std::string opt_name = wstring_to_utf8(
-          std::wstring(get_property_value(*name_property).bstrVal));
+      auto name_val = get_property_value(*name_property);
+      if (name_val.vt != VT_BSTR || name_val.bstrVal == nullptr) {
+        continue;
+      }
+      std::string opt_name = wstring_to_utf8(std::wstring(name_val.bstrVal));
 
       auto value_property = get_property(option_element, L"value");
       if (value_property == nullptr) {
@@ -213,8 +240,11 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
       }
       const auto defer_value_property =
           defer([&] { value_property->Release(); });
-      std::string opt_value = wstring_to_utf8(
-          std::wstring(get_property_value(*value_property).bstrVal));
+      auto val_val = get_property_value(*value_property);
+      if (val_val.vt != VT_BSTR || val_val.bstrVal == nullptr) {
+        continue;
+      }
+      std::string opt_value = wstring_to_utf8(std::wstring(val_val.bstrVal));
 
       rum_sdk_opts.emplace(std::move(opt_name), std::move(opt_value));
     }
@@ -228,10 +258,16 @@ void update_module_context(ModuleContext &ctx, IHttpServer &server,
 
   auto config_options_opt = read_conf(server, config_path);
   if (!config_options_opt.has_value()) {
-    logger->error("Failed to load RUM configuration");
+    logger->error(std::format("Failed to load RUM configuration for path: {}",
+                              wstring_to_utf8(config_path)));
     return;
   }
   const RumConfig &loaded_config = config_options_opt.value();
+  if (loaded_config.version == 0 && loaded_config.sdk_options.empty()) {
+    logger->info("RUM injection disabled for this path");
+    ctx.snippet.reset();
+    return;
+  }
   Snippet *snippet =
       make_snippet(loaded_config.version, loaded_config.sdk_options);
 
@@ -241,11 +277,12 @@ void update_module_context(ModuleContext &ctx, IHttpServer &server,
   } else if (snippet->error_code != 0) {
     logger->error(std::format("Failed to create RUM snippet: {}",
                               snippet->error_message));
+    snippet_cleanup(snippet);
     return;
   }
 
   logger->info("Configuration validated");
-  ctx.js_snippet = snippet;
+  ctx.snippet.reset(snippet);
 
   if (auto appIdIt = loaded_config.sdk_options.find("applicationId");
       appIdIt != loaded_config.sdk_options.end()) {
@@ -255,7 +292,6 @@ void update_module_context(ModuleContext &ctx, IHttpServer &server,
   auto rcUsed = loaded_config.sdk_options.count("remoteConfigurationId") > 0;
   ctx.remote_config_tag = std::format("remote_config_used:{}", rcUsed);
 }
-} // namespace
 
 GlobalModule::GlobalModule(IHttpServer *server, DWORD server_version,
                            std::shared_ptr<Logger> logger)
@@ -317,6 +353,7 @@ GlobalModule::OnGlobalApplicationStart(
 
   auto ctx = new ModuleContext;
   ctx->logger = logger_.get();
+  ctx->server = server_;
 
   auto app = provider->GetApplication();
   assert(app);
@@ -327,7 +364,13 @@ GlobalModule::OnGlobalApplicationStart(
                             wstring_to_utf8(app->GetApplicationId())));
 
   update_module_context(*ctx, *server_, config_path, logger_);
-  app->GetModuleContextContainer()->SetModuleContext(ctx, g_module_id);
+  auto hr = app->GetModuleContextContainer()->SetModuleContext(ctx, g_module_id);
+  if (FAILED(hr)) {
+    logger_->error(std::format("Failed to set app module context: {}",
+                               std::system_category().message(hr)));
+    delete ctx;
+    return GL_NOTIFICATION_CONTINUE;
+  }
 
   // NOTE(@dmehala): Keep a reference on the module context for
   // `OnGlobalConfigurationChange` event.
@@ -338,7 +381,7 @@ GlobalModule::OnGlobalApplicationStart(
 
 GLOBAL_NOTIFICATION_STATUS
 GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider *provider) {
-  auto cfg_path = provider->GetApplication()->GetApplicationId();
+  auto cfg_path = provider->GetApplication()->GetAppConfigPath();
   if (cfg_path == nullptr) {
     return GL_NOTIFICATION_CONTINUE;
   }
@@ -384,7 +427,7 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
     // Question(@dmehala): should the default behaviour to keep the old setting
     // if there's an issue with the configuration?
     if (std::wstring_view(path).starts_with(cfg_path)) {
-      update_module_context(*ctx, *server_, provider->GetChangePath(), logger_);
+      update_module_context(*ctx, *server_, path.c_str(), logger_);
     }
   }
 

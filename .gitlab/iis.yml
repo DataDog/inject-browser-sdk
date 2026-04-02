@@ -1,21 +1,10 @@
 ---
 variables:
-  WINDOWS_BUILD_IMAGE: datadog-agent-buildimages/windows_ltsc2022_x64
-  CI_IMAGE_WIN_LTSC2022_X64_SUFFIX: ""
-  CI_IMAGE_WIN_LTSC2022_X64: v94236382-f3eb3132
-  E2E_RUNNER_IMAGE: test-infra-definitions/runner
-  #E2E_RUNNER_IMAGE_VERSION: dfdd12299b97
-  # To use images from test-infra-definitions dev branches, set the SUFFIX variable to -dev
-  # and check the job creating the image to make sure you have the right SHA prefix
-  TEST_INFRA_DEFINITIONS_BUILDIMAGES_SUFFIX: ""
+  WINDOWS_BUILD_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64:v105206457-cb3f8790
   # Make sure to update test-infra-definitions version in go.mod as well
-  TEST_INFRA_DEFINITIONS_BUILDIMAGES: e79f06b7fce3
-  AGENT_DEPLOY_IMAGE: datadog-agent-buildimages/gitlab_agent_deploy
-  CI_IMAGE_AGENT_DEPLOY_SUFFIX: ""
-  CI_IMAGE_AGENT_DEPLOY: v47979770-a5a4cfd0
+  E2E_RUNNER_IMAGE: registry.ddbuild.io/ci/test-infra-definitions/runner:ef809e329658
+  AGENT_DEPLOY_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/gitlab_agent_deploy:v105206457-cb3f8790
   ARTIFACTS_DIR: artifacts
-  REGISTRY: registry.ddbuild.io
-  OLD_REGISTRY: 486234852809.dkr.ecr.us-east-1.amazonaws.com
 
 ########################################
 # IIS build and test jobs
@@ -25,23 +14,23 @@ variables:
   stage: build
   tags: ["windows-v2:2022"]
   needs: []
-  id_tokens:
-    CI_IDENTITIES_GITLAB_ID_TOKEN:
-      aud: ci-identities
   variables:
     BUILD_CONFIGURATION: Release
     ARCH: x64
     GIT_DEPTH: 500 #Default is 20
     GIT_SUBMODULE_STRATEGY: recursive
-    WINDOWS_CODE_SIGNER_IMAGE: registry.ddbuild.io/windows-code-signer/go:latest
   script:
-    # Download windows-code-signer by extracting it from the container image
-    - mkdir -Force ci-tools
-    - docker pull ${WINDOWS_CODE_SIGNER_IMAGE}
-    - docker create --name temp-signer ${WINDOWS_CODE_SIGNER_IMAGE}
-    - docker cp temp-signer:C:/windows-code-signer/windows-code-signer.exe ci-tools\
-    - docker rm temp-signer
-    # Clean and run the build
+    - |
+      $image = "${WINDOWS_BUILD_IMAGE}"
+      $cached = docker images -q $image
+      if ($cached) {
+        Write-Host "Image $image is already cached on this runner."
+      } else {
+        Write-Host "Image $image is not cached — pulling. This can take ~12 minutes."
+        Write-Host "The runner AMI pre-pulls the latest tag. After a tag bump, new AMIs"
+        Write-Host "need to be built and runners recycled before the cache is warm again."
+      }
+      docker pull $image
     - if (Test-Path build-out) { remove-item -recurse -force build-out }
     - >
       docker run --rm
@@ -52,11 +41,12 @@ variables:
       -e ARCH=$ARCH
       -e TEST_DIR="c:\mnt\injector_IIS\test\"
       -e WINDOWS_BUILDER=true
-      -e USE_WINDOWS_CODE_SIGNER=true
-      -e CI_IDENTITIES_GITLAB_ID_TOKEN=${CI_IDENTITIES_GITLAB_ID_TOKEN}
+      -e SIGN_WINDOWS_DD_WCS=true
+      -e AWS_NETWORKING=true
+      -e CI=true
       -e CI_JOB_ID=${CI_JOB_ID}
       -e CI_PROJECT_NAME=${CI_PROJECT_NAME}
-      ${REGISTRY}/ci/${WINDOWS_BUILD_IMAGE}${CI_IMAGE_WIN_LTSC2022_X64_SUFFIX}:${CI_IMAGE_WIN_LTSC2022_X64}
+      ${WINDOWS_BUILD_IMAGE}
       c:\mnt\injector_IIS\scripts\build_injector_IIS.bat
     # Copy output files to artifacts dir for use in later jobs
     - if (Test-Path $ARTIFACTS_DIR) { remove-item -recurse -force $ARTIFACTS_DIR }
@@ -69,13 +59,26 @@ variables:
 
 .IIS_build_when:
   rules:
-    - changes:
-      - scheduled
+    - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      changes:
+        compare_to: refs/heads/main
+        paths:
+          - injector_IIS/**/*
+          - lib/**/*
+          - Cargo.toml
+          - Cargo.lock
+          - .gitlab-ci.yml
+          - .gitlab/iis.yml
     - changes:
         - injector_IIS/**/*
         - lib/**/*
+        - Cargo.toml
+        - Cargo.lock
         - .gitlab-ci.yml
+        - .gitlab/iis.yml
+
 
 injector_IIS_build:
   extends:
@@ -86,11 +89,50 @@ manual_injector_IIS_build:
   extends: .IIS_build
   when: manual
 
+injector_IIS_unit_test:
+  stage: test
+  extends: .IIS_build_when
+  tags: ["windows-v2:2022"]
+  variables:
+    OVERRIDE_GIT_STRATEGY: clone
+  needs: ["injector_IIS_build"]
+  script:
+    - >
+      docker run --rm
+      -m 4096M
+      -v "$(Get-Location):c:\mnt"
+      -v "$(Get-Location)\${ARTIFACTS_DIR}:c:\artifacts"
+      ${WINDOWS_BUILD_IMAGE}
+      c:\mnt\injector_IIS\scripts\unit_test_injector_IIS.bat
+    - If ($lastExitCode -ne 0) { exit $lastExitCode }
+
+injector_IIS_unit_test_asan:
+  stage: test
+  extends: .IIS_build_when
+  tags: ["windows-v2:2022"]
+  variables:
+    OVERRIDE_GIT_STRATEGY: clone
+  needs: []
+  allow_failure: true
+  script:
+    - $ErrorActionPreference = "Stop"
+    - >
+      docker run --rm
+      -m 4096M
+      -v "$(Get-Location):c:\mnt"
+      ${WINDOWS_BUILD_IMAGE}
+      powershell -Command "$ErrorActionPreference='Stop'; cd c:\mnt\injector_IIS; cmake --preset=ci-native-asan -B build-asan -DCMAKE_BUILD_TYPE=Debug; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cmake --build build-asan -j; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; .\build-asan\test\unittests\iis_injector_tests.exe"
+    - If ($lastExitCode -ne 0) { exit $lastExitCode }
+
 .injector_IIS_e2e_test_template:
   stage: test
   tags: ["arch:amd64"]
   needs: []
-  image: ${OLD_REGISTRY}/ci/${E2E_RUNNER_IMAGE}${TEST_INFRA_DEFINITIONS_BUILDIMAGES_SUFFIX}:${TEST_INFRA_DEFINITIONS_BUILDIMAGES}
+  retry:
+    max: 2
+    when:
+      - script_failure
+  image: $E2E_RUNNER_IMAGE
   variables:
     AWS_SSM_PREFIX: "ci.inject-browser-sdk."
     KEY_PAIR_NAME: "ci.inject-browser-sdk"
@@ -143,7 +185,7 @@ manual_injector_IIS_e2e_test:
   stage: release
   tags: ["arch:amd64"]
   needs: []
-  image: ${REGISTRY}/ci/$AGENT_DEPLOY_IMAGE$CI_IMAGE_AGENT_DEPLOY_SUFFIX:$CI_IMAGE_AGENT_DEPLOY
+  image: $AGENT_DEPLOY_IMAGE
   when: manual
   allow_failure: false
   script:
@@ -177,7 +219,7 @@ manual_injector_IIS_release:
 promote_injector_IIS_release_candidate:
   stage: release
   tags: ["arch:amd64"]
-  image: ${REGISTRY}/ci/$AGENT_DEPLOY_IMAGE$CI_IMAGE_AGENT_DEPLOY_SUFFIX:$CI_IMAGE_AGENT_DEPLOY
+  image: $AGENT_DEPLOY_IMAGE
   when: manual
   variables:
     RC_COMMIT: ""

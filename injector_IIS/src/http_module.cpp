@@ -5,11 +5,13 @@
 // Copyright 2024-Present Datadog, Inc.
 
 #include "http_module.h"
+#include "config_reader.h"
 #include "module_context.h"
 #include "telemetry.h"
 #include <cassert>
 #include <datadog/telemetry/telemetry.h>
 #include <format>
+#include <memory>
 #include <string>
 
 namespace datadog::rum {
@@ -41,17 +43,30 @@ HttpModule::OnBeginRequest(IN IHttpContext *http_context,
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  auto opaque_ptr = http_context->GetApplication()
-                        ->GetModuleContextContainer()
-                        ->GetModuleContext(g_module_id);
-  if (opaque_ptr == nullptr) {
-    assert(true);
+  auto *app_opaque = http_context->GetApplication()
+                         ->GetModuleContextContainer()
+                         ->GetModuleContext(g_module_id);
+  if (app_opaque == nullptr) {
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  auto &ctx = *static_cast<ModuleContext *>(opaque_ptr);
-  if (ctx.js_snippet == nullptr) {
-    ctx.logger->debug("Skipping RUM injection: disabled");
+  // Check per-location cache if available (populated by a prior request's
+  // OnSendResponse). This matters because the pending header may be
+  // forwarded to downstream proxies — it should not claim injection is
+  // coming when a <location> override disables it.
+  ModuleContext *ctx = static_cast<ModuleContext *>(app_opaque);
+  auto *metadata = http_context->GetMetadata();
+  if (metadata != nullptr) {
+    auto *mc = metadata->GetModuleContextContainer();
+    if (mc != nullptr) {
+      auto *cached = mc->GetModuleContext(g_module_id);
+      if (cached != nullptr) {
+        ctx = static_cast<ModuleContext *>(cached);
+      }
+    }
+  }
+
+  if (!ctx->snippet) {
     return RQ_NOTIFICATION_CONTINUE;
   }
 
@@ -59,8 +74,8 @@ HttpModule::OnBeginRequest(IN IHttpContext *http_context,
       http_request->SetHeader("x-datadog-rum-injection-pending", "1", 1, TRUE);
   if (result != S_OK) {
     event_provider->SetErrorStatus(result);
-    ctx.logger->error("Error setting request header: " +
-                      std::system_category().message(result));
+    ctx->logger->error("Error setting request header: " +
+                       std::system_category().message(result));
   }
 
   return RQ_NOTIFICATION_CONTINUE;
@@ -76,25 +91,73 @@ HttpModule::OnSendResponse(IN IHttpContext *http_context,
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  auto opaque_ptr = http_context->GetApplication()
-                        ->GetModuleContextContainer()
-                        ->GetModuleContext(g_module_id);
-  if (opaque_ptr == nullptr) {
+  // Get app-level context (always needed for logger, server, tags).
+  auto *app_opaque = http_context->GetApplication()
+                         ->GetModuleContextContainer()
+                         ->GetModuleContext(g_module_id);
+  if (app_opaque == nullptr) {
     assert(true);
     return RQ_NOTIFICATION_CONTINUE;
   }
+  auto &app_ctx = *static_cast<ModuleContext *>(app_opaque);
 
-  auto &ctx = *static_cast<ModuleContext *>(opaque_ptr);
-  if (ctx.js_snippet == nullptr) {
-    ctx.logger->debug("Skipping RUM injection: disabled");
+  // Resolve per-<location> config. Cached on the IMetadataInfo container;
+  // IIS recycles it on config change, so hot-reload works automatically.
+  ModuleContext *ctx = &app_ctx;
+  auto *metadata = http_context->GetMetadata();
+  if (metadata != nullptr) {
+    auto *meta_container = metadata->GetModuleContextContainer();
+    if (meta_container == nullptr) {
+      app_ctx.logger->error("Unexpected: metadata context container is null");
+      return RQ_NOTIFICATION_CONTINUE;
+    }
+
+    auto *meta_cached = meta_container->GetModuleContext(g_module_id);
+
+    if (meta_cached != nullptr) {
+      ctx = static_cast<ModuleContext *>(meta_cached);
+    } else if (app_ctx.server != nullptr) {
+      // Cache miss — read config for this request's effective path.
+      auto *meta_path = metadata->GetMetaPath();
+      auto *new_ctx = new ModuleContext;
+      new_ctx->logger = app_ctx.logger;
+      new_ctx->server = app_ctx.server;
+      new_ctx->application_id_tag = app_ctx.application_id_tag;
+      new_ctx->remote_config_tag = app_ctx.remote_config_tag;
+
+      // Non-owning shared_ptr (GlobalModule owns the logger).
+      auto logger_ptr =
+          std::shared_ptr<Logger>(app_ctx.logger, [](Logger *) {});
+      update_module_context(*new_ctx, *app_ctx.server, meta_path, logger_ptr);
+
+      auto hr = meta_container->SetModuleContext(new_ctx, g_module_id);
+      if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
+        // Another thread won the race — use its cached context.
+        delete new_ctx;
+        ctx = static_cast<ModuleContext *>(
+            meta_container->GetModuleContext(g_module_id));
+      } else if (FAILED(hr)) {
+        app_ctx.logger->error(
+            std::format("Failed to cache per-location context: {}",
+                        std::system_category().message(hr)));
+        delete new_ctx;
+        return RQ_NOTIFICATION_CONTINUE;
+      } else {
+        ctx = new_ctx;
+      }
+    }
+  }
+
+  if (!ctx->snippet) {
+    ctx->logger->debug("Skipping RUM injection: disabled");
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  if (!ShouldAttemptInjection(*http_response, ctx)) {
+  if (!ShouldAttemptInjection(*http_response, *ctx)) {
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  return PerformInjection(*http_context, *http_response, ctx);
+  return PerformInjection(*http_context, *http_response, *ctx);
 }
 
 bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
@@ -153,9 +216,9 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
 REQUEST_NOTIFICATION_STATUS
 HttpModule::PerformInjection(IHttpContext &pHttpContext,
                              IHttpResponse &pHttpResponse, ModuleContext &ctx) {
-  assert(ctx.js_snippet);
+  assert(ctx.snippet);
   assert(ctx.logger);
-  const Snippet *snippet = ctx.js_snippet;
+  const Snippet *snippet = ctx.snippet.get();
   auto &logger = *ctx.logger;
 
   HTTP_RESPONSE *pResponseStruct = pHttpResponse.GetRawHttpResponse();

@@ -5,29 +5,23 @@
 # Copyright 2024-Present Datadog, Inc.
 
 # Builder image for cross-compiling the IIS injector to Windows.
-# Uses the same Rust base as Dockerfile.artifacts.
 
-FROM rust:1.94-slim-bookworm
+FROM rust:1.94-slim-trixie
 
 ARG ARCH
 
-# Install clang/lld for Windows cross-compilation, python3 for xwin
+# Install clang 19/lld for Windows cross-compilation, cmake 3.31 for the build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang \
     clang-tools \
+    cmake \
     curl \
     git \
     lld \
     llvm \
     make \
     python3 \
-    && rm -rf /var/lib/apt/lists/* \
-    && ln -sf clang-cl-14 /usr/bin/clang-cl
-
-# Install CMake >= 3.31 (required by CMakePresets version 8)
-ARG CMAKE_VERSION=3.31.6
-RUN curl -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz" \
-    | tar xz --strip-components=1 -C /usr/local
+    && rm -rf /var/lib/apt/lists/*
 
 # Install cross-compilation targets
 RUN rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc

@@ -1,0 +1,107 @@
+---
+variables:
+  DEVCONTAINER_IMAGE_NAME: registry.ddbuild.io/ci/inject-browser-sdk/devcontainer
+  DOCKER_BUILD_IMAGE: registry.ddbuild.io/images/docker:v105451425-c1f162e-27.3.1
+  NYDUS_DD_IMAGE: registry.ddbuild.io/images/nydus:v105904890-5e6ee6b-v2.4.0-dd.3
+
+.not_scheduled:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: always
+
+.not_scheduled_on_failure:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_failure
+
+# Happy path: run inside the baseline image (which has crane + sha256sum),
+# compute the content hash of Dockerfile + rust-toolchain.toml, and check
+# if that tag exists in the registry via crane manifest. If it does, write
+# build.env and succeed. If it doesn't, fail so devcontainer_build runs.
+devcontainer_image:
+  stage: build
+  extends: .not_scheduled
+  # Bootstrap image — must contain sha256sum and crane.
+  # Update this tag after a successful devcontainer_build + nydusify.
+  image: ${DEVCONTAINER_IMAGE_NAME}:63f85fda9a9e
+  tags: ["arch:amd64"]
+  needs: []
+  script:
+    - TAG=$(cat .devcontainer/Dockerfile rust-toolchain.toml | sha256sum | cut -c1-12)
+    - IMAGE="${DEVCONTAINER_IMAGE_NAME}:${TAG}"
+    - echo "DEVCONTAINER_IMAGE=${IMAGE}" > build.env
+    - crane manifest "${IMAGE}" >/dev/null || { echo "Image ${IMAGE} not found in registry — triggering build"; exit 1; }
+  artifacts:
+    reports:
+      dotenv: build.env
+
+# Sad path: only runs when devcontainer_image fails (image not in registry).
+# Builds and pushes the new image using Docker.
+devcontainer_build:
+  stage: build
+  extends: .not_scheduled_on_failure
+  needs: ["devcontainer_image"]
+  image: $DOCKER_BUILD_IMAGE
+  tags: ["arch:amd64"]
+  script:
+    - TAG=$(cat .devcontainer/Dockerfile rust-toolchain.toml | sha256sum | cut -c1-12)
+    - IMAGE="${DEVCONTAINER_IMAGE_NAME}:${TAG}"
+    - echo "DEVCONTAINER_IMAGE=${IMAGE}" > build.env
+    - docker buildx build
+        --build-context "repo=$(pwd)"
+        --platform linux/amd64,linux/arm64
+        --push
+        -t "${IMAGE}"
+        .devcontainer/
+  artifacts:
+    reports:
+      dotenv: build.env
+
+# Sad path: nydusify after build. Depends on devcontainer_build via 'needs' —
+# GitLab CI skips this job when devcontainer_build is itself skipped (happy
+# path), so it only runs when a new image was actually built.
+devcontainer_nydusify:
+  stage: build
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_success
+  needs:
+    - job: devcontainer_build
+      artifacts: true
+  image: $NYDUS_DD_IMAGE
+  tags: ["arch:amd64"]
+  script:
+    - nydus-convert "${DEVCONTAINER_IMAGE}"
+
+# Manual: nydusify any existing image on demand.
+manual_devcontainer_nydusify:
+  stage: build
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: manual
+      allow_failure: true
+  needs:
+    - job: devcontainer_image
+      artifacts: true
+  image: $NYDUS_DD_IMAGE
+  tags: ["arch:amd64"]
+  script:
+    - nydus-convert "${DEVCONTAINER_IMAGE}"
+
+lint:
+  stage: test
+  extends: .not_scheduled
+  image: $DEVCONTAINER_IMAGE
+  tags: ["arch:amd64"]
+  needs:
+    - job: devcontainer_image
+      artifacts: true
+    - job: devcontainer_build
+      artifacts: true
+      optional: true
+  script:
+    - make lint

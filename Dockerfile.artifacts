@@ -5,7 +5,7 @@
 # Copyright 2024-Present Datadog, Inc.
 
 # Self-contained builder for FFI artifacts - no external toolchain dependencies
-FROM rust:1.73-slim-bookworm AS builder
+FROM rust:1.94-slim-bookworm AS builder
 
 ARG TARGETARCH
 

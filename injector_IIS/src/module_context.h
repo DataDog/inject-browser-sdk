@@ -32,4 +32,4 @@ struct ModuleContext final : public IHttpStoredContext {
   };
 };
 
-} // namespace datadog::rum
+}  // namespace datadog::rum

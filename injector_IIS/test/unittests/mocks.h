@@ -11,7 +11,7 @@
 #include "gmock/gmock.h"
 
 class MockModule : public IHttpModuleRegistrationInfo {
-public:
+ public:
   MOCK_METHOD(HTTP_MODULE_ID, GetId, (), (const, override));
   MOCK_METHOD(PCWSTR, GetName, (), (const, override));
   MOCK_METHOD(HRESULT, SetGlobalNotifications,
@@ -32,7 +32,7 @@ public:
 };
 
 class MockServer : public IHttpServer {
-public:
+ public:
   MOCK_METHOD(BOOL, IsCommandLineLaunch, (), (const, override));
   MOCK_METHOD(PCWSTR, GetAppPoolName, (), (const, override));
   MOCK_METHOD(HRESULT, AssociateWithThreadPool,
@@ -104,11 +104,10 @@ public:
 class MockHttpContext : public IHttpContext {
   VOID *m_allocatedMemory;
 
-public:
-  MockHttpContext() : m_allocatedMemory(NULL){};
+ public:
+  MockHttpContext() : m_allocatedMemory(nullptr) {};
   ~MockHttpContext() {
-    if (m_allocatedMemory != NULL)
-      free(m_allocatedMemory);
+    if (m_allocatedMemory != nullptr) free(m_allocatedMemory);
   };
 
   MOCK_METHOD(IHttpSite *, GetSite, (), (override));
@@ -215,7 +214,7 @@ public:
   // To make memory management a little easier, we'll implement this function
   // instead of mocking it
   VOID *AllocateRequestMemory(DWORD size) override {
-    if (m_allocatedMemory != NULL) {
+    if (m_allocatedMemory != nullptr) {
       free(m_allocatedMemory);
     };
     m_allocatedMemory = (VOID *)malloc(size);
@@ -224,7 +223,7 @@ public:
 };
 
 class MockHttpSite : public IHttpSite {
-public:
+ public:
   MOCK_METHOD(DWORD, GetSiteId, (), (const, override));
   MOCK_METHOD(PCWSTR, GetSiteName, (), (const, override));
   MOCK_METHOD(IHttpModuleContextContainer *, GetModuleContextContainer, (),
@@ -233,7 +232,7 @@ public:
 };
 
 class MockHttpApplication : public IHttpApplication {
-public:
+ public:
   MOCK_METHOD(PCWSTR, GetApplicationPhysicalPath, (), (const, override));
   MOCK_METHOD(PCWSTR, GetApplicationId, (), (const, override));
   MOCK_METHOD(PCWSTR, GetAppConfigPath, (), (const, override));
@@ -241,7 +240,7 @@ public:
               (override));
 };
 class MockHttpResponse : public IHttpResponse {
-public:
+ public:
   // Because both overloads of GetRawHttpResponse have the same arguments, gmock
   // has a hard time differentiating between the two - so we'll only mock the
   // version which we plan to use

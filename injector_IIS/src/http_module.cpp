@@ -17,45 +17,47 @@ namespace {
 
 constexpr std::string_view k_injection_header = "x-datadog-rum-injected";
 
-std::string_view get_header(IHttpResponse &http_response,
+std::string_view get_header(IHttpResponse& http_response,
                             std::string_view header) {
-  USHORT length;
-  PCSTR data = http_response.GetHeader(header.data(), &length);
+  USHORT length = 0;
+  // NOLINT is on .data() — IIS GetHeader expects PCSTR, header is always
+  // null-terminated
+  PCSTR data = http_response.GetHeader(
+      header.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
+      &length);
   if (data == nullptr) {
     return "";
   }
 
-  return std::string_view(data, length);
+  return {data, length};
 }
 
-} // namespace
+}  // namespace
 
 REQUEST_NOTIFICATION_STATUS
-HttpModule::OnBeginRequest(IN IHttpContext *http_context,
-                           IN IHttpEventProvider *event_provider) {
+HttpModule::OnBeginRequest(IN IHttpContext* http_context,
+                           IN IHttpEventProvider* event_provider) {
   assert(http_context != nullptr);
   assert(event_provider != nullptr);
-  IHttpRequest *http_request = http_context->GetRequest();
+  IHttpRequest* http_request = http_context->GetRequest();
   if (http_request == nullptr) {
-    assert(true);
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  auto opaque_ptr = http_context->GetApplication()
-                        ->GetModuleContextContainer()
-                        ->GetModuleContext(g_module_id);
+  auto* opaque_ptr = http_context->GetApplication()
+                         ->GetModuleContextContainer()
+                         ->GetModuleContext(g_module_id);
   if (opaque_ptr == nullptr) {
-    assert(true);
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  auto &ctx = *static_cast<ModuleContext *>(opaque_ptr);
+  auto& ctx = *static_cast<ModuleContext*>(opaque_ptr);
   if (ctx.js_snippet == nullptr) {
     ctx.logger->debug("Skipping RUM injection: disabled");
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  HRESULT result =
+  HRESULT const result =
       http_request->SetHeader("x-datadog-rum-injection-pending", "1", 1, TRUE);
   if (result != S_OK) {
     event_provider->SetErrorStatus(result);
@@ -67,24 +69,22 @@ HttpModule::OnBeginRequest(IN IHttpContext *http_context,
 }
 
 REQUEST_NOTIFICATION_STATUS
-HttpModule::OnSendResponse(IN IHttpContext *http_context,
-                           IN ISendResponseProvider *) {
+HttpModule::OnSendResponse(IN IHttpContext* http_context,
+                           IN ISendResponseProvider*) {
   assert(http_context != nullptr);
-  auto http_response = http_context->GetResponse();
+  auto* http_response = http_context->GetResponse();
   if (http_response == nullptr) {
-    assert(true);
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  auto opaque_ptr = http_context->GetApplication()
-                        ->GetModuleContextContainer()
-                        ->GetModuleContext(g_module_id);
+  auto* opaque_ptr = http_context->GetApplication()
+                         ->GetModuleContextContainer()
+                         ->GetModuleContext(g_module_id);
   if (opaque_ptr == nullptr) {
-    assert(true);
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  auto &ctx = *static_cast<ModuleContext *>(opaque_ptr);
+  auto& ctx = *static_cast<ModuleContext*>(opaque_ptr);
   if (ctx.js_snippet == nullptr) {
     ctx.logger->debug("Skipping RUM injection: disabled");
     return RQ_NOTIFICATION_CONTINUE;
@@ -97,16 +97,18 @@ HttpModule::OnSendResponse(IN IHttpContext *http_context,
   return PerformInjection(*http_context, *http_response, ctx);
 }
 
-bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
-                                        const ModuleContext &ctx) const {
+bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
+                                        const ModuleContext& ctx) const {
   // First, we must validate the the content type is 'text/html'
   // Note that the value of the Content-Type header is case insensitive, and it
   // may or may not be be followed by semicolon-delimited parameters
   //   ie Text/HTML;Charset="utf-8"
   // see https://www.rfc-editor.org/rfc/rfc9110#name-content-type
 
-  if (_strnicmp(get_header(pHttpResponse, "Content-Type").data(), "text/html",
-                9) != 0) {
+  if (_strnicmp(
+          get_header(pHttpResponse, "Content-Type")
+              .data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
+          "text/html", 9) != 0) {
     datadog::telemetry::counter::increment(
         telemetry::injection_skipped,
         telemetry::build_tags("reason:content-type", ctx.application_id_tag,
@@ -125,7 +127,8 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
     return false;
   }
 
-  // Check if content is compressed, skip injection if Content-Encoding header exists
+  // Check if content is compressed, skip injection if Content-Encoding header
+  // exists
   if (!get_header(pHttpResponse, "Content-Encoding").empty()) {
     datadog::telemetry::counter::increment(
         telemetry::injection_skipped,
@@ -142,8 +145,9 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
         telemetry::injection_skipped,
         telemetry::build_tags("reason:already_injected", ctx.application_id_tag,
                               ctx.remote_config_tag));
-    ctx.logger->debug("Skipping RUM injection: injection has "
-                      "already been attempted on this response");
+    ctx.logger->debug(
+        "Skipping RUM injection: injection has "
+        "already been attempted on this response");
     return false;
   }
 
@@ -151,14 +155,14 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
 }
 
 REQUEST_NOTIFICATION_STATUS
-HttpModule::PerformInjection(IHttpContext &pHttpContext,
-                             IHttpResponse &pHttpResponse, ModuleContext &ctx) {
+HttpModule::PerformInjection(IHttpContext& pHttpContext,
+                             IHttpResponse& pHttpResponse, ModuleContext& ctx) {
   assert(ctx.js_snippet);
   assert(ctx.logger);
-  const Snippet *snippet = ctx.js_snippet;
-  auto &logger = *ctx.logger;
+  const Snippet* snippet = ctx.js_snippet;
+  auto& logger = *ctx.logger;
 
-  HTTP_RESPONSE *pResponseStruct = pHttpResponse.GetRawHttpResponse();
+  HTTP_RESPONSE* pResponseStruct = pHttpResponse.GetRawHttpResponse();
   if (pResponseStruct == nullptr) {
     logger.debug("Raw HTTP response was null");
     return RQ_NOTIFICATION_CONTINUE;
@@ -169,7 +173,7 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  Injector *injector = injector_create(snippet);
+  Injector* injector = injector_create(snippet);
   if (injector == nullptr) {
     logger.error("Error creating injector");
     return RQ_NOTIFICATION_CONTINUE;
@@ -180,7 +184,7 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
   // Write the existing data chunks to the injector, and then write the
   // resulting byte slices into our new response string
   for (int i = 0; i < pResponseStruct->EntityChunkCount; i++) {
-    HTTP_DATA_CHUNK &dataChunk = pResponseStruct->pEntityChunks[i];
+    HTTP_DATA_CHUNK& dataChunk = pResponseStruct->pEntityChunks[i];
     if (dataChunk.DataChunkType != HttpDataChunkFromMemory) {
       logger.debug(
           "Skipping response which is not in memory: response type = " +
@@ -192,15 +196,15 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
     auto chunkLength = dataChunk.FromMemory.BufferLength;
 
     auto injectorResult = injector_write(
-        injector, (uint8_t *)dataChunk.FromMemory.pBuffer, chunkLength);
+        injector, (uint8_t*)dataChunk.FromMemory.pBuffer, chunkLength);
     if (injectorResult.injected) {
       const size_t bufferLength =
           sizeof(uint8_t) * (chunkLength + snippet->length);
-      void *buffer = pHttpContext.AllocateRequestMemory(bufferLength);
+      void* buffer = pHttpContext.AllocateRequestMemory(bufferLength);
 
-      auto *offset = (uint8_t *)buffer;
+      auto* offset = (uint8_t*)buffer;
       for (size_t i = 0; i < injectorResult.slices_length; ++i) {
-        const auto &slice = injectorResult.slices[i];
+        const auto& slice = injectorResult.slices[i];
         memcpy(offset, slice.start, slice.length);
         offset += slice.length;
       }
@@ -210,8 +214,10 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
 
       injected = true;
 
-      HRESULT result =
-          pHttpResponse.SetHeader(k_injection_header.data(), "1", 1, TRUE);
+      HRESULT const result = pHttpResponse.SetHeader(
+          k_injection_header
+              .data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
+          "1", 1, TRUE);
       if (result != S_OK) {
         logger.error("Error setting injection header: " +
                      std::system_category().message(result));
@@ -226,9 +232,11 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
         telemetry::injection_succeed,
         telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
   } else {
-    auto tags = telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag);
-    if (auto content_encoding = get_header(pHttpResponse, "Content-Encoding"); !content_encoding.empty()) {
-    tags.emplace_back("content_encoding:" + std::string(content_encoding));
+    auto tags =
+        telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag);
+    if (auto content_encoding = get_header(pHttpResponse, "Content-Encoding");
+        !content_encoding.empty()) {
+      tags.emplace_back("content_encoding:" + std::string(content_encoding));
     }
 
     datadog::telemetry::counter::increment(telemetry::injection_failed, tags);
@@ -238,8 +246,8 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
 
   logger.debug("Writing new response");
 
-  DWORD bytesSent;
-  HRESULT result = pHttpResponse.Flush(FALSE, FALSE, &bytesSent);
+  DWORD bytesSent = 0;
+  HRESULT const result = pHttpResponse.Flush(FALSE, FALSE, &bytesSent);
   if (FAILED(result)) {
     logger.debug("Error while flushing response: " +
                  std::system_category().message(result));
@@ -248,4 +256,4 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
   return RQ_NOTIFICATION_FINISH_REQUEST;
 }
 
-} // namespace datadog::rum
+}  // namespace datadog::rum

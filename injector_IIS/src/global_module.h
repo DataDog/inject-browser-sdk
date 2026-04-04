@@ -24,7 +24,7 @@ class GlobalModule final : public CGlobalModule {
   std::shared_ptr<Logger> logger_;
   std::map<std::wstring, ModuleContext *> configurations_;
 
-public:
+ public:
   GlobalModule(IHttpServer *server, DWORD server_version,
                std::shared_ptr<Logger> logger);
   ~GlobalModule() = default;
@@ -43,10 +43,11 @@ public:
   OnGlobalConfigurationChange(
       IGlobalConfigurationChangeProvider *provider) override;
 
-private:
+ private:
   void update_server_log_level();
 };
 
+// NOLINTNEXTLINE(bugprone-exception-escape) unordered_map may throw on alloc
 struct RumConfig {
   int version;
   std::unordered_map<std::string, std::string> sdk_options;
@@ -56,4 +57,4 @@ struct ServerConfig {
   LogLevel log_level;
 };
 
-} // namespace datadog::rum
+}  // namespace datadog::rum

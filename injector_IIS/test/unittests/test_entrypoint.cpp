@@ -8,7 +8,7 @@
 #include "mocks.h"
 #include "gtest/gtest.h"
 
-using ::testing::_;
+using ::testing::_;  // NOLINT(bugprone-reserved-identifier) gtest idiom
 using ::testing::DoAll;
 using ::testing::Return;
 using ::testing::SaveArg;
@@ -18,8 +18,7 @@ TEST(TestRegisterModule,
   MockModule module;
   MockServer server;
 
-  EXPECT_CALL(server, GetAdminManager())
-      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(nullptr));
 
   EXPECT_CALL(module, SetGlobalNotifications(_, GL_APPLICATION_START |
                                                     GL_CONFIGURATION_CHANGE |
@@ -39,10 +38,9 @@ TEST(TestRegisterModule, TestRegistersValidHTTPModuleFactory) {
   MockModule module;
   MockServer server;
 
-  EXPECT_CALL(server, GetAdminManager())
-      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(nullptr));
 
-  IHttpModuleFactory *resultFactory = NULL;
+  IHttpModuleFactory *resultFactory = nullptr;
   ON_CALL(module, SetRequestNotifications)
       .WillByDefault(DoAll(SaveArg<0>(&resultFactory), Return(S_OK)));
 
@@ -55,8 +53,8 @@ TEST(TestRegisterModule, TestRegistersValidHTTPModuleFactory) {
   EXPECT_EQ(result, S_OK);
   ASSERT_NE(resultFactory, nullptr);
 
-  CHttpModule *resultFactoryOutput = NULL;
-  result = resultFactory->GetHttpModule(&resultFactoryOutput, NULL);
+  CHttpModule *resultFactoryOutput = nullptr;
+  result = resultFactory->GetHttpModule(&resultFactoryOutput, nullptr);
 
   EXPECT_EQ(result, S_OK);
   EXPECT_NE(resultFactoryOutput, nullptr);

@@ -13,44 +13,54 @@
 #include <cassert>
 #include <datadog/tracer_config.h>
 #include <format>
+#include <new>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <stdexcept>
 #include <string>
 
 namespace datadog::rum {
 namespace {
 
-std::string wstring_to_utf8(const std::wstring &wstr) {
-  if (wstr.empty())
-    return std::string();
+std::string wstring_to_utf8(const std::wstring& wstr) {
+  if (wstr.empty()) return {};
   const int size_needed = WideCharToMultiByte(
       CP_UTF8, 0, &wstr[0], (int)wstr.size(), nullptr, 0, nullptr, nullptr);
+  if (size_needed <= 0) return {};
   std::string strTo(size_needed, 0);
-  WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0],
-                      size_needed, nullptr, nullptr);
+  if (WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0],
+                          size_needed, nullptr, nullptr) == 0) {
+    return {};
+  }
   return strTo;
 }
 
-Snippet *
-make_snippet(const int version,
-             const std::unordered_map<std::string, std::string> &opts) {
+Snippet* make_snippet(
+    const int version,
+    const std::unordered_map<std::string, std::string>& opts) {
   rapidjson::Document doc;
   doc.SetObject();
 
-  rapidjson::Document::AllocatorType &allocator = doc.GetAllocator();
+  rapidjson::Document::AllocatorType& allocator = doc.GetAllocator();
   doc.AddMember("majorVersion", version, allocator);
 
   rapidjson::Value rum(rapidjson::kObjectType);
-  for (const auto &[key, value] : opts) {
+  for (const auto& [key, value] : opts) {
     if (key == "majorVersion") {
       continue;
-    } else if (key == "sessionSampleRate" || key == "sessionReplaySampleRate") {
-      rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
-                    rapidjson::Value(std::stod(value)).Move(), allocator);
+    }
+    if (key == "sessionSampleRate" || key == "sessionReplaySampleRate") {
+      try {
+        rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
+                      rapidjson::Value(std::stod(value)).Move(), allocator);
+      } catch (const std::exception&) {
+        // Skip malformed sample rate values rather than crashing
+        continue;
+      }
     } else if (key == "trackResources" || key == "trackLongTasks" ||
                key == "trackUserInteractions") {
-      auto b = (value == "true" ? true : false);
+      auto b = (value == "true");
       rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
                     rapidjson::Value(b).Move(), allocator);
     } else if (key == "allowedTracingUrls") {
@@ -90,10 +100,10 @@ make_snippet(const int version,
   return snippet_create_from_json(buffer.GetString());
 }
 
-IAppHostProperty *get_property(IAppHostElement *xmlElement,
+IAppHostProperty* get_property(IAppHostElement* xmlElement,
                                std::wstring_view name) {
   assert(xmlElement);
-  IAppHostProperty *property = nullptr;
+  IAppHostProperty* property = nullptr;
   if (xmlElement->GetPropertyByName((BSTR)name.data(), &property) != S_OK) {
     return nullptr;
   }
@@ -101,22 +111,25 @@ IAppHostProperty *get_property(IAppHostElement *xmlElement,
   return property;
 }
 
-VARIANT get_property_value(IAppHostProperty &property) {
+VARIANT get_property_value(IAppHostProperty& property) {
   VARIANT v;
-  property.get_Value(&v);
+  VariantInit(&v);
+  if (FAILED(property.get_Value(&v))) {
+    VariantInit(&v);
+  }
   return v;
 }
 
-std::optional<ServerConfig> read_server_conf(IHttpServer &server,
-                                             std::shared_ptr<Logger> logger) {
+std::optional<ServerConfig> read_server_conf(
+    IHttpServer& server, const std::shared_ptr<Logger>& logger) {
   ServerConfig default_config{LogLevel::Info};
-  auto admin_manager = server.GetAdminManager();
+  auto* admin_manager = server.GetAdminManager();
 
   if (admin_manager == nullptr) {
     return default_config;
   }
 
-  IAppHostElement *cfg_root_elem;
+  IAppHostElement* cfg_root_elem = nullptr;
   auto res = admin_manager->GetAdminSection(
       (BSTR)L"system.applicationHost/datadogRumServer",
       (BSTR)L"MACHINE/WEBROOT/APPHOST", &cfg_root_elem);
@@ -128,10 +141,10 @@ std::optional<ServerConfig> read_server_conf(IHttpServer &server,
   const auto defer_root = defer([&] { cfg_root_elem->Release(); });
 
   LogLevel log_level = LogLevel::Info;
-  auto log_level_prop = get_property(cfg_root_elem, L"logLevel");
+  auto* log_level_prop = get_property(cfg_root_elem, L"logLevel");
   if (log_level_prop != nullptr) {
     const auto defer_log_level_prop = defer([&] { log_level_prop->Release(); });
-    int log_level_int = get_property_value(*log_level_prop).lVal;
+    int const log_level_int = get_property_value(*log_level_prop).lVal;
     if (log_level_int <= static_cast<int>(LogLevel::Debug) &&
         log_level_int >= static_cast<int>(LogLevel::Error)) {
       log_level = static_cast<LogLevel>(log_level_int);
@@ -141,9 +154,12 @@ std::optional<ServerConfig> read_server_conf(IHttpServer &server,
   return ServerConfig{log_level};
 }
 
-std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
-  auto admin_manager = server.GetAdminManager();
-  IAppHostElement *cfg_root_elem;
+std::optional<RumConfig> read_conf(IHttpServer& server, PCWSTR cfg_path) {
+  auto* admin_manager = server.GetAdminManager();
+  if (admin_manager == nullptr) {
+    return std::nullopt;
+  }
+  IAppHostElement* cfg_root_elem = nullptr;
   auto res = admin_manager->GetAdminSection(
       (BSTR)L"system.webServer/datadogRum", const_cast<BSTR>(cfg_path),
       &cfg_root_elem);
@@ -153,7 +169,7 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
 
   const auto defer_root = defer([&] { cfg_root_elem->Release(); });
 
-  IAppHostProperty *enabled_prop = get_property(cfg_root_elem, L"enabled");
+  IAppHostProperty* enabled_prop = get_property(cfg_root_elem, L"enabled");
   if (enabled_prop == nullptr) {
     // missing enabled attribute -> invalid format -> disabled
     return std::nullopt;
@@ -167,7 +183,7 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
   }
 
   int cfg_version = 6;
-  auto version_prop = get_property(cfg_root_elem, L"version");
+  auto* version_prop = get_property(cfg_root_elem, L"version");
   if (version_prop != nullptr) {
     const auto defer_version_prop = defer([&] { version_prop->Release(); });
     cfg_version = get_property_value(*version_prop).iVal;
@@ -176,7 +192,7 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
   // Iterate on the SDK configuration
   std::unordered_map<std::string, std::string> rum_sdk_opts;
 
-  IAppHostElementCollection *col = nullptr;
+  IAppHostElementCollection* col = nullptr;
   if (cfg_root_elem->get_Collection(&col) == S_OK) {
     const auto defer_col = defer([&] { col->Release(); });
 
@@ -189,7 +205,7 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
     for (DWORD i = 0; i < n_elem; ++i) {
       item_idx.iVal = static_cast<SHORT>(i);
 
-      IAppHostElement *option_element = nullptr;
+      IAppHostElement* option_element = nullptr;
       col->get_Item(item_idx, &option_element);
       if (option_element == nullptr) {
         continue;
@@ -198,7 +214,7 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
       const auto option_element_guard =
           defer([&] { option_element->Release(); });
 
-      auto name_property = get_property(option_element, L"name");
+      auto* name_property = get_property(option_element, L"name");
       if (name_property == nullptr) {
         // TODO: log property `name` do not exist
         continue;
@@ -207,7 +223,7 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
       std::string opt_name = wstring_to_utf8(
           std::wstring(get_property_value(*name_property).bstrVal));
 
-      auto value_property = get_property(option_element, L"value");
+      auto* value_property = get_property(option_element, L"value");
       if (value_property == nullptr) {
         continue;
       }
@@ -223,24 +239,26 @@ std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path) {
   return RumConfig{cfg_version, std::move(rum_sdk_opts)};
 }
 
-void update_module_context(ModuleContext &ctx, IHttpServer &server,
-                           PCWSTR config_path, std::shared_ptr<Logger> logger) {
-
+void update_module_context(ModuleContext& ctx, IHttpServer& server,
+                           PCWSTR config_path,
+                           const std::shared_ptr<Logger>& logger) {
   auto config_options_opt = read_conf(server, config_path);
   if (!config_options_opt.has_value()) {
     logger->error("Failed to load RUM configuration");
     return;
   }
-  const RumConfig &loaded_config = config_options_opt.value();
-  Snippet *snippet =
+  const RumConfig& loaded_config = config_options_opt.value();
+  Snippet* snippet =
       make_snippet(loaded_config.version, loaded_config.sdk_options);
 
   if (snippet == nullptr) {
     logger->error("Failed to create RUM snippet");
     return;
-  } else if (snippet->error_code != 0) {
+  }
+  if (snippet->error_code != 0) {
     logger->error(std::format("Failed to create RUM snippet: {}",
                               snippet->error_message));
+    snippet_cleanup(snippet);
     return;
   }
 
@@ -255,9 +273,9 @@ void update_module_context(ModuleContext &ctx, IHttpServer &server,
   auto rcUsed = loaded_config.sdk_options.count("remoteConfigurationId") > 0;
   ctx.remote_config_tag = std::format("remote_config_used:{}", rcUsed);
 }
-} // namespace
+}  // namespace
 
-GlobalModule::GlobalModule(IHttpServer *server, DWORD server_version,
+GlobalModule::GlobalModule(IHttpServer* server, DWORD server_version,
                            std::shared_ptr<Logger> logger)
     : server_(server), logger_(std::move(logger)) {
   assert(server_ != nullptr);
@@ -271,23 +289,22 @@ GlobalModule::GlobalModule(IHttpServer *server, DWORD server_version,
   cfg.integration_version = std::to_string(server_version);
 
   auto maybe_telemetry_cfg = datadog::telemetry::finalize_config(cfg);
-  if (auto error = maybe_telemetry_cfg.if_error()) {
+  if (auto* error = maybe_telemetry_cfg.if_error()) {
     logger_->error(std::format("Failed to configure the telemetry module: {}",
                                error->message));
   } else {
-
-    const datadog::tracing::Clock &clock = datadog::tracing::default_clock;
-    datadog::tracing::DatadogAgentConfig agent_cfg_for_telemetry;
+    const datadog::tracing::Clock& clock = datadog::tracing::default_clock;
+    datadog::tracing::DatadogAgentConfig const agent_cfg_for_telemetry;
     auto finalized_agent_cfg_result = datadog::tracing::finalize_config(
         agent_cfg_for_telemetry, logger_, clock);
-    if (auto *error = finalized_agent_cfg_result.if_error()) {
+    if (auto* error = finalized_agent_cfg_result.if_error()) {
       logger_->log_error(
           error->with_prefix("Failed to finalize agent settings for "
                              "telemetry, no telemetry will be sent."));
 
       return;
     }
-    datadog::tracing::FinalizedDatadogAgentConfig dac =
+    datadog::tracing::FinalizedDatadogAgentConfig const dac =
         *finalized_agent_cfg_result;
 
     if (!dac.http_client) {
@@ -312,16 +329,20 @@ void GlobalModule::Terminate() { delete this; }
 
 GLOBAL_NOTIFICATION_STATUS
 GlobalModule::OnGlobalApplicationStart(
-    IHttpApplicationStartProvider *provider) {
+    IHttpApplicationStartProvider* provider) {
   assert(server_ != nullptr);
 
-  auto ctx = new ModuleContext;
+  auto* ctx = new (std::nothrow) ModuleContext;
+  if (ctx == nullptr) {
+    logger_->error("Failed to allocate ModuleContext");
+    return GL_NOTIFICATION_CONTINUE;
+  }
   ctx->logger = logger_.get();
 
-  auto app = provider->GetApplication();
+  auto* app = provider->GetApplication();
   assert(app);
 
-  auto config_path = app->GetAppConfigPath();
+  const auto* config_path = app->GetAppConfigPath();
   logger_->info(std::format("Parsing configuration \"{}\" for app (id: {})",
                             wstring_to_utf8(config_path),
                             wstring_to_utf8(app->GetApplicationId())));
@@ -337,8 +358,8 @@ GlobalModule::OnGlobalApplicationStart(
 }
 
 GLOBAL_NOTIFICATION_STATUS
-GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider *provider) {
-  auto cfg_path = provider->GetApplication()->GetApplicationId();
+GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider* provider) {
+  const auto* cfg_path = provider->GetApplication()->GetApplicationId();
   if (cfg_path == nullptr) {
     return GL_NOTIFICATION_CONTINUE;
   }
@@ -348,20 +369,19 @@ GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider *provider) {
 }
 
 GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
-    IGlobalConfigurationChangeProvider *provider) {
+    IGlobalConfigurationChangeProvider* provider) {
   assert(provider != nullptr);
   assert(server_ != nullptr);
 
-  auto cfg_path = provider->GetChangePath();
+  const auto* cfg_path = provider->GetChangePath();
   if (cfg_path == nullptr) {
-    assert(true);
     return GL_NOTIFICATION_CONTINUE;
   }
 
   logger_->info(std::format("Dispatching configuration update (\"{}\")",
                             wstring_to_utf8(cfg_path)));
 
-  std::wstring_view change_path_view(cfg_path);
+  std::wstring_view const change_path_view(cfg_path);
   if (change_path_view.find(L"MACHINE/WEBROOT/APPHOST") !=
       std::wstring_view::npos) {
     update_server_log_level();
@@ -371,13 +391,13 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
   // `OnGlobalApplicationStart` and the one here. This path is the common parent
   // config, we need to ensure the update is sent to all applications that
   // inherit from it.
-  for (const auto &[path, ctx] : configurations_) {
+  for (const auto& [path, ctx] : configurations_) {
     if (ctx == nullptr) {
-      // NOTE(@dmehala): should not happend because configuration entries are
+      // NOTE(@dmehala): should not happen because configuration entries are
       // removed when an application is stopped. This should be considered as a
       // bug.
       // TODO(@dmehala): Report a telemetry log.
-      assert(true);
+      logger_->error("Bug: null context in configurations map");
       continue;
     }
 
@@ -390,4 +410,4 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
 
   return GL_NOTIFICATION_CONTINUE;
 }
-} // namespace datadog::rum
+}  // namespace datadog::rum

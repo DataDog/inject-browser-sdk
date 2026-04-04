@@ -11,11 +11,11 @@
 #include "module_context.h"
 #include "version.h"
 #include <cassert>
+#include <new>
 
-__declspec(dllexport) HRESULT
-    __stdcall RegisterModule(DWORD server_version,
-                             IHttpModuleRegistrationInfo *module_info,
-                             IHttpServer *server) {
+__declspec(dllexport) HRESULT __stdcall RegisterModule(
+    DWORD server_version, IHttpModuleRegistrationInfo* module_info,
+    IHttpServer* server) {
   assert(server != nullptr);
   assert(module_info != nullptr);
 
@@ -31,12 +31,12 @@ __declspec(dllexport) HRESULT
 
   // NOTE(@dmehala): Keep a pointer on the server for reading configuration
   // when there's a configuration update.
-  auto global_module =
-      new datadog::rum::GlobalModule(server, server_version, logger);
+  auto* global_module = new (std::nothrow)
+      datadog::rum::GlobalModule(server, server_version, logger);
   if (global_module == nullptr) {
-    assert(true);
-    logger->error("Failed to register Datadog RUM module to the lack of memory "
-                  "to create the global module");
+    logger->error(
+        "Failed to register Datadog RUM module to the lack of memory "
+        "to create the global module");
     /*
       If we return an error from the RegisterModule function, IIS will retry
       registering this module, but if it keeps failing then eventually the
@@ -51,17 +51,16 @@ __declspec(dllexport) HRESULT
   module_info->SetGlobalNotifications(
       global_module, datadog::rum::GlobalModule::NotificationsMask);
 
-  auto http_factory = new datadog::rum::HttpModuleFactory;
+  auto* http_factory = new (std::nothrow) datadog::rum::HttpModuleFactory;
   if (http_factory == nullptr) {
-    assert(true);
-    logger->error("Failed to register Datadog RUM module due to the lack of "
-                  "memory to create the module factory");
+    logger->error(
+        "Failed to register Datadog RUM module due to the lack of "
+        "memory to create the module factory");
     return S_OK;
   }
 
   module_info->SetRequestNotifications(
-      new datadog::rum::HttpModuleFactory,
-      datadog::rum::HttpModule::NotificationsMask, 0);
+      http_factory, datadog::rum::HttpModule::NotificationsMask, 0);
 
   return S_OK;
 }

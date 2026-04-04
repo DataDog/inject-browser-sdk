@@ -2,6 +2,8 @@ include .devcontainer/devcontainer.mk
 include ci/docker/circleci/circleci.mk
 
 CIRCLE_CFG ?= .circleci/continue_config.yml
+COMMIT_SHA ?= $(shell git rev-parse --short HEAD)
+DOCKER_REPO ?= ghcr.io/datadog/inject-browser-sdk
 
 CPP_FORMAT_SOURCES := $(shell find injector_IIS/src injector_IIS/test -name '*.cpp' -o -name '*.h' -o -name '*.c')
 CPP_TIDY_SOURCES := $(shell find injector_IIS/src -name '*.cpp')

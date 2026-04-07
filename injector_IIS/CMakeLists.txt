@@ -126,6 +126,7 @@ add_library(iis_injector::obj ALIAS iis_injector-objects)
 
 target_sources(iis_injector-objects
   PRIVATE
+    src/config_reader.cpp
     src/entrypoint.cpp
     src/global_module.cpp
     src/http_module.cpp
@@ -176,6 +177,8 @@ if (IIS_INJECTOR_DEBUG_BREAK)
   )
 endif ()
 
+option(IIS_ENABLE_ASAN "Enable Address Sanitizer" OFF)
+
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   target_compile_options(iis_injector-objects
     PRIVATE
@@ -184,14 +187,11 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   )
 endif ()
 
-target_link_libraries(iis_injector-objects 
+target_link_libraries(iis_injector-objects
   PUBLIC
-  inject_browser_sdk_ffi dd_trace::static rapidjson)
-
-target_link_options(iis_injector-objects
-  PRIVATE
-    ws2_32.lib
-)
+  inject_browser_sdk_ffi dd_trace::static rapidjson
+  ws2_32.lib
+  oleaut32.lib)
 
 ## shared lib
 add_library(iis_injector SHARED)

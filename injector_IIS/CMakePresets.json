@@ -22,6 +22,14 @@
           "IIS_INJECTOR_STATIC_CRT": "1",
           "IIS_BUILD_TESTS": "1"
         }
+      },
+      {
+        "name": "ci-native-asan",
+        "displayName": "CI Native with AddressSanitizer",
+        "inherits": "ci-native",
+        "cacheVariables": {
+          "IIS_ENABLE_ASAN": "ON"
+        }
       }
     ]
 }

@@ -177,6 +177,11 @@ if (IIS_INJECTOR_DEBUG_BREAK)
   )
 endif ()
 
+option(IIS_ENABLE_ASAN "Enable Address Sanitizer" OFF)
+if (IIS_ENABLE_ASAN)
+  target_compile_options(iis_injector-objects PRIVATE /fsanitize=address)
+endif ()
+
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   target_compile_options(iis_injector-objects
     PRIVATE

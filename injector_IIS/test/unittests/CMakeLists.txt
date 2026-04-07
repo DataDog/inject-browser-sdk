@@ -18,8 +18,6 @@ target_sources(iis_injector_tests
     test_injection_pipeline.cpp
 )
 
-option(IIS_ENABLE_ASAN "Enable Address Sanitizer for tests" OFF)
-
 target_compile_options(iis_injector_tests
   PRIVATE
     /W4
@@ -29,7 +27,6 @@ target_compile_options(iis_injector_tests
 
 if (IIS_ENABLE_ASAN)
   target_compile_options(iis_injector_tests PRIVATE /fsanitize=address)
-  target_link_options(iis_injector_tests PRIVATE /fsanitize=address)
 endif()
 
 target_link_libraries(

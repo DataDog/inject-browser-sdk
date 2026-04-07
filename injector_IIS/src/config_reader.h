@@ -12,7 +12,6 @@
 #include "logger.h"
 #include "module_context.h"
 
-#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -28,12 +27,15 @@ struct ServerConfig {
   LogLevel log_level;
 };
 
-std::optional<RumConfig> read_conf(IHttpServer &server, PCWSTR cfg_path);
+std::string wstring_to_utf8(const std::wstring &wstr);
 
-std::optional<ServerConfig> read_server_conf(IHttpServer &server,
-                                             std::shared_ptr<Logger> logger);
+std::optional<RumConfig> read_conf(const IHttpServer &server, PCWSTR cfg_path,
+                                   Logger &logger);
 
-void update_module_context(ModuleContext &ctx, IHttpServer &server,
-                           PCWSTR config_path, std::shared_ptr<Logger> logger);
+std::optional<ServerConfig> read_server_conf(const IHttpServer &server,
+                                             Logger &logger);
+
+void update_module_context(ModuleContext &ctx, const IHttpServer &server,
+                           PCWSTR config_path, Logger &logger);
 
 } // namespace datadog::rum

@@ -126,6 +126,7 @@ add_library(iis_injector::obj ALIAS iis_injector-objects)
 
 target_sources(iis_injector-objects
   PRIVATE
+    src/config_reader.cpp
     src/entrypoint.cpp
     src/global_module.cpp
     src/http_module.cpp

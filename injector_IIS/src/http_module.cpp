@@ -30,6 +30,23 @@ std::string_view get_header(IHttpResponse &http_response,
   return std::string_view(data, length);
 }
 
+// Returns the per-location context if cached on the metadata container,
+// otherwise falls back to the app-level context.
+ModuleContext *resolve_cached_context(IHttpContext &http_context,
+                                     ModuleContext &app_ctx) {
+  auto *metadata = http_context.GetMetadata();
+  if (metadata != nullptr) {
+    auto *mc = metadata->GetModuleContextContainer();
+    if (mc != nullptr) {
+      auto *cached = mc->GetModuleContext(g_module_id);
+      if (cached != nullptr) {
+        return static_cast<ModuleContext *>(cached);
+      }
+    }
+  }
+  return &app_ctx;
+}
+
 } // namespace
 
 REQUEST_NOTIFICATION_STATUS
@@ -50,23 +67,15 @@ HttpModule::OnBeginRequest(IN IHttpContext *http_context,
     return RQ_NOTIFICATION_CONTINUE;
   }
 
+  auto &app_ctx = *static_cast<ModuleContext *>(app_opaque);
+
   // Check per-location cache if available (populated by a prior request's
   // OnSendResponse). This matters because the pending header may be
   // forwarded to downstream proxies — it should not claim injection is
   // coming when a <location> override disables it.
-  ModuleContext *ctx = static_cast<ModuleContext *>(app_opaque);
-  auto *metadata = http_context->GetMetadata();
-  if (metadata != nullptr) {
-    auto *mc = metadata->GetModuleContextContainer();
-    if (mc != nullptr) {
-      auto *cached = mc->GetModuleContext(g_module_id);
-      if (cached != nullptr) {
-        ctx = static_cast<ModuleContext *>(cached);
-      }
-    }
-  }
+  ModuleContext *ctx = resolve_cached_context(*http_context, app_ctx);
 
-  if (!ctx->snippet) {
+  if (ctx->snippet == nullptr) {
     return RQ_NOTIFICATION_CONTINUE;
   }
 
@@ -103,52 +112,44 @@ HttpModule::OnSendResponse(IN IHttpContext *http_context,
 
   // Resolve per-<location> config. Cached on the IMetadataInfo container;
   // IIS recycles it on config change, so hot-reload works automatically.
-  ModuleContext *ctx = &app_ctx;
-  auto *metadata = http_context->GetMetadata();
-  if (metadata != nullptr) {
-    auto *meta_container = metadata->GetModuleContextContainer();
-    if (meta_container == nullptr) {
-      app_ctx.logger->error("Unexpected: metadata context container is null");
-      return RQ_NOTIFICATION_CONTINUE;
-    }
+  ModuleContext *ctx = resolve_cached_context(*http_context, app_ctx);
 
-    auto *meta_cached = meta_container->GetModuleContext(g_module_id);
+  // Cache miss — read config for this request's effective path.
+  if (ctx == &app_ctx) {
+    auto *metadata = http_context->GetMetadata();
+    if (metadata != nullptr && app_ctx.server != nullptr) {
+      auto *meta_container = metadata->GetModuleContextContainer();
+      if (meta_container != nullptr) {
+        auto *meta_path = metadata->GetMetaPath();
+        auto new_ctx = std::make_unique<ModuleContext>();
+        new_ctx->logger = app_ctx.logger;
+        new_ctx->server = app_ctx.server;
+        new_ctx->application_id_tag = app_ctx.application_id_tag;
+        new_ctx->remote_config_tag = app_ctx.remote_config_tag;
 
-    if (meta_cached != nullptr) {
-      ctx = static_cast<ModuleContext *>(meta_cached);
-    } else if (app_ctx.server != nullptr) {
-      // Cache miss — read config for this request's effective path.
-      auto *meta_path = metadata->GetMetaPath();
-      auto *new_ctx = new ModuleContext;
-      new_ctx->logger = app_ctx.logger;
-      new_ctx->server = app_ctx.server;
-      new_ctx->application_id_tag = app_ctx.application_id_tag;
-      new_ctx->remote_config_tag = app_ctx.remote_config_tag;
+        update_module_context(*new_ctx, *app_ctx.server, meta_path,
+                              *app_ctx.logger);
 
-      // Non-owning shared_ptr (GlobalModule owns the logger).
-      auto logger_ptr =
-          std::shared_ptr<Logger>(app_ctx.logger, [](Logger *) {});
-      update_module_context(*new_ctx, *app_ctx.server, meta_path, logger_ptr);
-
-      auto hr = meta_container->SetModuleContext(new_ctx, g_module_id);
-      if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
-        // Another thread won the race — use its cached context.
-        delete new_ctx;
-        ctx = static_cast<ModuleContext *>(
-            meta_container->GetModuleContext(g_module_id));
-      } else if (FAILED(hr)) {
-        app_ctx.logger->error(
-            std::format("Failed to cache per-location context: {}",
-                        std::system_category().message(hr)));
-        delete new_ctx;
-        return RQ_NOTIFICATION_CONTINUE;
-      } else {
-        ctx = new_ctx;
+        auto hr =
+            meta_container->SetModuleContext(new_ctx.get(), g_module_id);
+        if (SUCCEEDED(hr)) {
+          ctx = new_ctx.release(); // container owns it now
+        } else if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
+          // Another thread won the race — use its cached context.
+          // unique_ptr auto-deletes new_ctx.
+          ctx = static_cast<ModuleContext *>(
+              meta_container->GetModuleContext(g_module_id));
+        } else {
+          app_ctx.logger->error(
+              std::format("Failed to cache per-location context: {}",
+                          std::system_category().message(hr)));
+          return RQ_NOTIFICATION_CONTINUE;
+        }
       }
     }
   }
 
-  if (!ctx->snippet) {
+  if (ctx->snippet == nullptr) {
     ctx->logger->debug("Skipping RUM injection: disabled");
     return RQ_NOTIFICATION_CONTINUE;
   }
@@ -216,8 +217,8 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse &pHttpResponse,
 REQUEST_NOTIFICATION_STATUS
 HttpModule::PerformInjection(IHttpContext &pHttpContext,
                              IHttpResponse &pHttpResponse, ModuleContext &ctx) {
-  assert(ctx.snippet);
-  assert(ctx.logger);
+  assert(ctx.snippet != nullptr);
+  assert(ctx.logger != nullptr);
   const Snippet *snippet = ctx.snippet.get();
   auto &logger = *ctx.logger;
 

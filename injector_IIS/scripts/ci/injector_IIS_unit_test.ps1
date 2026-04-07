@@ -13,7 +13,7 @@ Set-Location $PSScriptRoot\..\..
 $vsRoot = $env:VSINSTALLDIR
 if (-not $vsRoot) { $vsRoot = $env:VSTUDIO_ROOT }
 if (-not $vsRoot) {
-    Write-Error "VSINSTALLDIR / VSTUDIO_ROOT not set — cannot find Visual Studio"
+    Write-Error "VSINSTALLDIR / VSTUDIO_ROOT not set - cannot find Visual Studio"
     exit 1
 }
 $vsDevCmd = Join-Path $vsRoot "Common7\Tools\VsDevCmd.bat"

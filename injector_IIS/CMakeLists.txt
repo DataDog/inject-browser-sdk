@@ -192,6 +192,7 @@ target_link_libraries(iis_injector-objects
 target_link_options(iis_injector-objects
   PRIVATE
     ws2_32.lib
+    oleaut32.lib
 )
 
 ## shared lib

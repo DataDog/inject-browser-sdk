@@ -511,7 +511,7 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
   auto *ctx = static_cast<ModuleContext *>(
       app.GetModuleContextContainer()->GetModuleContext(nullptr));
   ASSERT_NE(ctx, nullptr);
-  ASSERT_NE(ctx->snippet.get(), nullptr);
+  ASSERT_NE(ctx->snippet, nullptr);
 
   // HTTP module
   CHttpModule *httpMod = nullptr;
@@ -568,7 +568,7 @@ TEST(InjectionPipeline, DisabledConfig) {
       app.GetModuleContextContainer()->GetModuleContext(nullptr));
   ASSERT_NE(ctx, nullptr);
   // When disabled, no snippet should be created.
-  EXPECT_EQ(ctx->snippet.get(), nullptr);
+  EXPECT_EQ(ctx->snippet, nullptr);
 
   CHttpModule *httpMod = nullptr;
   mod.factory->GetHttpModule(&httpMod, nullptr);

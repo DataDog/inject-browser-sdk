@@ -131,6 +131,7 @@ std::optional<ServerConfig> read_server_conf(const IHttpServer &server,
   auto admin_manager = server.GetAdminManager();
 
   if (admin_manager == nullptr) {
+    logger.debug("Admin manager is null, using default server config");
     return default_config;
   }
 
@@ -140,6 +141,8 @@ std::optional<ServerConfig> read_server_conf(const IHttpServer &server,
       (BSTR)L"MACHINE/WEBROOT/APPHOST", &cfg_root_elem);
 
   if (res != S_OK) {
+    // Section may legitimately not exist if the user hasn't configured it.
+    logger.debug("datadogRumServer section not found, using default config");
     return default_config;
   }
 
@@ -158,6 +161,9 @@ std::optional<ServerConfig> read_server_conf(const IHttpServer &server,
           log_level_int >= static_cast<int>(LogLevel::Error)) {
         log_level = static_cast<LogLevel>(log_level_int);
       }
+    } else {
+      logger.info(std::format("Unexpected logLevel type (vt={}), "
+                              "using default Info level", log_level_val.vt));
     }
   }
 
@@ -240,6 +246,8 @@ std::optional<RumConfig> read_conf(const IHttpServer &server, PCWSTR cfg_path,
       IAppHostElement *option_element = nullptr;
       HRESULT hr_item = col->get_Item(item_idx, &option_element);
       if (FAILED(hr_item) || option_element == nullptr) {
+        logger.debug(std::format("Skipping config option at index {}: "
+                                 "failed to read element", i));
         continue;
       }
 
@@ -248,18 +256,24 @@ std::optional<RumConfig> read_conf(const IHttpServer &server, PCWSTR cfg_path,
 
       auto name_property = get_property(*option_element, L"name");
       if (name_property == nullptr) {
+        logger.debug(std::format("Skipping config option at index {}: "
+                                 "missing 'name' attribute", i));
         continue;
       }
       const auto defer_name_property = defer([&] { name_property->Release(); });
       auto name_val = get_property_value(*name_property);
       const auto defer_name_val = defer([&] { VariantClear(&name_val); });
       if (name_val.vt != VT_BSTR || name_val.bstrVal == nullptr) {
+        logger.debug(std::format("Skipping config option at index {}: "
+                                 "'name' is not a string", i));
         continue;
       }
       std::string opt_name = wstring_to_utf8(std::wstring(name_val.bstrVal));
 
       auto value_property = get_property(*option_element, L"value");
       if (value_property == nullptr) {
+        logger.debug(std::format("Skipping config option '{}': "
+                                 "missing 'value' attribute", opt_name));
         continue;
       }
       const auto defer_value_property =
@@ -267,6 +281,8 @@ std::optional<RumConfig> read_conf(const IHttpServer &server, PCWSTR cfg_path,
       auto val_val = get_property_value(*value_property);
       const auto defer_val_val = defer([&] { VariantClear(&val_val); });
       if (val_val.vt != VT_BSTR || val_val.bstrVal == nullptr) {
+        logger.debug(std::format("Skipping config option '{}': "
+                                 "'value' is not a string", opt_name));
         continue;
       }
       std::string opt_value = wstring_to_utf8(std::wstring(val_val.bstrVal));
@@ -319,6 +335,7 @@ void update_module_context(ModuleContext &ctx, const IHttpServer &server,
   }
   ctx.snippet = snippet;
 
+  ctx.application_id_tag.clear();
   if (auto appIdIt = config->sdk_options.find("applicationId");
       appIdIt != config->sdk_options.end()) {
     ctx.application_id_tag = std::format("application_id:{}", appIdIt->second);

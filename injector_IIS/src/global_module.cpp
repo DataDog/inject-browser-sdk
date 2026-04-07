@@ -111,7 +111,14 @@ GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider *provider) {
     return GL_NOTIFICATION_CONTINUE;
   }
 
-  configurations_.erase(cfg_path);
+  // Null the observer pointer instead of erasing: IIS owns the ModuleContext
+  // and will free it via CleanupStoredContext(). Setting to nullptr ensures
+  // OnGlobalConfigurationChange won't dereference a dangling pointer if it
+  // fires after stop for the same application during shutdown.
+  auto it = configurations_.find(cfg_path);
+  if (it != configurations_.end()) {
+    it->second = nullptr;
+  }
   return GL_NOTIFICATION_CONTINUE;
 }
 
@@ -140,16 +147,15 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
   // inherit from it.
   for (const auto &[path, ctx] : configurations_) {
     if (ctx == nullptr) {
-      // NOTE(@dmehala): should not happen because configuration entries are
-      // removed when an application is stopped. This should be considered as a
-      // bug.
+      // Application was stopped — the pointer was nulled in
+      // OnGlobalApplicationStop. Safe to skip.
       // TODO(@dmehala): Report a telemetry log.
-      assert(false && "null context in configurations_ map");
       continue;
     }
 
-    // Question(@dmehala): should the default behaviour to keep the old setting
-    // if there's an issue with the configuration?
+    // NOTE: update_module_context disables injection when config is missing or
+    // invalid — this is intentional so that removing the datadogRum section
+    // actually stops injection rather than leaving stale config active.
     if (std::wstring_view(path).starts_with(cfg_path)) {
       update_module_context(*ctx, *server_, path.c_str(), *logger_);
     }

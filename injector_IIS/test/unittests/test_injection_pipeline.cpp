@@ -183,7 +183,8 @@ public:
   }
   HRESULT STDMETHODCALLTYPE get_Item(VARIANT index,
                                      IAppHostElement **ppElement) override {
-    DWORD i = static_cast<DWORD>(index.iVal);
+    DWORD i = (index.vt == VT_UI4) ? index.ulVal
+                                    : static_cast<DWORD>(index.iVal);
     if (i < elements_.size()) {
       *ppElement = &elements_[i];
       return S_OK;

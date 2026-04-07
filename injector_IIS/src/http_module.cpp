@@ -56,23 +56,27 @@ HttpModule::OnBeginRequest(IN IHttpContext *http_context,
   assert(event_provider != nullptr);
   IHttpRequest *http_request = http_context->GetRequest();
   if (http_request == nullptr) {
-    assert(true);
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  auto *app_opaque = http_context->GetApplication()
-                         ->GetModuleContextContainer()
-                         ->GetModuleContext(g_module_id);
+  auto *app = http_context->GetApplication();
+  if (app == nullptr) {
+    return RQ_NOTIFICATION_CONTINUE;
+  }
+  auto *app_container = app->GetModuleContextContainer();
+  if (app_container == nullptr) {
+    return RQ_NOTIFICATION_CONTINUE;
+  }
+  auto *app_opaque = app_container->GetModuleContext(g_module_id);
   if (app_opaque == nullptr) {
     return RQ_NOTIFICATION_CONTINUE;
   }
 
   auto &app_ctx = *static_cast<ModuleContext *>(app_opaque);
 
-  // Check per-location cache if available (populated by a prior request's
-  // OnSendResponse). This matters because the pending header may be
-  // forwarded to downstream proxies — it should not claim injection is
-  // coming when a <location> override disables it.
+  // Best-effort per-location check: if a prior request to this location
+  // already cached its context (in OnSendResponse), use it. On the first
+  // request to a location, we fall back to the app-level context.
   ModuleContext *ctx = resolve_cached_context(*http_context, app_ctx);
 
   if (ctx->snippet == nullptr) {
@@ -96,16 +100,20 @@ HttpModule::OnSendResponse(IN IHttpContext *http_context,
   assert(http_context != nullptr);
   auto http_response = http_context->GetResponse();
   if (http_response == nullptr) {
-    assert(true);
     return RQ_NOTIFICATION_CONTINUE;
   }
 
   // Get app-level context (always needed for logger, server, tags).
-  auto *app_opaque = http_context->GetApplication()
-                         ->GetModuleContextContainer()
-                         ->GetModuleContext(g_module_id);
+  auto *app = http_context->GetApplication();
+  if (app == nullptr) {
+    return RQ_NOTIFICATION_CONTINUE;
+  }
+  auto *app_container = app->GetModuleContextContainer();
+  if (app_container == nullptr) {
+    return RQ_NOTIFICATION_CONTINUE;
+  }
+  auto *app_opaque = app_container->GetModuleContext(g_module_id);
   if (app_opaque == nullptr) {
-    assert(true);
     return RQ_NOTIFICATION_CONTINUE;
   }
   auto &app_ctx = *static_cast<ModuleContext *>(app_opaque);
@@ -124,11 +132,15 @@ HttpModule::OnSendResponse(IN IHttpContext *http_context,
         auto new_ctx = std::make_unique<ModuleContext>();
         new_ctx->logger = app_ctx.logger;
         new_ctx->server = app_ctx.server;
-        new_ctx->application_id_tag = app_ctx.application_id_tag;
-        new_ctx->remote_config_tag = app_ctx.remote_config_tag;
 
         update_module_context(*new_ctx, *app_ctx.server, meta_path,
                               *app_ctx.logger);
+
+        // Inherit app-level tags if per-location config didn't set its own.
+        if (new_ctx->application_id_tag.empty())
+          new_ctx->application_id_tag = app_ctx.application_id_tag;
+        if (new_ctx->remote_config_tag.empty())
+          new_ctx->remote_config_tag = app_ctx.remote_config_tag;
 
         auto hr =
             meta_container->SetModuleContext(new_ctx.get(), g_module_id);
@@ -139,6 +151,11 @@ HttpModule::OnSendResponse(IN IHttpContext *http_context,
           // unique_ptr auto-deletes new_ctx.
           ctx = static_cast<ModuleContext *>(
               meta_container->GetModuleContext(g_module_id));
+          if (ctx == nullptr) {
+            app_ctx.logger->error(
+                "Race condition: cached context disappeared");
+            return RQ_NOTIFICATION_CONTINUE;
+          }
         } else {
           app_ctx.logger->error(
               std::format("Failed to cache per-location context: {}",
@@ -261,6 +278,11 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
       const size_t bufferLength =
           sizeof(uint8_t) * (chunkLength + snippet->length);
       void *buffer = pHttpContext.AllocateRequestMemory(bufferLength);
+      if (buffer == nullptr) {
+        logger.error("Failed to allocate memory for injection buffer");
+        injector_cleanup(injector);
+        return RQ_NOTIFICATION_CONTINUE;
+      }
 
       auto *offset = (uint8_t *)buffer;
       for (size_t i = 0; i < injectorResult.slices_length; ++i) {
@@ -305,7 +327,7 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
   DWORD bytesSent;
   HRESULT result = pHttpResponse.Flush(FALSE, FALSE, &bytesSent);
   if (FAILED(result)) {
-    logger.debug("Error while flushing response: " +
+    logger.error("Error while flushing response: " +
                  std::system_category().message(result));
   }
 

@@ -119,7 +119,6 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
 
   auto cfg_path = provider->GetChangePath();
   if (cfg_path == nullptr) {
-    assert(true);
     return GL_NOTIFICATION_CONTINUE;
   }
 
@@ -138,11 +137,11 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
   // inherit from it.
   for (const auto &[path, ctx] : configurations_) {
     if (ctx == nullptr) {
-      // NOTE(@dmehala): should not happend because configuration entries are
+      // NOTE(@dmehala): should not happen because configuration entries are
       // removed when an application is stopped. This should be considered as a
       // bug.
       // TODO(@dmehala): Report a telemetry log.
-      assert(true);
+      assert(false && "null context in configurations_ map");
       continue;
     }
 

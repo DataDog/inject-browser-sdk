@@ -22,7 +22,8 @@ namespace {
 
 Snippet *
 make_snippet(const int version,
-             const std::unordered_map<std::string, std::string> &opts) {
+             const std::unordered_map<std::string, std::string> &opts,
+             Logger &logger) {
   rapidjson::Document doc;
   doc.SetObject();
 
@@ -34,8 +35,14 @@ make_snippet(const int version,
     if (key == "majorVersion") {
       continue;
     } else if (key == "sessionSampleRate" || key == "sessionReplaySampleRate") {
-      rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
-                    rapidjson::Value(std::stod(value)).Move(), allocator);
+      try {
+        rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
+                      rapidjson::Value(std::stod(value)).Move(), allocator);
+      } catch (const std::exception &) {
+        logger.error(std::format(
+            "Invalid numeric value '{}' for config key '{}'", value, key));
+        continue;
+      }
     } else if (key == "trackResources" || key == "trackLongTasks" ||
                key == "trackUserInteractions") {
       auto b = (value == "true" ? true : false);
@@ -88,14 +95,15 @@ IAppHostProperty *get_property(IAppHostElement &xmlElement,
   return property;
 }
 
-// Returns VT_EMPTY on failure — callers must check v.vt before accessing
-// union members.
+// Returns a VT_EMPTY variant if the COM call fails or the property has no
+// value. Callers must check v.vt before accessing union members, and must
+// call VariantClear on the returned VARIANT when done.
 VARIANT get_property_value(IAppHostProperty &property) {
   VARIANT v;
   VariantInit(&v);
   HRESULT hr = property.get_Value(&v);
   if (FAILED(hr)) {
-    VariantInit(&v);
+    VariantClear(&v);
   }
   return v;
 }
@@ -106,11 +114,15 @@ std::string wstring_to_utf8(const std::wstring &wstr) {
   if (wstr.empty())
     return std::string();
   const int size_needed = WideCharToMultiByte(
-      CP_UTF8, 0, &wstr[0], (int)wstr.size(), nullptr, 0, nullptr, nullptr);
-  std::string strTo(size_needed, 0);
-  WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0],
-                      size_needed, nullptr, nullptr);
-  return strTo;
+      CP_UTF8, 0, wstr.data(), (int)wstr.size(), nullptr, 0, nullptr, nullptr);
+  if (size_needed <= 0)
+    return std::string();
+  std::string result(size_needed, 0);
+  int written = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.size(),
+                                    result.data(), size_needed, nullptr, nullptr);
+  if (written <= 0)
+    return std::string();
+  return result;
 }
 
 std::optional<ServerConfig> read_server_conf(const IHttpServer &server,
@@ -138,6 +150,7 @@ std::optional<ServerConfig> read_server_conf(const IHttpServer &server,
   if (log_level_prop != nullptr) {
     const auto defer_log_level_prop = defer([&] { log_level_prop->Release(); });
     auto log_level_val = get_property_value(*log_level_prop);
+    const auto defer_log_level_val = defer([&] { VariantClear(&log_level_val); });
     if (log_level_val.vt != VT_EMPTY) {
       int log_level_int = log_level_val.lVal;
       if (log_level_int <= static_cast<int>(LogLevel::Debug) &&
@@ -154,6 +167,7 @@ std::optional<RumConfig> read_conf(const IHttpServer &server, PCWSTR cfg_path,
                                    Logger &logger) {
   auto admin_manager = server.GetAdminManager();
   if (admin_manager == nullptr) {
+    logger.debug("Admin manager is null, cannot read RUM config");
     return std::nullopt;
   }
 
@@ -162,6 +176,8 @@ std::optional<RumConfig> read_conf(const IHttpServer &server, PCWSTR cfg_path,
       (BSTR)L"system.webServer/datadogRum", const_cast<BSTR>(cfg_path),
       &cfg_root_elem);
   if (res != S_OK) {
+    logger.debug(std::format("datadogRum config section not found: {}",
+                             std::system_category().message(res)));
     return std::nullopt;
   }
 
@@ -176,7 +192,9 @@ std::optional<RumConfig> read_conf(const IHttpServer &server, PCWSTR cfg_path,
   const auto defer_enabled_prop = defer([&] { enabled_prop->Release(); });
 
   auto enabled_val = get_property_value(*enabled_prop);
+  const auto defer_enabled_val = defer([&] { VariantClear(&enabled_val); });
   if (enabled_val.vt == VT_EMPTY) {
+    logger.debug("Failed to read 'enabled' property value");
     return std::nullopt;
   }
   if (!enabled_val.boolVal) {
@@ -189,7 +207,10 @@ std::optional<RumConfig> read_conf(const IHttpServer &server, PCWSTR cfg_path,
   if (version_prop != nullptr) {
     const auto defer_version_prop = defer([&] { version_prop->Release(); });
     auto version_val = get_property_value(*version_prop);
-    if (version_val.vt != VT_EMPTY) {
+    const auto defer_version_val = defer([&] { VariantClear(&version_val); });
+    if (version_val.vt == VT_I4) {
+      cfg_version = version_val.lVal;
+    } else if (version_val.vt == VT_I2) {
       cfg_version = version_val.iVal;
     }
   }
@@ -202,17 +223,22 @@ std::optional<RumConfig> read_conf(const IHttpServer &server, PCWSTR cfg_path,
     const auto defer_col = defer([&] { col->Release(); });
 
     DWORD n_elem = 0;
-    col->get_Count(&n_elem);
+    HRESULT hr_count = col->get_Count(&n_elem);
+    if (FAILED(hr_count)) {
+      logger.error(std::format("Failed to read SDK option count: {}",
+                               std::system_category().message(hr_count)));
+      return std::nullopt;
+    }
 
     VARIANT item_idx;
-    item_idx.vt = VT_I2;
+    item_idx.vt = VT_UI4;
 
     for (DWORD i = 0; i < n_elem; ++i) {
-      item_idx.iVal = static_cast<SHORT>(i);
+      item_idx.ulVal = i;
 
       IAppHostElement *option_element = nullptr;
-      col->get_Item(item_idx, &option_element);
-      if (option_element == nullptr) {
+      HRESULT hr_item = col->get_Item(item_idx, &option_element);
+      if (FAILED(hr_item) || option_element == nullptr) {
         continue;
       }
 
@@ -225,6 +251,7 @@ std::optional<RumConfig> read_conf(const IHttpServer &server, PCWSTR cfg_path,
       }
       const auto defer_name_property = defer([&] { name_property->Release(); });
       auto name_val = get_property_value(*name_property);
+      const auto defer_name_val = defer([&] { VariantClear(&name_val); });
       if (name_val.vt != VT_BSTR || name_val.bstrVal == nullptr) {
         continue;
       }
@@ -237,6 +264,7 @@ std::optional<RumConfig> read_conf(const IHttpServer &server, PCWSTR cfg_path,
       const auto defer_value_property =
           defer([&] { value_property->Release(); });
       auto val_val = get_property_value(*value_property);
+      const auto defer_val_val = defer([&] { VariantClear(&val_val); });
       if (val_val.vt != VT_BSTR || val_val.bstrVal == nullptr) {
         continue;
       }
@@ -259,7 +287,7 @@ void update_module_context(ModuleContext &ctx, const IHttpServer &server,
   }
 
   Snippet *snippet =
-      make_snippet(config->version, config->sdk_options);
+      make_snippet(config->version, config->sdk_options, logger);
 
   if (snippet == nullptr) {
     logger.error("Failed to create RUM snippet");

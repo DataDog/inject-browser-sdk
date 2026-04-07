@@ -184,14 +184,15 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   )
 endif ()
 
-target_link_libraries(iis_injector-objects 
+target_link_libraries(iis_injector-objects
   PUBLIC
-  inject_browser_sdk_ffi dd_trace::static rapidjson)
+  inject_browser_sdk_ffi dd_trace::static rapidjson
+  oleaut32.lib
+)
 
 target_link_options(iis_injector-objects
   PRIVATE
     ws2_32.lib
-    oleaut32.lib
 )
 
 ## shared lib

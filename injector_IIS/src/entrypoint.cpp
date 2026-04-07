@@ -36,7 +36,7 @@ __declspec(dllexport) HRESULT __stdcall RegisterModule(
   // come to a complete stop. We don't want to cause any downtime on our
   // customers' servers, so even in the case of a fatal error, we write an error
   // to the event log and return S_OK.
-  auto global_module =
+  auto* global_module =
       new datadog::rum::GlobalModule(server, server_version, logger);
 
   auto hr = module_info->SetGlobalNotifications(
@@ -47,7 +47,7 @@ __declspec(dllexport) HRESULT __stdcall RegisterModule(
     return S_OK;
   }
 
-  auto http_factory = new datadog::rum::HttpModuleFactory;
+  auto* http_factory = new datadog::rum::HttpModuleFactory;
 
   hr = module_info->SetRequestNotifications(
       http_factory, datadog::rum::HttpModule::NotificationsMask, 0);

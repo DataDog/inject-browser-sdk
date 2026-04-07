@@ -19,7 +19,7 @@
 namespace datadog::rum::telemetry {
 
 template <typename... T>
-auto build_tags(T &&...specific_tags) {
+auto build_tags(T&&... specific_tags) {
   std::vector<std::string> tags = {std::forward<T>(specific_tags)...};
   tags.emplace_back("integration_name:iis");
   tags.emplace_back(std::format(

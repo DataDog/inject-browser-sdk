@@ -40,7 +40,7 @@ TEST(TestRegisterModule, TestRegistersValidHTTPModuleFactory) {
 
   EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(nullptr));
 
-  IHttpModuleFactory *resultFactory = nullptr;
+  IHttpModuleFactory* resultFactory = nullptr;
   ON_CALL(module, SetRequestNotifications)
       .WillByDefault(DoAll(SaveArg<0>(&resultFactory), Return(S_OK)));
 
@@ -53,7 +53,7 @@ TEST(TestRegisterModule, TestRegistersValidHTTPModuleFactory) {
   EXPECT_EQ(result, S_OK);
   ASSERT_NE(resultFactory, nullptr);
 
-  CHttpModule *resultFactoryOutput = nullptr;
+  CHttpModule* resultFactoryOutput = nullptr;
   result = resultFactory->GetHttpModule(&resultFactoryOutput, nullptr);
 
   EXPECT_EQ(result, S_OK);

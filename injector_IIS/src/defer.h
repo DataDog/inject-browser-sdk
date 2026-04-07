@@ -63,15 +63,15 @@ class CleanupFuncGuard {
   bool active_;  // whether to call `on_destroy_` in the destructor
 
  public:
-  explicit CleanupFuncGuard(Func &&func)
+  explicit CleanupFuncGuard(Func&& func)
       : on_destroy_(std::move(func)), active_(true) {}
 
-  CleanupFuncGuard(CleanupFuncGuard &&other)
+  CleanupFuncGuard(CleanupFuncGuard&& other)
       : on_destroy_(std::move(other.on_destroy_)), active_(true) {
     other.active_ = false;
   }
 
-  CleanupFuncGuard(const CleanupFuncGuard &) = delete;
+  CleanupFuncGuard(const CleanupFuncGuard&) = delete;
 
   ~CleanupFuncGuard() {
     if (active_) {
@@ -85,7 +85,7 @@ class CleanupFuncGuard {
 //
 //     const auto guard = defer(/* ... lambda expression ... */);
 template <typename Func>
-CleanupFuncGuard<Func> defer(Func &&func) {
+CleanupFuncGuard<Func> defer(Func&& func) {
   return CleanupFuncGuard<Func>(std::forward<Func>(func));
 }
 

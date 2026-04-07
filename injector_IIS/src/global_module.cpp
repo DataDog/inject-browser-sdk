@@ -102,8 +102,12 @@ GlobalModule::OnGlobalApplicationStart(
 
 GLOBAL_NOTIFICATION_STATUS
 GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider *provider) {
-  auto cfg_path = provider->GetApplication()->GetAppConfigPath();
-  if (cfg_path == nullptr) {
+  auto *app = provider->GetApplication();
+  if (!app) {
+    return GL_NOTIFICATION_CONTINUE;
+  }
+  auto cfg_path = app->GetAppConfigPath();
+  if (!cfg_path) {
     return GL_NOTIFICATION_CONTINUE;
   }
 

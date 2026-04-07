@@ -57,8 +57,7 @@ public:
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE get_Value(VARIANT *pValue) override {
-    *pValue = value_;
-    return S_OK;
+    return VariantCopy(pValue, &value_);
   }
   HRESULT STDMETHODCALLTYPE put_Value(VARIANT) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE get_Schema(IAppHostPropertySchema **) override {

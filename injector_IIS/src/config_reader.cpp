@@ -151,8 +151,9 @@ std::optional<ServerConfig> read_server_conf(const IHttpServer &server,
     const auto defer_log_level_prop = defer([&] { log_level_prop->Release(); });
     auto log_level_val = get_property_value(*log_level_prop);
     const auto defer_log_level_val = defer([&] { VariantClear(&log_level_val); });
-    if (log_level_val.vt != VT_EMPTY) {
-      int log_level_int = log_level_val.lVal;
+    if (log_level_val.vt == VT_I4 || log_level_val.vt == VT_I2) {
+      int log_level_int =
+          (log_level_val.vt == VT_I4) ? log_level_val.lVal : log_level_val.iVal;
       if (log_level_int <= static_cast<int>(LogLevel::Debug) &&
           log_level_int >= static_cast<int>(LogLevel::Error)) {
         log_level = static_cast<LogLevel>(log_level_int);
@@ -193,7 +194,7 @@ std::optional<RumConfig> read_conf(const IHttpServer &server, PCWSTR cfg_path,
 
   auto enabled_val = get_property_value(*enabled_prop);
   const auto defer_enabled_val = defer([&] { VariantClear(&enabled_val); });
-  if (enabled_val.vt == VT_EMPTY) {
+  if (enabled_val.vt != VT_BOOL) {
     logger.debug("Failed to read 'enabled' property value");
     return std::nullopt;
   }
@@ -283,6 +284,8 @@ void update_module_context(ModuleContext &ctx, const IHttpServer &server,
   auto config = read_conf(server, config_path, logger);
   if (!config.has_value()) {
     ctx.snippet.reset();
+    ctx.application_id_tag.clear();
+    ctx.remote_config_tag.clear();
     return;
   }
 
@@ -291,11 +294,13 @@ void update_module_context(ModuleContext &ctx, const IHttpServer &server,
 
   if (snippet == nullptr) {
     logger.error("Failed to create RUM snippet");
+    ctx.snippet.reset();
     return;
   } else if (snippet->error_code != 0) {
     logger.error(std::format("Failed to create RUM snippet: {}",
                               snippet->error_message));
     snippet_cleanup(snippet);
+    ctx.snippet.reset();
     return;
   }
 

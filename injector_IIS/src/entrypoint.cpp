@@ -11,7 +11,6 @@
 #include "module_context.h"
 #include "version.h"
 #include <cassert>
-#include <new>
 
 __declspec(dllexport) HRESULT __stdcall RegisterModule(
     DWORD server_version, IHttpModuleRegistrationInfo* module_info,
@@ -31,36 +30,32 @@ __declspec(dllexport) HRESULT __stdcall RegisterModule(
 
   // NOTE(@dmehala): Keep a pointer on the server for reading configuration
   // when there's a configuration update.
-  auto* global_module = new (std::nothrow)
-      datadog::rum::GlobalModule(server, server_version, logger);
-  if (global_module == nullptr) {
-    logger->error(
-        "Failed to register Datadog RUM module to the lack of memory "
-        "to create the global module");
-    /*
-      If we return an error from the RegisterModule function, IIS will retry
-      registering this module, but if it keeps failing then eventually the
-      application pool which is calling RegisterModule will come to a complete
-      stop. We don't want to cause any downtime on our customers servers, so
-      even in the case of a fatal error, we will simply write an error to the
-      event log and return S_OK.
-      */
-    return S_OK;
-  }
+  //
+  // If we return an error from RegisterModule, IIS will retry registering this
+  // module, but if it keeps failing then eventually the application pool will
+  // come to a complete stop. We don't want to cause any downtime on our
+  // customers' servers, so even in the case of a fatal error, we write an error
+  // to the event log and return S_OK.
+  auto global_module =
+      new datadog::rum::GlobalModule(server, server_version, logger);
 
-  module_info->SetGlobalNotifications(
+  auto hr = module_info->SetGlobalNotifications(
       global_module, datadog::rum::GlobalModule::NotificationsMask);
-
-  auto* http_factory = new (std::nothrow) datadog::rum::HttpModuleFactory;
-  if (http_factory == nullptr) {
-    logger->error(
-        "Failed to register Datadog RUM module due to the lack of "
-        "memory to create the module factory");
+  if (FAILED(hr)) {
+    logger->error("Failed to register global notifications: " +
+                  std::system_category().message(hr));
     return S_OK;
   }
 
-  module_info->SetRequestNotifications(
+  auto http_factory = new datadog::rum::HttpModuleFactory;
+
+  hr = module_info->SetRequestNotifications(
       http_factory, datadog::rum::HttpModule::NotificationsMask, 0);
+  if (FAILED(hr)) {
+    logger->error("Failed to register request notifications: " +
+                  std::system_category().message(hr));
+    return S_OK;
+  }
 
   return S_OK;
 }

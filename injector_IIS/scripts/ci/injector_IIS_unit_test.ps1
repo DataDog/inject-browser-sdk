@@ -8,15 +8,17 @@ $ErrorActionPreference = "Stop"
 
 Set-Location $PSScriptRoot\..\..
 
-# Initialize MSVC environment (cl.exe, link.exe, etc.)
-$vsPath = & vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vsPath) {
-    Write-Error "Visual Studio with C++ tools not found"
+# Initialize MSVC environment via VsDevCmd.bat (same approach as the build task).
+# The Windows build image sets VSINSTALLDIR; fall back to VSTUDIO_ROOT.
+$vsRoot = $env:VSINSTALLDIR
+if (-not $vsRoot) { $vsRoot = $env:VSTUDIO_ROOT }
+if (-not $vsRoot) {
+    Write-Error "VSINSTALLDIR / VSTUDIO_ROOT not set — cannot find Visual Studio"
     exit 1
 }
-Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments "-arch=amd64"
+$vsDevCmd = Join-Path $vsRoot "Common7\Tools\VsDevCmd.bat"
 
-cmake --preset=$Preset -B $BuildDir -DCMAKE_BUILD_TYPE=$BuildType
-cmake --build $BuildDir -j
+# Run cmake inside a cmd session that sources VsDevCmd.bat first.
+cmd /c "`"$vsDevCmd`" -arch=amd64 && cmake --preset=$Preset -B $BuildDir -DCMAKE_BUILD_TYPE=$BuildType && cmake --build $BuildDir -j"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & ".\$BuildDir\test\unittests\iis_injector_tests.exe"

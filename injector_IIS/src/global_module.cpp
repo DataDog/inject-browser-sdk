@@ -73,7 +73,7 @@ GlobalModule::OnGlobalApplicationStart(
     IHttpApplicationStartProvider *provider) {
   assert(server_ != nullptr);
 
-  auto ctx = new ModuleContext;
+  auto ctx = std::make_unique<ModuleContext>();
   ctx->logger = logger_.get();
   ctx->server = server_;
 
@@ -86,17 +86,16 @@ GlobalModule::OnGlobalApplicationStart(
                             wstring_to_utf8(app->GetApplicationId())));
 
   update_module_context(*ctx, *server_, config_path, *logger_);
-  auto hr = app->GetModuleContextContainer()->SetModuleContext(ctx, g_module_id);
+  auto hr = app->GetModuleContextContainer()->SetModuleContext(ctx.get(), g_module_id);
   if (FAILED(hr)) {
     logger_->error(std::format("Failed to set app module context: {}",
                                std::system_category().message(hr)));
-    delete ctx;
     return GL_NOTIFICATION_CONTINUE;
   }
 
   // NOTE(@dmehala): Keep a reference on the module context for
   // `OnGlobalConfigurationChange` event.
-  configurations_.emplace(config_path, ctx);
+  configurations_.emplace(config_path, ctx.release());
 
   return GL_NOTIFICATION_CONTINUE;
 }

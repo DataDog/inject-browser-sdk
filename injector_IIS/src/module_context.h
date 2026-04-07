@@ -11,7 +11,6 @@
 #include "framework.h"
 #include "injectbrowsersdk.h"
 #include "logger.h"
-#include <memory>
 #include <string>
 
 namespace datadog::rum {
@@ -19,20 +18,20 @@ namespace datadog::rum {
 // Module identifier retrieve from the module info in register module function.
 extern HTTP_MODULE_ID g_module_id;
 
-struct SnippetDeleter {
-  void operator()(Snippet *s) const { snippet_cleanup(s); }
-};
-using OwnedSnippet = std::unique_ptr<Snippet, SnippetDeleter>;
-
 struct ModuleContext final : public IHttpStoredContext {
+  Snippet *snippet = nullptr;
   Logger *logger = nullptr;
   IHttpServer *server = nullptr;
   std::string application_id_tag;
   std::string remote_config_tag;
-  OwnedSnippet snippet;
 
   // IIS calls this instead of the destructor (COM-style lifecycle).
-  void CleanupStoredContext() override { delete this; };
+  void CleanupStoredContext() override {
+    if (snippet != nullptr) {
+      snippet_cleanup(snippet);
+    }
+    delete this;
+  };
 };
 
 } // namespace datadog::rum

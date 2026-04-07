@@ -236,7 +236,7 @@ HttpModule::PerformInjection(IHttpContext &pHttpContext,
                              IHttpResponse &pHttpResponse, ModuleContext &ctx) {
   assert(ctx.snippet != nullptr);
   assert(ctx.logger != nullptr);
-  const Snippet *snippet = ctx.snippet.get();
+  const Snippet *snippet = ctx.snippet;
   auto &logger = *ctx.logger;
 
   HTTP_RESPONSE *pResponseStruct = pHttpResponse.GetRawHttpResponse();

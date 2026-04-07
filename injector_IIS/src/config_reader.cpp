@@ -283,7 +283,10 @@ void update_module_context(ModuleContext &ctx, const IHttpServer &server,
 
   auto config = read_conf(server, config_path, logger);
   if (!config.has_value()) {
-    ctx.snippet.reset();
+    if (ctx.snippet != nullptr) {
+      snippet_cleanup(ctx.snippet);
+      ctx.snippet = nullptr;
+    }
     ctx.application_id_tag.clear();
     ctx.remote_config_tag.clear();
     return;
@@ -294,18 +297,27 @@ void update_module_context(ModuleContext &ctx, const IHttpServer &server,
 
   if (snippet == nullptr) {
     logger.error("Failed to create RUM snippet");
-    ctx.snippet.reset();
+    if (ctx.snippet != nullptr) {
+      snippet_cleanup(ctx.snippet);
+      ctx.snippet = nullptr;
+    }
     return;
   } else if (snippet->error_code != 0) {
     logger.error(std::format("Failed to create RUM snippet: {}",
                               snippet->error_message));
     snippet_cleanup(snippet);
-    ctx.snippet.reset();
+    if (ctx.snippet != nullptr) {
+      snippet_cleanup(ctx.snippet);
+      ctx.snippet = nullptr;
+    }
     return;
   }
 
   logger.info("Configuration validated");
-  ctx.snippet.reset(snippet);
+  if (ctx.snippet != nullptr) {
+    snippet_cleanup(ctx.snippet);
+  }
+  ctx.snippet = snippet;
 
   if (auto appIdIt = config->sdk_options.find("applicationId");
       appIdIt != config->sdk_options.end()) {

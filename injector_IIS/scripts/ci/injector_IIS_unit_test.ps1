@@ -20,10 +20,14 @@ $vsDevCmd = Join-Path $vsRoot "Common7\Tools\VsDevCmd.bat"
 
 # Run cmake inside a cmd session that sources VsDevCmd.bat first
 # (matches the approach used by the invoke build task in iis.py).
-cmd /c "call `"$vsDevCmd`" -arch=amd64 && cmake --preset=$Preset -B $BuildDir -DCMAKE_BUILD_TYPE=$BuildType"
+# Use single-quoted here-string to avoid PowerShell 5.1 parsing && as pipeline chain.
+$configureCmd = 'call "' + $vsDevCmd + '" -arch=amd64 && cmake --preset=' + $Preset + ' -B ' + $BuildDir + ' -DCMAKE_BUILD_TYPE=' + $BuildType
+cmd /c $configureCmd
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-cmd /c "call `"$vsDevCmd`" -arch=amd64 && cmake --build $BuildDir -j"
+$buildCmd = 'call "' + $vsDevCmd + '" -arch=amd64 && cmake --build ' + $BuildDir + ' -j'
+cmd /c $buildCmd
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-& ".\$BuildDir\test\unittests\iis_injector_tests.exe"
+$testExe = Join-Path $BuildDir "test\unittests\iis_injector_tests.exe"
+& $testExe

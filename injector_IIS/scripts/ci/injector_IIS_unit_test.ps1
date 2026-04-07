@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Set-Location $PSScriptRoot\..
+Set-Location $PSScriptRoot\..\..
 
 cmake --preset=$Preset -B $BuildDir -DCMAKE_BUILD_TYPE=$BuildType
 cmake --build $BuildDir -j

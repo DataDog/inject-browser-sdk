@@ -19,9 +19,9 @@ namespace datadog::rum {
 extern HTTP_MODULE_ID g_module_id;
 
 struct ModuleContext final : public IHttpStoredContext {
-  Snippet *snippet = nullptr;
-  Logger *logger = nullptr;
-  IHttpServer *server = nullptr;
+  Snippet* snippet = nullptr;
+  Logger* logger = nullptr;
+  IHttpServer* server = nullptr;
   std::string application_id_tag;
   std::string remote_config_tag;
 
@@ -34,4 +34,4 @@ struct ModuleContext final : public IHttpStoredContext {
   };
 };
 
-} // namespace datadog::rum
+}  // namespace datadog::rum

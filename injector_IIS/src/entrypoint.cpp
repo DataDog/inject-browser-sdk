@@ -12,10 +12,9 @@
 #include "version.h"
 #include <cassert>
 
-__declspec(dllexport) HRESULT
-    __stdcall RegisterModule(DWORD server_version,
-                             IHttpModuleRegistrationInfo *module_info,
-                             IHttpServer *server) {
+__declspec(dllexport) HRESULT __stdcall RegisterModule(
+    DWORD server_version, IHttpModuleRegistrationInfo* module_info,
+    IHttpServer* server) {
   assert(server != nullptr);
   assert(module_info != nullptr);
 
@@ -37,7 +36,7 @@ __declspec(dllexport) HRESULT
   // come to a complete stop. We don't want to cause any downtime on our
   // customers' servers, so even in the case of a fatal error, we write an error
   // to the event log and return S_OK.
-  auto global_module =
+  auto* global_module =
       new datadog::rum::GlobalModule(server, server_version, logger);
 
   auto hr = module_info->SetGlobalNotifications(
@@ -48,7 +47,7 @@ __declspec(dllexport) HRESULT
     return S_OK;
   }
 
-  auto http_factory = new datadog::rum::HttpModuleFactory;
+  auto* http_factory = new datadog::rum::HttpModuleFactory;
 
   hr = module_info->SetRequestNotifications(
       http_factory, datadog::rum::HttpModule::NotificationsMask, 0);

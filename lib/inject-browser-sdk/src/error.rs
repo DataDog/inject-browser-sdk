@@ -45,7 +45,7 @@ impl fmt::Display for Error {
                 write!(f, "Validation error: The major version '{version}' is not supported. Supported RUM SDK versions: [5, 6]")
             }
             Error::UnsupportedSite(site) => {
-                write!(f, "Validation error: The site '{site}' is not a valid Datadog site. Examples of valid Datadog sites: 'datadoghq.com', 'datadoghq.eu', 'ddog-gov.com'.")
+                write!(f, "Validation error: The site '{site}' is not a valid Datadog site. Examples of valid Datadog sites: 'datadoghq.com', 'us5.datadoghq.com', 'datadoghq.eu', 'ddog-gov.com'.")
             }
             Error::OutOfRangeRate(key, value) => {
                 write!(f, "Validation error: The provided {key} is invalid. It must be between 0.0 and 100.0. However, the received value was '{value}'.")

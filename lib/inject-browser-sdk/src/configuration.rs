@@ -144,7 +144,73 @@ impl RumConfiguration {
     }
 }
 
-const SITE_PATTERNS: [&str; 4] = ["datadog", "ddog", "datad0g", "dd0g"];
+/// Datadog domains that accept an optional datacenter prefix
+/// (`[a-z]{2,}[0-9]{1,2}.`), mirroring the agent's `ddDomainPattern`.
+const PREFIXED_DOMAINS: &[&str] = &["datadoghq.com", "datadoghq.eu", "datad0g.com", "datad0g.eu"];
+
+/// Gov domains: must match exactly, no datacenter prefix is allowed.
+#[cfg(feature = "support_gov_domain")]
+const FLAT_ONLY_DOMAINS: &[&str] = &["ddog-gov.com", "ddog-gov.mil"];
+
+pub(crate) struct ParsedSite<'a> {
+    pub prefix: Option<&'a str>,
+    pub domain: &'a str,
+}
+
+/// Parse and validate a site string against the agent's `ddSitePattern`.
+///
+/// Accepted formats:
+/// - `([a-z]{2,}[0-9]{1,2}\.)?(datad(oghq|0g)\.(com|eu))`
+/// - `ddog-gov.(com|mil)` (US1-FED, exact match only — no prefix)
+pub(crate) fn parse_site(site: &str) -> Option<ParsedSite<'_>> {
+    #[cfg(feature = "support_gov_domain")]
+    for &domain in FLAT_ONLY_DOMAINS {
+        if site == domain {
+            return Some(ParsedSite {
+                prefix: None,
+                domain,
+            });
+        }
+    }
+    for &domain in PREFIXED_DOMAINS {
+        if site == domain {
+            return Some(ParsedSite {
+                prefix: None,
+                domain,
+            });
+        }
+        if let Some(prefix_dot) = site.strip_suffix(domain) {
+            if let Some(prefix) = prefix_dot.strip_suffix('.') {
+                if is_valid_datacenter_prefix(prefix) {
+                    return Some(ParsedSite {
+                        prefix: Some(prefix),
+                        domain,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Validates that a datacenter prefix matches `[a-z]{2,}[0-9]{1,2}`.
+fn is_valid_datacenter_prefix(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && b[i].is_ascii_lowercase() {
+        i += 1;
+    }
+    if i < 2 {
+        return false;
+    }
+    let letters_end = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    let digits = i - letters_end;
+    (1..=2).contains(&digits) && i == b.len()
+}
+
 const MAJOR_VERSIONS: [u32; 2] = [5, 6];
 
 /// Parse a [`Configuration`] from JSON.
@@ -270,7 +336,7 @@ impl Configuration {
             return Err(Error::EmptyMandatoryConf(String::from("clientToken")));
         }
         if let Some(site) = &self.rum.site {
-            if !SITE_PATTERNS.iter().any(|p| site.contains(p)) {
+            if parse_site(site).is_none() {
                 return Err(Error::UnsupportedSite(site.clone()));
             }
         }
@@ -285,7 +351,7 @@ impl Configuration {
 
 fn validate_rate(label: &str, value: Option<f64>) -> Result<(), Error> {
     if let Some(rate) = value {
-        if !(0.0..=100.0).contains(&rate) {
+        if rate.is_nan() || !(0.0..=100.0).contains(&rate) {
             return Err(Error::OutOfRangeRate(String::from(label), rate));
         }
     }
@@ -392,6 +458,18 @@ mod test {
                     },
                 },
                 expected: Error::EmptyMandatoryConf(String::from("clientToken")),
+            },
+            TestCase {
+                input: Configuration {
+                    major_version: 5,
+                    rum: RumConfiguration {
+                        application_id: Some(String::from("bar")),
+                        client_token: Some(String::from("foo")),
+                        session_sample_rate: Some(f64::NAN),
+                        ..Default::default()
+                    },
+                },
+                expected: Error::OutOfRangeRate(String::from("session sample rate"), f64::NAN),
             },
             TestCase {
                 input: Configuration {
@@ -797,5 +875,105 @@ mod test {
         let overlay = parse_configuration_overlay(br#"{"rum":{"newKnob":"x"}}"#)
             .expect("unknown rum keys must flow into `other`");
         assert_eq!(overlay.rum.other.get("newKnob"), Some(&Value::from("x")));
+    }
+
+    #[test]
+    fn test_parse_site_valid() {
+        let valid_sites = vec![
+            ("datadoghq.com", None, "datadoghq.com"),
+            ("datadoghq.eu", None, "datadoghq.eu"),
+            ("us1.datadoghq.com", Some("us1"), "datadoghq.com"),
+            ("us3.datadoghq.com", Some("us3"), "datadoghq.com"),
+            ("us5.datadoghq.com", Some("us5"), "datadoghq.com"),
+            ("ap1.datadoghq.com", Some("ap1"), "datadoghq.com"),
+            ("ap2.datadoghq.com", Some("ap2"), "datadoghq.com"),
+            ("eu2.datadoghq.eu", Some("eu2"), "datadoghq.eu"),
+            ("datad0g.com", None, "datad0g.com"),
+            ("datad0g.eu", None, "datad0g.eu"),
+            ("us3.datad0g.com", Some("us3"), "datad0g.com"),
+            // prefix boundary: 2 letters + 2 digits
+            ("us12.datadoghq.com", Some("us12"), "datadoghq.com"),
+            // prefix boundary: 3 letters + 1 digit
+            ("abc1.datadoghq.com", Some("abc1"), "datadoghq.com"),
+        ];
+
+        for (site, expected_prefix, expected_domain) in valid_sites {
+            let parsed =
+                parse_site(site).unwrap_or_else(|| panic!("expected '{site}' to be valid"));
+            assert_eq!(
+                parsed.prefix, expected_prefix,
+                "prefix mismatch for '{site}'"
+            );
+            assert_eq!(
+                parsed.domain, expected_domain,
+                "domain mismatch for '{site}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_site_invalid() {
+        let invalid_sites = vec![
+            "example.com",
+            "x1.datadoghq.com",    // prefix too short (1 letter)
+            "a1.datadoghq.com",    // prefix too short (1 letter)
+            "us.datadoghq.com",    // no digit in prefix
+            "US3.datadoghq.com",   // uppercase
+            "123.datadoghq.com",   // no letters in prefix
+            "us123.datadoghq.com", // prefix has 3 digits (max 2)
+            "xdatadoghq.com",      // no dot separator before domain
+            "",
+        ];
+
+        for site in invalid_sites {
+            assert!(
+                parse_site(site).is_none(),
+                "expected '{site}' to be invalid"
+            );
+        }
+    }
+
+    #[cfg(feature = "support_gov_domain")]
+    #[test]
+    fn test_parse_site_gov() {
+        for (site, expected_domain) in [
+            ("ddog-gov.com", "ddog-gov.com"),
+            ("ddog-gov.mil", "ddog-gov.mil"),
+        ] {
+            let parsed =
+                parse_site(site).unwrap_or_else(|| panic!("expected '{site}' to be valid"));
+            assert_eq!(parsed.prefix, None, "prefix mismatch for '{site}'");
+            assert_eq!(
+                parsed.domain, expected_domain,
+                "domain mismatch for '{site}'"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "support_gov_domain"))]
+    #[test]
+    fn test_parse_site_gov_rejected() {
+        for site in ["ddog-gov.com", "ddog-gov.mil"] {
+            assert!(
+                parse_site(site).is_none(),
+                "expected '{site}' to be invalid without gov feature"
+            );
+        }
+    }
+
+    #[cfg(feature = "support_gov_domain")]
+    #[test]
+    fn test_parse_site_gov_prefixed_rejected() {
+        for site in [
+            "us1.ddog-gov.com",
+            "us3.ddog-gov.com",
+            "abc1.ddog-gov.mil",
+            "us1.ddog-gov.mil",
+        ] {
+            assert!(
+                parse_site(site).is_none(),
+                "expected prefixed gov '{site}' to be invalid (gov is flat-only)"
+            );
+        }
     }
 }

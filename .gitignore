@@ -21,7 +21,6 @@ injector_IIS/build/
 injector_IIS/test/e2e_testsa/test_assets/injector_IIS_installer.msi
 injector_IIS/test/e2e_testsa/vendor
 build_out/
-build-out/
 *.msi
 
 # Docker
@@ -29,4 +28,8 @@ build-out/
 
 # Installer
 installer/proxy-configurator
+
+# Build
+compile_commands.json
+.cache/
 /.envrc.local

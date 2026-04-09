@@ -18,33 +18,33 @@ namespace datadog::rum {
 namespace {
 
 constexpr std::string_view k_injection_header = "x-datadog-rum-injected";
-constexpr std::string_view k_text_html = "text/html";
 
 std::string_view get_header(IHttpResponse& http_response, std::string_view header) {
-  USHORT length = 0;
-  // NOLINT: header is always a string literal
-  PCSTR data =
-      http_response.GetHeader(header.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
-                              &length);
+  USHORT length;
+  PCSTR data = http_response.GetHeader(header.data(), &length);
   if (!data) {
     return "";
   }
 
-  return {data, length};
+  return std::string_view(data, length);
 }
 
 // Returns the per-location context if cached on the metadata container,
 // otherwise falls back to the app-level context.
 ModuleContext* resolve_cached_context(IHttpContext& http_context, ModuleContext& app_ctx) {
   auto* metadata = http_context.GetMetadata();
-  if (metadata) {
-    auto* mc = metadata->GetModuleContextContainer();
-    if (mc) {
-      auto* cached = mc->GetModuleContext(g_module_id);
-      if (cached) {
-        return static_cast<ModuleContext*>(cached);
-      }
-    }
+  if (!metadata) {
+    app_ctx.logger->debug("Metadata unavailable, using app-level config");
+    return &app_ctx;
+  }
+  auto* mc = metadata->GetModuleContextContainer();
+  if (!mc) {
+    app_ctx.logger->debug("Metadata context container unavailable, using app-level config");
+    return &app_ctx;
+  }
+  auto* cached = mc->GetModuleContext(g_module_id);
+  if (cached) {
+    return static_cast<ModuleContext*>(cached);
   }
   return &app_ctx;
 }
@@ -84,7 +84,7 @@ HttpModule::OnBeginRequest(IN IHttpContext* http_context, IN IHttpEventProvider*
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  HRESULT const result = http_request->SetHeader("x-datadog-rum-injection-pending", "1", 1, TRUE);
+  HRESULT result = http_request->SetHeader("x-datadog-rum-injection-pending", "1", 1, TRUE);
   if (result != S_OK) {
     event_provider->SetErrorStatus(result);
     ctx->logger->error("Error setting request header: " + std::system_category().message(result));
@@ -96,7 +96,7 @@ HttpModule::OnBeginRequest(IN IHttpContext* http_context, IN IHttpEventProvider*
 REQUEST_NOTIFICATION_STATUS
 HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvider*) {
   assert(http_context != nullptr);
-  auto* http_response = http_context->GetResponse();
+  auto http_response = http_context->GetResponse();
   if (!http_response) {
     return RQ_NOTIFICATION_CONTINUE;
   }
@@ -126,34 +126,38 @@ HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvid
     if (metadata && app_ctx.server) {
       auto* meta_container = metadata->GetModuleContextContainer();
       if (meta_container) {
-        const auto* meta_path = metadata->GetMetaPath();
-        auto new_ctx = std::make_unique<ModuleContext>();
-        new_ctx->logger = app_ctx.logger;
-        new_ctx->server = app_ctx.server;
+        auto* meta_path = metadata->GetMetaPath();
+        if (!meta_path) {
+          app_ctx.logger->debug("MetaPath is null, using app-level config");
+        } else {
+          auto new_ctx = std::make_unique<ModuleContext>();
+          new_ctx->logger = app_ctx.logger;
+          new_ctx->server = app_ctx.server;
 
-        update_module_context(*new_ctx, *app_ctx.server, meta_path, *app_ctx.logger);
+          update_module_context(*new_ctx, *app_ctx.server, meta_path, *app_ctx.logger);
 
-        // Inherit app-level tags if per-location config didn't set its own.
-        if (new_ctx->application_id_tag.empty())
-          new_ctx->application_id_tag = app_ctx.application_id_tag;
-        if (new_ctx->remote_config_tag.empty())
-          new_ctx->remote_config_tag = app_ctx.remote_config_tag;
+          // Inherit app-level tags if per-location config didn't set its own.
+          if (new_ctx->application_id_tag.empty())
+            new_ctx->application_id_tag = app_ctx.application_id_tag;
+          if (new_ctx->remote_config_tag.empty())
+            new_ctx->remote_config_tag = app_ctx.remote_config_tag;
 
-        auto hr = meta_container->SetModuleContext(new_ctx.get(), g_module_id);
-        if (SUCCEEDED(hr)) {
-          ctx = new_ctx.release();  // container owns it now
-        } else if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
-          // Another thread won the race — use its cached context.
-          // unique_ptr auto-deletes new_ctx.
-          ctx = static_cast<ModuleContext*>(meta_container->GetModuleContext(g_module_id));
-          if (!ctx) {
-            app_ctx.logger->error("Race condition: cached context disappeared");
+          auto hr = meta_container->SetModuleContext(new_ctx.get(), g_module_id);
+          if (SUCCEEDED(hr)) {
+            ctx = new_ctx.release();  // container owns it now
+          } else if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
+            // Another thread won the race — use its cached context.
+            // unique_ptr auto-deletes new_ctx.
+            ctx = static_cast<ModuleContext*>(meta_container->GetModuleContext(g_module_id));
+            if (!ctx) {
+              app_ctx.logger->error("Race condition: cached context disappeared");
+              return RQ_NOTIFICATION_CONTINUE;
+            }
+          } else {
+            app_ctx.logger->error(std::format("Failed to cache per-location context: {}",
+                                              std::system_category().message(hr)));
             return RQ_NOTIFICATION_CONTINUE;
           }
-        } else {
-          app_ctx.logger->error(std::format("Failed to cache per-location context: {}",
-                                            std::system_category().message(hr)));
-          return RQ_NOTIFICATION_CONTINUE;
         }
       }
     }
@@ -173,18 +177,18 @@ HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvid
 
 bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
                                         const ModuleContext& ctx) const {
-  // First, we must validate the the content type is 'text/html'
+  // First, we must validate that the content type is 'text/html'
   // Note that the value of the Content-Type header is case insensitive, and it
-  // may or may not be be followed by semicolon-delimited parameters
+  // may or may not be followed by semicolon-delimited parameters
   //   ie Text/HTML;Charset="utf-8"
   // see https://www.rfc-editor.org/rfc/rfc9110#name-content-type
 
   // IIS does not NUL-terminate the header buffer, so guard the prefix length
   // against the explicit string_view size before calling _strnicmp.
   std::string_view content_type = get_header(pHttpResponse, "Content-Type");
-  if (content_type.size() < k_text_html.size() ||
+  if (content_type.size() < 9 ||
       _strnicmp(content_type.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
-                k_text_html.data(), k_text_html.size()) != 0) {
+                "text/html", 9) != 0) {
     datadog::telemetry::counter::increment(
         telemetry::injection_skipped,
         telemetry::build_tags("reason:content-type", ctx.application_id_tag,
@@ -292,9 +296,7 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
 
       injected = true;
 
-      HRESULT const result = pHttpResponse.SetHeader(
-          k_injection_header.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
-          "1", 1, TRUE);
+      HRESULT result = pHttpResponse.SetHeader(k_injection_header.data(), "1", 1, TRUE);
       if (result != S_OK) {
         logger.error("Error setting injection header: " + std::system_category().message(result));
         return RQ_NOTIFICATION_CONTINUE;
@@ -321,8 +323,8 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
 
   logger.debug("Writing new response");
 
-  DWORD bytesSent = 0;
-  HRESULT const result = pHttpResponse.Flush(FALSE, FALSE, &bytesSent);
+  DWORD bytesSent;
+  HRESULT result = pHttpResponse.Flush(FALSE, FALSE, &bytesSent);
   if (FAILED(result)) {
     logger.error("Error while flushing response: " + std::system_category().message(result));
   }

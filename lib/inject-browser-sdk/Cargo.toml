@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [features]
 std = ["serde/std", "serde_json/std"]
+support_gov_domain = []
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }

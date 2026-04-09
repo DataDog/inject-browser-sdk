@@ -41,10 +41,11 @@ window.DD_RUM.onReady(function() {
     );
 
     let mut rum_value =
-        serde_json::to_value(&configuration.rum).map_err(|e| Error::Json(e.to_string()))?;
+        serde_json::to_value(&configuration.rum).map_err(|e| return Error::Json(e.to_string()))?;
     // Deterministic key ordering, independent of serde_json's `preserve_order` feature.
     rum_value.sort_all_objects();
-    let json_string = serde_json::to_string(&rum_value).map_err(|e| Error::Json(e.to_string()))?;
+    let json_string =
+        serde_json::to_string(&rum_value).map_err(|e| return Error::Json(e.to_string()))?;
     for ch in json_string.chars() {
         if ch.is_ascii() {
             let mut buf = [0; 4];
@@ -64,11 +65,11 @@ window.DD_RUM.onReady(function() {
 "#,
     );
 
-    Ok(output)
+    return Ok(output);
 }
 
 fn format_cdn_url(major_version: u32, site: &str) -> Result<String, Error> {
-    let parsed = parse_site(site).ok_or_else(|| Error::UnsupportedSite(site.to_string()))?;
+    let parsed = parse_site(site).ok_or_else(|| return Error::UnsupportedSite(site.to_string()))?;
 
     // US1-FED uses a flat URL without region prefix (per browser-sdk README)
     #[cfg(feature = "support_gov_domain")]
@@ -84,9 +85,9 @@ fn format_cdn_url(major_version: u32, site: &str) -> Result<String, Error> {
         None => "us1",
     };
 
-    Ok(format!(
+    return Ok(format!(
         "https://www.datadoghq-browser-agent.com/{region}/v{major_version}/datadog-rum.js"
-    ))
+    ));
 }
 
 #[cfg(test)]

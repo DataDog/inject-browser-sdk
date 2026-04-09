@@ -14,8 +14,9 @@ use crate::snippet::{Snippet, SnippetInternal};
 /// UTF-8 validates a borrowed `CStr`. The returned `&str` is tied to the
 /// `CStr`'s lifetime so callers cannot accidentally extend it.
 fn cstr_to_str<'a>(cstr: &'a CStr, field: &str) -> Result<&'a str, Error> {
-    cstr.to_str()
-        .map_err(|_| Error::FfiInvalidUtf8(field.to_string()))
+    return cstr
+        .to_str()
+        .map_err(|_| return Error::FfiInvalidUtf8(field.to_string()));
 }
 
 /// Create a snippet from Datadog stable configuration files, with an optional JSON overlay.
@@ -112,7 +113,7 @@ pub unsafe extern "C" fn snippet_create_from_stable_config(
     };
 
     let result = snippet_from_stable_config(language_str, debug_logs, overlay);
-    SnippetInternal::new(result).into_public_ptr()
+    return SnippetInternal::new(result).into_public_ptr();
 }
 
 #[cfg(test)]
@@ -192,9 +193,9 @@ mod tests {
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
         assert_eq!(s.error_code, 0, "unexpected error: {:?}", unsafe {
             s.error_message.as_ref().map(|_| {
-                CStr::from_ptr(s.error_message)
+                return CStr::from_ptr(s.error_message)
                     .to_string_lossy()
-                    .into_owned()
+                    .into_owned();
             })
         });
         assert!(s.length > 0);

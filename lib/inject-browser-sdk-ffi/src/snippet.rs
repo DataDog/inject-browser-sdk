@@ -73,12 +73,14 @@ pub(crate) struct SnippetInternal {
 impl SnippetInternal {
     pub(crate) fn new(result: Result<Vec<u8>, Error>) -> Self {
         match result {
-            Ok(content) => Self {
-                error_message: null(),
-                error_code: 0,
-                length: content.len() as u32,
-                inner: Ok(content),
-            },
+            Ok(content) => {
+                return Self {
+                    error_message: null(),
+                    error_code: 0,
+                    length: content.len() as u32,
+                    inner: Ok(content),
+                }
+            }
             Err(error) => {
                 // Error messages can embed user-controlled strings (e.g. raw bytes
                 // from libdd-library-config). Scrub NUL bytes so CString::new
@@ -86,29 +88,31 @@ impl SnippetInternal {
                 // because panicking here brings down the host web server.
                 let error_string = error.to_string().replace('\0', "\\0");
                 let error_message = CString::new(error_string).unwrap_or_else(|_| {
-                    CString::new("internal error: error message contained unrepresentable bytes")
-                        .expect("static message has no NUL bytes")
+                    return CString::new(
+                        "internal error: error message contained unrepresentable bytes",
+                    )
+                    .expect("static message has no NUL bytes");
                 });
-                Self {
+                return Self {
                     error_message: error_message.as_ptr(),
                     error_code: error.code(),
                     length: 0,
                     inner: Err(error_message),
-                }
+                };
             }
         }
     }
 
     pub(crate) fn into_public_ptr(self) -> *mut Snippet {
-        Box::into_raw(Box::new(self)) as *mut Snippet
+        return Box::into_raw(Box::new(self)) as *mut Snippet;
     }
 
     unsafe fn from_public_ptr(snippet: *const Snippet) -> Box<Self> {
-        Box::from_raw(snippet as *mut SnippetInternal)
+        return Box::from_raw(snippet as *mut SnippetInternal);
     }
 
     pub unsafe fn borrow_public_ptr(snippet: *const Snippet) -> &'static Self {
-        &*(snippet as *mut SnippetInternal)
+        return &*(snippet as *mut SnippetInternal);
     }
 }
 
@@ -182,10 +186,10 @@ pub unsafe extern "C" fn snippet_create_from_json(json: *const c_char) -> *mut S
     }
     let json_bytes = CStr::from_ptr(json).to_bytes();
 
-    let result =
-        parse_configuration(json_bytes).and_then(|configuration| generate_snippet(&configuration));
+    let result = parse_configuration(json_bytes)
+        .and_then(|configuration| return generate_snippet(&configuration));
 
-    SnippetInternal::new(result).into_public_ptr()
+    return SnippetInternal::new(result).into_public_ptr();
 }
 
 /// Free the [`Snippet`] associated memory.
@@ -259,10 +263,10 @@ mod tests {
 
     fn get_error(snippet: *const Snippet) -> (u8, String) {
         let snippet = unsafe { SnippetInternal::from_public_ptr(snippet) };
-        (
+        return (
             snippet.error_code,
             String::from_utf8(snippet.inner.unwrap_err().as_bytes().to_vec()).unwrap(),
-        )
+        );
     }
 
     #[test]

@@ -4,17 +4,33 @@
 #
 # Copyright 2024-Present Datadog, Inc.
 
-FROM public.ecr.aws/b1o7r7e0/nginx_musl_toolchain:latest
+# Builder image for cross-compiling the IIS injector to Windows.
+
+FROM rust:1.94-slim-trixie
 
 ARG ARCH
 
-# Install std crate for x86_64-windows
-RUN ~/.cargo/bin/rustup target add x86_64-pc-windows-msvc
+# Install clang 19/lld for Windows cross-compilation, cmake 3.31 for the build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang \
+    clang-tools \
+    cmake \
+    curl \
+    git \
+    lld \
+    llvm \
+    make \
+    python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/clang-cl clang-cl /usr/bin/clang-cl-19 100
 
-# Install Windows CRT
+# Install cross-compilation targets
+RUN rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+
+# Install Windows CRT/SDK via xwin
 ENV XWIN_VERSION=0.6.5
 ADD scripts/install-xwin-toolchain.py install-xwin-toolchain.py
-RUN ./install-xwin-toolchain --xwin-version ${XWIN_VERSION} --output-dir /xwin
+RUN python3 install-xwin-toolchain.py --xwin-version ${XWIN_VERSION} --output-dir /xwin
 
 ENV CC_x86_64_pc_windows_msvc="clang" \
     CXX_x86_64_pc_windows_msvc="clang" \
@@ -28,4 +44,3 @@ ENV CC_x86_64_pc_windows_msvc="clang" \
 # These are separate because docker won't resolve env var defined in the same ENV block
 ENV CFLAGS_x86_64_pc_windows_msvc="$CL_FLAGS" \
     CXXFLAGS_x86_64_pc_windows_msvc="$CL_FLAGS"
-

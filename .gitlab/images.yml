@@ -1,0 +1,36 @@
+variables:
+  DOCKER_TOOLING_WITH_NYDUS_IMAGE: registry.ddbuild.io/images/nydus:v105323365-fb36202-v2.3.4
+
+.check_image_latest:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  tags: ["arch:amd64"]
+  image: $DOCKER_TOOLING_WITH_NYDUS_IMAGE
+  needs: []
+  allow_failure: true
+
+check_windows_build_image_latest:
+  extends: .check_image_latest
+  script:
+    - |
+      # Split WINDOWS_BUILD_IMAGE into repo and current tag
+      REPO="${WINDOWS_BUILD_IMAGE%:*}"
+      CURRENT="${WINDOWS_BUILD_IMAGE##*:}"
+      LATEST=$(crane ls "$REPO" | grep -E '^v[0-9]' | sort -V | tail -1)
+      if [ -z "$LATEST" ]; then
+        echo "ERROR: Could not retrieve tags from $REPO (crane ls failed or returned no results)"
+        exit 1
+      fi
+      if [ "$LATEST" = "$CURRENT" ]; then
+        echo "✓ windows_ltsc2022_x64 is up to date ($CURRENT)"
+      else
+        echo "⚠ windows_ltsc2022_x64 is outdated."
+        echo "  Current : $CURRENT"
+        echo "  Latest  : $LATEST"
+        echo ""
+        echo "Bump WINDOWS_BUILD_IMAGE in .gitlab/iis.yml to use tag '$LATEST'."
+        echo "The Windows runner AMI pre-pulls the latest tag of this image — staying current"
+        echo "means the image is already cached on the runner, saving ~12 minutes per build job."
+        exit 1
+      fi

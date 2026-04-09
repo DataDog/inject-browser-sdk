@@ -240,6 +240,79 @@ public:
   MOCK_METHOD(IHttpModuleContextContainer *, GetModuleContextContainer, (),
               (override));
 };
+class MockEventProvider : public IHttpEventProvider {
+public:
+  MOCK_METHOD(VOID, SetErrorStatus, (HRESULT hrError), (override));
+};
+
+class MockHttpRequest : public IHttpRequest {
+public:
+  const HTTP_REQUEST *GetRawHttpRequest() const override { return nullptr; }
+  MOCK_METHOD(HTTP_REQUEST *, GetRawHttpRequest, (), (override));
+
+  MOCK_METHOD(PCSTR, GetHeader,
+              (_In_ PCSTR pszHeaderName, _Out_ USHORT *pcchHeaderValue),
+              (const, override));
+  MOCK_METHOD(PCSTR, GetHeader,
+              (_In_ HTTP_HEADER_ID ulHeaderIndex,
+               _Out_ USHORT *pcchHeaderValue),
+              (const, override));
+  MOCK_METHOD(HRESULT, SetHeader,
+              (_In_ PCSTR pszHeaderName, _In_ PCSTR pszHeaderValue,
+               _In_ USHORT cchHeaderValue, _In_ BOOL fReplace),
+              (override));
+  MOCK_METHOD(HRESULT, SetHeader,
+              (_In_ HTTP_HEADER_ID ulHeaderIndex, _In_ PCSTR pszHeaderValue,
+               _In_ USHORT cchHeaderValue, _In_ BOOL fReplace),
+              (override));
+  MOCK_METHOD(HRESULT, DeleteHeader, (_In_ PCSTR pszHeaderName), (override));
+  MOCK_METHOD(HRESULT, DeleteHeader, (_In_ HTTP_HEADER_ID ulHeaderIndex),
+              (override));
+  MOCK_METHOD(PCSTR, GetHttpMethod, (), (const, override));
+  MOCK_METHOD(HRESULT, SetHttpMethod, (_In_ PCSTR pszHttpMethod), (override));
+  MOCK_METHOD(HRESULT, SetUrl,
+              (_In_ PCWSTR pszUrl, _In_ DWORD cchUrl,
+               _In_ BOOL fResetQueryString),
+              (override));
+  MOCK_METHOD(HRESULT, SetUrl,
+              (_In_ PCSTR pszUrl, _In_ DWORD cchUrl,
+               _In_ BOOL fResetQueryString),
+              (override));
+  MOCK_METHOD(BOOL, GetUrlChanged, (), (const, override));
+  MOCK_METHOD(PCWSTR, GetForwardedUrl, (), (const, override));
+  MOCK_METHOD(PSOCKADDR, GetLocalAddress, (), (const, override));
+  MOCK_METHOD(PSOCKADDR, GetRemoteAddress, (), (const, override));
+  MOCK_METHOD(HRESULT, ReadEntityBody,
+              (VOID *pvBuffer, DWORD cbBuffer, BOOL fAsync,
+               DWORD *pcbBytesReceived, BOOL *pfCompletionPending),
+              (override));
+  MOCK_METHOD(HRESULT, InsertEntityBody, (VOID *pvBuffer, DWORD cbBuffer),
+              (override));
+  MOCK_METHOD(DWORD, GetRemainingEntityBytes, (), (override));
+  MOCK_METHOD(VOID, GetHttpVersion,
+              (USHORT *pMajorVersion, USHORT *pMinorVersion),
+              (const, override));
+  MOCK_METHOD(HRESULT, GetClientCertificate,
+              (HTTP_SSL_CLIENT_CERT_INFO **ppClientCertInfo,
+               BOOL *pfClientCertNegotiated),
+              (override));
+  MOCK_METHOD(HRESULT, NegotiateClientCertificate,
+              (BOOL fAsync, BOOL *pfCompletionPending), (override));
+  MOCK_METHOD(DWORD, GetSiteId, (), (const, override));
+  MOCK_METHOD(
+      HRESULT, GetHeaderChanges,
+      (_In_ DWORD dwOldChangeNumber, _Out_ DWORD *pdwNewChangeNumber,
+       _Inout_ PCSTR knownHeaderSnapshot[HttpHeaderRequestMaximum],
+       _Inout_ DWORD *pdwUnknownHeaderSnapshot,
+       _Inout_ PCSTR **ppUnknownHeaderNameSnapshot,
+       _Inout_ PCSTR **ppUnknownHeaderValueSnapshot,
+       __out_ecount(HttpHeaderRequestMaximum + 1)
+           DWORD diffedKnownHeaderIndices[HttpHeaderRequestMaximum + 1],
+       _Out_ DWORD *pdwDiffedUnknownHeaders,
+       _Out_ DWORD **ppDiffedUnknownHeaderIndices),
+      (override));
+};
+
 class MockHttpResponse : public IHttpResponse {
 public:
   // Because both overloads of GetRawHttpResponse have the same arguments, gmock

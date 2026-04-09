@@ -13,18 +13,19 @@ import datetime
 import os
 
 from invoke.exceptions import Exit
-from .utils import get_version_numeric_only, get_version
+from .utils import parse_version
 
 
 def do_get_build_env(ctx, vstudio_root=None):
-    ver = get_version_numeric_only(ctx, env=os.environ, major_version=None)
-    build_maj, build_min, build_patch = ver.split(".")
-    fullver = get_version(ctx, include_git=True, url_safe=True, major_version=None)
+    numeric, pre = parse_version()
+    build_maj, build_min, build_patch = numeric.split(".")
+    fullver = f"{numeric}-{pre}" if pre else numeric
 
     env = {
-        "MAJ_VER": str(build_maj),
-        "MIN_VER": str(build_min),
-        "PATCH_VER": str(build_patch),
+        "MAJ_VER": build_maj,
+        "MIN_VER": build_min,
+        "PATCH_VER": build_patch,
+        "VERSION_PRE": pre,
     }
 
     vsroot = os.getenv("VSINSTALLDIR")

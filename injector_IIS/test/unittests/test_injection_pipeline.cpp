@@ -792,8 +792,9 @@ TEST(InjectionPipeline, SetModuleContextRace) {
       app.GetModuleContextContainer()->GetModuleContext(nullptr));
   winner_ctx->logger = app_ctx->logger;
   winner_ctx->snippet = snippet_create_from_json(
-      R"({"majorVersion":5,"rum":{"applicationId":"test-app-id","clientToken":"test-client-token","service":"test-service","sessionSampleRate":"100"}})");
+      R"({"majorVersion":5,"rum":{"applicationId":"test-app-id","clientToken":"test-client-token","service":"test-service","sessionSampleRate":100}})");
   ASSERT_NE(winner_ctx->snippet, nullptr);
+  ASSERT_EQ(winner_ctx->snippet->error_code, 0u);
   metadata.Container().PrePopulate(winner_ctx);
   metadata.Container().SetModuleContextResult(
       HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED));

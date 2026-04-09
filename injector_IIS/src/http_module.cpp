@@ -17,13 +17,11 @@
 namespace datadog::rum {
 namespace {
 
-constexpr std::string_view k_injection_header = "x-datadog-rum-injected";
+constexpr const char* k_injection_header = "x-datadog-rum-injected";
 
-std::string_view get_header(IHttpResponse& http_response, std::string_view header) {
+std::string_view get_header(IHttpResponse& http_response, const char* header) {
   USHORT length = 0;
-  PCSTR data =
-      http_response.GetHeader(header.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
-                              &length);
+  PCSTR data = http_response.GetHeader(header, &length);
   if (!data) {
     return "";
   }
@@ -298,9 +296,7 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
 
       injected = true;
 
-      HRESULT const result = pHttpResponse.SetHeader(
-          k_injection_header.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
-          "1", 1, TRUE);
+      HRESULT const result = pHttpResponse.SetHeader(k_injection_header, "1", 1, TRUE);
       if (result != S_OK) {
         logger.error("Error setting injection header: " + std::system_category().message(result));
         return RQ_NOTIFICATION_CONTINUE;

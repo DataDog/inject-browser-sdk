@@ -17,14 +17,11 @@
 namespace datadog::rum {
 namespace {
 
-constexpr std::string_view k_injection_header = "x-datadog-rum-injected";
+constexpr const char* k_injection_header = "x-datadog-rum-injected";
 
-std::string_view get_header(IHttpResponse& http_response,
-                            std::string_view header) {
+std::string_view get_header(IHttpResponse& http_response, const char* header) {
   USHORT length = 0;
-  PCSTR data = http_response.GetHeader(
-      header.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
-      &length);
+  PCSTR data = http_response.GetHeader(header, &length);
   if (!data) {
     return "";
   }
@@ -197,10 +194,8 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
   //   ie Text/HTML;Charset="utf-8"
   // see https://www.rfc-editor.org/rfc/rfc9110#name-content-type
 
-  if (_strnicmp(
-          get_header(pHttpResponse, "Content-Type")
-              .data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
-          "text/html", 9) != 0) {
+  const std::string content_type(get_header(pHttpResponse, "Content-Type"));
+  if (_strnicmp(content_type.c_str(), "text/html", 9) != 0) {
     datadog::telemetry::counter::increment(
         telemetry::injection_skipped,
         telemetry::build_tags("reason:content-type", ctx.application_id_tag,
@@ -311,10 +306,8 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext,
 
       injected = true;
 
-      HRESULT const result = pHttpResponse.SetHeader(
-          k_injection_header
-              .data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
-          "1", 1, TRUE);
+      HRESULT const result =
+          pHttpResponse.SetHeader(k_injection_header, "1", 1, TRUE);
       if (result != S_OK) {
         logger.error("Error setting injection header: " +
                      std::system_category().message(result));

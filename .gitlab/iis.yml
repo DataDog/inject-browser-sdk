@@ -120,6 +120,26 @@ injector_IIS_unit_test_asan:
       -Preset ci-native-asan -BuildDir build-asan -BuildType Debug
     - If ($lastExitCode -ne 0) { exit $lastExitCode }
 
+injector_IIS_integration_test:
+  stage: test
+  tags: ["windows-v2:2022"]
+  extends: .IIS_build_when
+  needs: ["injector_IIS_build"]
+  script:
+    - .\injector_IIS\scripts\setup-integration-test-env.ps1 -DllPath ".\${ARTIFACTS_DIR}\injector_IIS.dll" -RepoRoot "."
+    - .\injector_IIS\scripts\run-integration-tests.ps1
+
+injector_IIS_integration_test_msi:
+  stage: test
+  tags: ["windows-v2:2022"]
+  extends: .IIS_build_when
+  needs: ["injector_IIS_build"]
+  script:
+    - $msi = (Get-ChildItem ".\${ARTIFACTS_DIR}\*.msi" | Select-Object -First 1).FullName
+    - if (-not $msi) { throw "No MSI found in ${ARTIFACTS_DIR} -- did the build job succeed?" }
+    - .\injector_IIS\scripts\setup-integration-test-env.ps1 -MsiPath "$msi" -RepoRoot "."
+    - .\injector_IIS\scripts\run-integration-tests.ps1
+
 .injector_IIS_e2e_test_template:
   stage: test
   tags: ["arch:amd64"]

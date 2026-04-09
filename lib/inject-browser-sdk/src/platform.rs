@@ -32,8 +32,8 @@ mod inner {
             };
 
             let file_size = fstat(&fd).map_err(ConfigReadError::Io).and_then(|s| {
-                usize::try_from(s.st_size)
-                    .map_err(|_| ConfigReadError::Io(rustix::io::Errno::INVAL))
+                return usize::try_from(s.st_size)
+                    .map_err(|_| return ConfigReadError::Io(rustix::io::Errno::INVAL));
             })?;
 
             if file_size > MAX_CONFIG_FILE_SIZE {
@@ -51,7 +51,7 @@ mod inner {
                 }
             }
             buf.truncate(total);
-            Ok(buf)
+            return Ok(buf);
         }
     }
 
@@ -61,11 +61,11 @@ mod inner {
     /// back to `language`-only until an injection-safe channel is available.
     /// TODO(INPLAT-1110): supply args/envp via an injection-safe mechanism.
     pub fn detect_process_info(language: &str) -> ProcessInfo {
-        ProcessInfo {
+        return ProcessInfo {
             args: Vec::new(),
             envp: Vec::new(),
             language: language.as_bytes().to_vec(),
-        }
+        };
     }
 
     pub fn write_stderr(msg: &str) {
@@ -126,7 +126,7 @@ pub fn read_stable_configs(
     language: &str,
     debug_logs: bool,
 ) -> Result<(Vec<LibraryConfig>, Vec<String>), String> {
-    read_stable_configs_with_reader(&PlatformConfigRead, language, debug_logs)
+    return read_stable_configs_with_reader(&PlatformConfigRead, language, debug_logs);
 }
 
 /// Variant of [`read_stable_configs`] that accepts a caller-supplied reader.
@@ -157,15 +157,15 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
     }
 
     match data {
-        Ok(configs) => Ok((configs, logs)),
+        Ok(configs) => return Ok((configs, logs)),
         Err(err) => {
             // Fold captured diagnostics into the error string so callers that
             // never see stderr (notably Windows, where write_stderr is a
             // no-op) still get the full context.
             if logs.is_empty() {
-                Err(format!("{err}"))
+                return Err(format!("{err}"));
             } else {
-                Err(format!("{err}\n{}", logs.join("\n")))
+                return Err(format!("{err}\n{}", logs.join("\n")));
             }
         }
     }
@@ -182,7 +182,7 @@ pub(crate) mod tests {
         type IoError = core::convert::Infallible;
 
         fn read(&self, _path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
-            Err(ConfigReadError::NotFound)
+            return Err(ConfigReadError::NotFound);
         }
     }
 
@@ -195,7 +195,7 @@ pub(crate) mod tests {
             // Syntactically broken YAML — forces the configurator into an
             // error path so we can check that the caller-visible error is
             // non-empty.
-            Ok(b"::: not : yaml :::".to_vec())
+            return Ok(b"::: not : yaml :::".to_vec());
         }
     }
 
@@ -211,7 +211,7 @@ pub(crate) mod tests {
 
         fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
             if path == Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
-                Ok(br#"
+                return Ok(br#"
 rules:
 - selectors:
   - origin: language
@@ -222,9 +222,9 @@ rules:
     DD_RUM_CLIENT_TOKEN: tok-populated
     DD_RUM_SITE: datadoghq.com
 "#
-                .to_vec())
+                .to_vec());
             } else {
-                Err(ConfigReadError::NotFound)
+                return Err(ConfigReadError::NotFound);
             }
         }
     }
@@ -253,10 +253,10 @@ rules:
             read_stable_configs_with_reader(&PopulatedReader, "browser-sdk", false)
                 .expect("populated reader must succeed");
         let lookup = |key: &str| {
-            configs
+            return configs
                 .iter()
-                .find(|c| c.name == key)
-                .map(|c| c.value.as_str())
+                .find(|c| return c.name == key)
+                .map(|c| return c.value.as_str());
         };
         assert_eq!(lookup("DD_RUM_APPLICATION_ID"), Some("app-populated"));
         assert_eq!(lookup("DD_RUM_CLIENT_TOKEN"), Some("tok-populated"));
@@ -273,7 +273,7 @@ rules:
 
         fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
             if path == Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
-                Ok(br#"
+                return Ok(br#"
 rules:
 - selectors:
   - origin: language
@@ -284,9 +284,9 @@ rules:
     DD_RUM_CLIENT_TOKEN: tok-local
     DD_RUM_SITE: datadoghq.com
 "#
-                .to_vec())
+                .to_vec());
             } else if path == Configurator::FLEET_STABLE_CONFIGURATION_PATH {
-                Ok(br#"
+                return Ok(br#"
 rules:
 - selectors:
   - origin: language
@@ -297,9 +297,9 @@ rules:
     DD_RUM_CLIENT_TOKEN: tok-fleet
     DD_RUM_SITE: datadoghq.eu
 "#
-                .to_vec())
+                .to_vec());
             } else {
-                Err(ConfigReadError::NotFound)
+                return Err(ConfigReadError::NotFound);
             }
         }
     }
@@ -312,10 +312,10 @@ rules:
             read_stable_configs_with_reader(&BothSourcesReader, "browser-sdk", false)
                 .expect("both-sources reader must succeed");
         let lookup = |key: &str| {
-            configs
+            return configs
                 .iter()
-                .find(|c| c.name == key)
-                .map(|c| c.value.as_str())
+                .find(|c| return c.name == key)
+                .map(|c| return c.value.as_str());
         };
         assert_eq!(lookup("DD_RUM_SITE"), Some("datadoghq.eu"));
         assert_eq!(lookup("DD_RUM_APPLICATION_ID"), Some("app-fleet"));
@@ -350,7 +350,7 @@ rules:
                 std::process::id(),
                 name
             ));
-            p
+            return p;
         }
 
         #[test]

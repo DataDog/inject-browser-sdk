@@ -64,10 +64,10 @@ pub unsafe extern "C" fn injector_create(snippet: *const Snippet) -> *mut Inject
         Err(_) => return core::ptr::null_mut(),
     };
 
-    Box::into_raw(Box::new(Injector {
+    return Box::into_raw(Box::new(Injector {
         inner: injector::Injector::new(snippet_content),
-        slices_memory_storage: core::array::from_fn(|_| BytesSlice::empty()),
-    }))
+        slices_memory_storage: core::array::from_fn(|_| return BytesSlice::empty()),
+    }));
 }
 
 /// Free the [`Injector`] associated memory.
@@ -121,10 +121,10 @@ pub unsafe extern "C" fn injector_write(
     } else {
         slice::from_raw_parts(chunk, length as usize)
     };
-    InjectorResult::new(
+    return InjectorResult::new(
         ffi_injector.inner.write(chunk),
         &mut ffi_injector.slices_memory_storage,
-    )
+    );
 }
 
 /// Notify the [`Injector`] that the full HTML document has been written.
@@ -155,10 +155,10 @@ pub unsafe extern "C" fn injector_end(ffi_injector: *mut Injector) -> InjectorRe
         return InjectorResult::empty();
     }
     let ffi_injector = &mut *ffi_injector;
-    InjectorResult::new(
+    return InjectorResult::new(
         ffi_injector.inner.end(),
         &mut ffi_injector.slices_memory_storage,
-    )
+    );
 }
 
 /// The result of a call to [`injector_write`] or [`injector_end`]. It represents a list of binary
@@ -176,10 +176,10 @@ pub unsafe extern "C" fn injector_end(ffi_injector: *mut Injector) -> InjectorRe
 /// contain pointers to:
 ///
 /// * portions of the chunk provided to [`injector_write`]. This chunk is owned by the library
-/// consumer and should be freed once it is not used anymore.
+///   consumer and should be freed once it is not used anymore.
 ///
 /// * internal buffers owned by the [`Injector`] instance. Those buffers will be cleared by
-/// [`injector_cleanup`].
+///   [`injector_cleanup`].
 #[repr(C)]
 pub struct InjectorResult {
     /// Number of returned slices (any number from 0 to 4).
@@ -194,22 +194,22 @@ pub struct InjectorResult {
 
 impl InjectorResult {
     fn new(result: injector::Result<'static>, slices_memory_storage: &mut [BytesSlice; 4]) -> Self {
-        *slices_memory_storage = core::array::from_fn(|index| result.slices[index].into());
-        Self {
+        *slices_memory_storage = core::array::from_fn(|index| return result.slices[index].into());
+        return Self {
             slices_length: result.length as u32,
             slices: slices_memory_storage as *const _,
             injected: result.injected,
-        }
+        };
     }
 
     /// Defensive default returned when a NULL injector is passed to
     /// [`injector_write`] or [`injector_end`]. No slices, nothing injected.
     fn empty() -> Self {
-        Self {
+        return Self {
             slices_length: 0,
             slices: null(),
             injected: false,
-        }
+        };
     }
 }
 
@@ -254,21 +254,21 @@ pub struct BytesSlice {
 
 impl BytesSlice {
     fn empty() -> Self {
-        Self {
+        return Self {
             start: null(),
             length: 0,
             from_incoming_chunk: false,
-        }
+        };
     }
 }
 
 impl<'a> From<injector::BytesSlice<'a>> for BytesSlice {
     fn from(slice: injector::BytesSlice<'a>) -> Self {
-        Self {
+        return Self {
             start: slice.bytes as *const _ as *const u8,
             length: slice.bytes.len() as u32,
             from_incoming_chunk: slice.from_incoming_chunk,
-        }
+        };
     }
 }
 

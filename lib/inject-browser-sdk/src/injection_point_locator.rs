@@ -45,7 +45,7 @@ pub struct InjectionPointLocator {
 
 impl InjectionPointLocator {
     pub fn new() -> Self {
-        Self { index: 0 }
+        return Self { index: 0 };
     }
 
     pub fn scan(&mut self, chunk: &[u8]) -> Location {
@@ -95,7 +95,7 @@ impl InjectionPointLocator {
             }
         }
 
-        location
+        return location;
     }
 }
 

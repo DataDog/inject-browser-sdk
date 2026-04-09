@@ -190,7 +190,7 @@ pub(crate) fn parse_site(site: &str) -> Option<ParsedSite<'_>> {
             }
         }
     }
-    None
+    return None;
 }
 
 /// Validates that a datacenter prefix matches `[a-z]{2,}[0-9]{1,2}`.
@@ -208,7 +208,7 @@ fn is_valid_datacenter_prefix(s: &str) -> bool {
         i += 1;
     }
     let digits = i - letters_end;
-    (1..=2).contains(&digits) && i == b.len()
+    return (1..=2).contains(&digits) && i == b.len();
 }
 
 const MAJOR_VERSIONS: [u32; 2] = [5, 6];
@@ -220,13 +220,13 @@ const MAJOR_VERSIONS: [u32; 2] = [5, 6];
 /// inside `rum` flow into [`RumConfiguration::other`] for forward-compat
 /// with future Browser SDK init options.
 pub fn parse_configuration(json: &[u8]) -> Result<Configuration, Error> {
-    serde_json::from_slice(json).map_err(|e| Error::Json(format!("{e}")))
+    return serde_json::from_slice(json).map_err(|e| return Error::Json(format!("{e}")));
 }
 
 /// Parse a [`ConfigurationOverlay`] from JSON. See [`parse_configuration`]
 /// for the unknown-field semantics.
 pub fn parse_configuration_overlay(json: &[u8]) -> Result<ConfigurationOverlay, Error> {
-    serde_json::from_slice(json).map_err(|e| Error::Json(format!("{e}")))
+    return serde_json::from_slice(json).map_err(|e| return Error::Json(format!("{e}")));
 }
 
 type Setter = fn(&mut Configuration, &str) -> Result<(), Error>;
@@ -234,59 +234,59 @@ type Setter = fn(&mut Configuration, &str) -> Result<(), Error>;
 const DD_FIELDS: &[(&str, Setter)] = &[
     ("DD_RUM_APPLICATION_ID", |c, r| {
         c.rum.application_id = Some(r.into());
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_CLIENT_TOKEN", |c, r| {
         c.rum.client_token = Some(r.into());
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_SITE", |c, r| {
         c.rum.site = Some(r.into());
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_SERVICE", |c, r| {
         c.rum.service = Some(r.into());
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_ENVIRONMENT", |c, r| {
         c.rum.env = Some(r.into());
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_VERSION", |c, r| {
         c.rum.version = Some(r.into());
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_TRACK_USER_INTERACTIONS", |c, r| {
         c.rum.track_user_interactions = Some(parse_bool(r, "DD_RUM_TRACK_USER_INTERACTIONS")?);
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_TRACK_RESOURCES", |c, r| {
         c.rum.track_resources = Some(parse_bool(r, "DD_RUM_TRACK_RESOURCES")?);
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_TRACK_LONG_TASKS", |c, r| {
         c.rum.track_long_tasks = Some(parse_bool(r, "DD_RUM_TRACK_LONG_TASKS")?);
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_DEFAULT_PRIVACY_LEVEL", |c, r| {
         c.rum.default_privacy_level = Some(r.into());
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_SESSION_SAMPLE_RATE", |c, r| {
         c.rum.session_sample_rate = Some(parse_f64(r, "DD_RUM_SESSION_SAMPLE_RATE")?);
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_SESSION_REPLAY_SAMPLE_RATE", |c, r| {
         c.rum.session_replay_sample_rate = Some(parse_f64(r, "DD_RUM_SESSION_REPLAY_SAMPLE_RATE")?);
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_MAJOR_VERSION", |c, r| {
         c.major_version = parse_u32(r, "DD_RUM_MAJOR_VERSION")?;
-        Ok(())
+        return Ok(());
     }),
     ("DD_RUM_REMOTE_CONFIGURATION_ID", |c, r| {
         c.rum.remote_configuration_id = Some(r.into());
-        Ok(())
+        return Ok(());
     }),
 ];
 
@@ -306,7 +306,7 @@ impl Configuration {
                 setter(&mut cfg, raw)?;
             }
         }
-        Ok(cfg)
+        return Ok(cfg);
     }
 
     /// Overlay another [`Configuration`] on top of this one.
@@ -345,7 +345,7 @@ impl Configuration {
             "session replay sample rate",
             self.rum.session_replay_sample_rate,
         )?;
-        Ok(())
+        return Ok(());
     }
 }
 
@@ -355,34 +355,37 @@ fn validate_rate(label: &str, value: Option<f64>) -> Result<(), Error> {
             return Err(Error::OutOfRangeRate(String::from(label), rate));
         }
     }
-    Ok(())
+    return Ok(());
 }
 
 pub(crate) fn parse_bool(raw: &str, key: &str) -> Result<bool, Error> {
     match raw.to_ascii_lowercase().as_str() {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(Error::StableConfig(format!(
-            "Invalid boolean value '{raw}' for key '{key}'"
-        ))),
+        "true" => return Ok(true),
+        "false" => return Ok(false),
+        _ => {
+            return Err(Error::StableConfig(format!(
+                "Invalid boolean value '{raw}' for key '{key}'"
+            )))
+        }
     }
 }
 
 pub(crate) fn parse_u32(raw: &str, key: &str) -> Result<u32, Error> {
-    raw.parse()
-        .map_err(|_| Error::StableConfig(format!("Invalid u32 value '{raw}' for key '{key}'")))
+    return raw.parse().map_err(|_| {
+        return Error::StableConfig(format!("Invalid u32 value '{raw}' for key '{key}'"));
+    });
 }
 
 pub(crate) fn parse_f64(raw: &str, key: &str) -> Result<f64, Error> {
-    let val: f64 = raw
-        .parse()
-        .map_err(|_| Error::StableConfig(format!("Invalid float value '{raw}' for key '{key}'")))?;
+    let val: f64 = raw.parse().map_err(|_| {
+        return Error::StableConfig(format!("Invalid float value '{raw}' for key '{key}'"));
+    })?;
     if !val.is_finite() {
         return Err(Error::StableConfig(format!(
             "Invalid float value '{raw}' for key '{key}'"
         )));
     }
-    Ok(val)
+    return Ok(val);
 }
 
 #[cfg(test)]
@@ -394,7 +397,7 @@ mod test {
     use pretty_assertions::assert_eq;
 
     fn lookup_from_map<'a>(map: &'a BTreeMap<String, String>) -> impl Fn(&str) -> Option<&'a str> {
-        |key| map.get(key).map(|v| v.as_str())
+        return |key| return map.get(key).map(|v| return v.as_str());
     }
 
     #[test]

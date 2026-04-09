@@ -1,4 +1,6 @@
 include:
+  - local: .gitlab/devcontainer.yml
+  - local: .gitlab/images.yml
   - local: .gitlab/iis.yml
   - local: .gitlab/java.yml
   - local: .gitlab/installer.yml

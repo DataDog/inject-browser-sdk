@@ -20,4 +20,4 @@ cd installer/configurator && CGO_ENABLED=0 go build
 ## Docker
 - `docker-bake.hcl` - Buildx bake config
 - `Dockerfile` - Builder image (musl + Windows cross-compile)
-- Registry: `public.ecr.aws/b1o7r7e0/inject-browser-sdk`
+- Registry: `ghcr.io/datadog/inject-browser-sdk`

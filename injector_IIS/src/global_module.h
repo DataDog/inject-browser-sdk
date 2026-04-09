@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "config_reader.h"
 #include "framework.h"
 #include "logger.h"
 #include "module_context.h"
@@ -20,12 +21,12 @@ namespace datadog::rum {
 
 class GlobalModule final : public CGlobalModule {
   HTTP_MODULE_ID module_id_;
-  IHttpServer *server_;
+  IHttpServer* server_;
   std::shared_ptr<Logger> logger_;
-  std::map<std::wstring, ModuleContext *> configurations_;
+  std::map<std::wstring, ModuleContext*> configurations_;
 
-public:
-  GlobalModule(IHttpServer *server, DWORD server_version,
+ public:
+  GlobalModule(IHttpServer* server, DWORD server_version,
                std::shared_ptr<Logger> logger);
   ~GlobalModule() = default;
   void Terminate() override;
@@ -34,26 +35,17 @@ public:
       GL_APPLICATION_START | GL_CONFIGURATION_CHANGE | GL_APPLICATION_STOP;
 
   GLOBAL_NOTIFICATION_STATUS
-  OnGlobalApplicationStart(IHttpApplicationStartProvider *provider) override;
+  OnGlobalApplicationStart(IHttpApplicationStartProvider* provider) override;
 
   GLOBAL_NOTIFICATION_STATUS
-  OnGlobalApplicationStop(IHttpApplicationStopProvider *provider) override;
+  OnGlobalApplicationStop(IHttpApplicationStopProvider* provider) override;
 
   GLOBAL_NOTIFICATION_STATUS
   OnGlobalConfigurationChange(
-      IGlobalConfigurationChangeProvider *provider) override;
+      IGlobalConfigurationChangeProvider* provider) override;
 
-private:
+ private:
   void update_server_log_level();
 };
 
-struct RumConfig {
-  int version;
-  std::unordered_map<std::string, std::string> sdk_options;
-};
-
-struct ServerConfig {
-  LogLevel log_level;
-};
-
-} // namespace datadog::rum
+}  // namespace datadog::rum

@@ -18,18 +18,20 @@ namespace datadog::rum {
 // Module identifier retrieve from the module info in register module function.
 extern HTTP_MODULE_ID g_module_id;
 
-// Context stored on the application container
 struct ModuleContext final : public IHttpStoredContext {
-  Snippet *js_snippet = nullptr;
-  Logger *logger = nullptr;
+  Snippet* snippet = nullptr;
+  Logger* logger = nullptr;
+  IHttpServer* server = nullptr;
   std::string application_id_tag;
   std::string remote_config_tag;
 
+  // IIS calls this instead of the destructor (COM-style lifecycle).
   void CleanupStoredContext() override {
-    if (js_snippet != nullptr) {
-      snippet_cleanup(js_snippet);
+    if (snippet != nullptr) {
+      snippet_cleanup(snippet);
     }
+    delete this;
   };
 };
 
-} // namespace datadog::rum
+}  // namespace datadog::rum

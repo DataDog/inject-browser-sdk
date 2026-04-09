@@ -3,6 +3,7 @@
 # Datadog (https://www.datadoghq.com/).
 #
 # Copyright 2024-Present Datadog, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.24)
 
@@ -97,7 +98,7 @@ set(DD_TRACE_STATIC_CRT ON)
 FetchContent_Declare(
   dd-trace-cpp
   GIT_REPOSITORY https://github.com/DataDog/dd-trace-cpp
-  GIT_TAG        290cc2780482318e6c7aa44b70063ad5eb19b361 
+  GIT_TAG        290cc2780482318e6c7aa44b70063ad5eb19b361
   GIT_SHALLOW    OFF
   GIT_PROGRESS   ON
 )
@@ -141,6 +142,7 @@ add_library(iis_injector::obj ALIAS iis_injector-objects)
 
 target_sources(iis_injector-objects
   PRIVATE
+    src/config_reader.cpp
     src/entrypoint.cpp
     src/global_module.cpp
     src/http_module.cpp
@@ -198,14 +200,11 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   )
 endif ()
 
-target_link_libraries(iis_injector-objects 
+target_link_libraries(iis_injector-objects
   PUBLIC
-  inject_browser_sdk_ffi dd_trace::static rapidjson)
-
-target_link_options(iis_injector-objects
-  PRIVATE
-    ws2_32.lib
-)
+  inject_browser_sdk_ffi dd_trace::static rapidjson
+  ws2_32.lib
+  oleaut32.lib)
 
 ## shared lib
 add_library(iis_injector SHARED)

@@ -57,20 +57,21 @@ namespace rum {
 // destructor.  Moving from a `CleanupFuncGuard` disables this behavior, and
 // the type is move-only, so the function-like object will not be invoked more
 // than once.
-template <typename Func> class CleanupFuncGuard {
+template <typename Func>
+class CleanupFuncGuard {
   Func on_destroy_;
-  bool active_; // whether to call `on_destroy_` in the destructor
+  bool active_;  // whether to call `on_destroy_` in the destructor
 
-public:
-  explicit CleanupFuncGuard(Func &&func)
+ public:
+  explicit CleanupFuncGuard(Func&& func)
       : on_destroy_(std::move(func)), active_(true) {}
 
-  CleanupFuncGuard(CleanupFuncGuard &&other)
+  CleanupFuncGuard(CleanupFuncGuard&& other)
       : on_destroy_(std::move(other.on_destroy_)), active_(true) {
     other.active_ = false;
   }
 
-  CleanupFuncGuard(const CleanupFuncGuard &) = delete;
+  CleanupFuncGuard(const CleanupFuncGuard&) = delete;
 
   ~CleanupFuncGuard() {
     if (active_) {
@@ -83,9 +84,10 @@ public:
 // Intended usage:
 //
 //     const auto guard = defer(/* ... lambda expression ... */);
-template <typename Func> CleanupFuncGuard<Func> defer(Func &&func) {
+template <typename Func>
+CleanupFuncGuard<Func> defer(Func&& func) {
   return CleanupFuncGuard<Func>(std::forward<Func>(func));
 }
 
-} // namespace rum
-} // namespace datadog
+}  // namespace rum
+}  // namespace datadog

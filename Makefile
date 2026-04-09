@@ -1,14 +1,40 @@
+include .devcontainer/devcontainer.mk
+include ci/docker/circleci/circleci.mk
+
 CIRCLE_CFG ?= .circleci/continue_config.yml
 COMMIT_SHA ?= $(shell git rev-parse --short HEAD)
-DOCKER_REPO ?= public.ecr.aws/b1o7r7e0/inject-browser-sdk
+DOCKER_REPO ?= ghcr.io/datadog/inject-browser-sdk
+
+CPP_FORMAT_SOURCES := $(shell find injector_IIS/src injector_IIS/test -name '*.cpp' -o -name '*.h' -o -name '*.c')
+CPP_TIDY_SOURCES := $(shell find injector_IIS/src -name '*.cpp')
+BUILD_DIR := build_out
+
+.PHONY: lint-configure
+lint-configure: dev-image
+	$(DEVCONTAINER_RUN) cmake -S injector_IIS --preset=ci-xcomp \
+		-B $(BUILD_DIR) \
+		-DTOOLCHAIN_ROOT=/usr/lib/llvm-20/bin/
+	$(DEVCONTAINER_RUN) cmake --build $(BUILD_DIR) \
+		--target _corrosion_cbindgen_inject_browser_sdk_ffi_bindings_injectbrowsersdk_h
+
+compile_commands.json: $(BUILD_DIR)/compile_commands.json
+	cp $< $@
+
+$(BUILD_DIR)/compile_commands.json:
+	$(MAKE) lint-configure
 
 .PHONY: lint
-lint:
-	./scripts/codestyle.sh lint
+lint: dev-image compile_commands.json
+	$(DEVCONTAINER_RUN) clang-format --dry-run --Werror $(CPP_FORMAT_SOURCES)
+	$(DEVCONTAINER_RUN) clang-tidy -p . --warnings-as-errors='*' $(CPP_TIDY_SOURCES)
 
 .PHONY: format
-format:
-	./scripts/codestyle.sh format
+format: dev-image
+	$(DEVCONTAINER_RUN) clang-format -i $(CPP_FORMAT_SOURCES)
+
+.PHONY: lint-fix
+lint-fix: format compile_commands.json
+	$(DEVCONTAINER_RUN) clang-tidy --fix-errors -p . $(CPP_TIDY_SOURCES)
 
 .PHONY: doc
 doc:
@@ -20,16 +46,6 @@ circleci-config:
 	circleci config pack .circleci/src > $(CIRCLE_CFG)
 	@echo "Validating circleci config"
 	circleci config validate $(CIRCLE_CFG)
-
-.PHONY: push-ci-images
-push-ci-images:
-	docker build --progress=plain --build-arg ARCH=x86_64 --platform linux/amd64 -t $(DOCKER_REPO):builder-$(COMMIT_SHA)-amd64 .
-	docker push $(DOCKER_REPO):builder-$(COMMIT_SHA)-amd64
-	docker build --progress=plain --build-arg ARCH=aarch64 --platform linux/arm64 -t $(DOCKER_REPO):builder-$(COMMIT_SHA)-arm64 .
-	docker push $(DOCKER_REPO):builder-$(COMMIT_SHA)-arm64
-	docker buildx imagetools create -t $(DOCKER_REPO):builder-$(COMMIT_SHA) \
-			$(DOCKER_REPO):builder-$(COMMIT_SHA)-amd64 \
-			$(DOCKER_REPO):builder-$(COMMIT_SHA)-arm64
 
 .PHONY: test-cmake-version
 test-cmake-version:

@@ -25,13 +25,14 @@ struct ModuleContext final : public IHttpStoredContext {
   std::string application_id_tag;
   std::string remote_config_tag;
 
-  // IIS calls this instead of the destructor (COM-style lifecycle).
-  void CleanupStoredContext() override {
+  ~ModuleContext() {
     if (snippet != nullptr) {
       snippet_cleanup(snippet);
     }
-    delete this;
-  };
+  }
+
+  // IIS calls this instead of the destructor (COM-style lifecycle).
+  void CleanupStoredContext() override { delete this; };
 };
 
 }  // namespace datadog::rum

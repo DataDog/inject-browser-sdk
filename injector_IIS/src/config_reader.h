@@ -18,10 +18,20 @@
 
 namespace datadog::rum {
 
-// NOLINTNEXTLINE(bugprone-exception-escape)
 struct RumConfig {
   int version;
   std::unordered_map<std::string, std::string> sdk_options;
+};
+
+enum class ReadConfStatus {
+  Ok,      // Config read successfully.
+  Absent,  // Config missing or disabled — clear existing snippet.
+  Error,   // Transient error — keep existing snippet.
+};
+
+struct ReadConfResult {
+  ReadConfStatus status;
+  std::optional<RumConfig> config;  // Set only when status == Ok.
 };
 
 struct ServerConfig {
@@ -30,12 +40,15 @@ struct ServerConfig {
 
 std::string wstring_to_utf8(const std::wstring& wstr);
 
-std::optional<RumConfig> read_conf(const IHttpServer& server, PCWSTR cfg_path,
-                                   Logger& logger);
+ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path,
+                         Logger& logger);
 
 std::optional<ServerConfig> read_server_conf(const IHttpServer& server,
                                              Logger& logger);
 
+// Reads config for the given path and updates ctx.snippet/tags. When config
+// is missing, invalid, or disabled, clears the existing snippet to disable
+// injection.
 void update_module_context(ModuleContext& ctx, const IHttpServer& server,
                            PCWSTR config_path, Logger& logger);
 

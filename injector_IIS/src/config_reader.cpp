@@ -32,7 +32,8 @@ Snippet* make_snippet(const int version, const std::unordered_map<std::string, s
   for (const auto& [key, value] : opts) {
     if (key == "majorVersion") {
       continue;
-    } else if (key == "sessionSampleRate" || key == "sessionReplaySampleRate") {
+    }
+    if (key == "sessionSampleRate" || key == "sessionReplaySampleRate") {
       try {
         rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
                       rapidjson::Value(std::stod(value)).Move(), allocator);
@@ -42,7 +43,7 @@ Snippet* make_snippet(const int version, const std::unordered_map<std::string, s
       }
     } else if (key == "trackResources" || key == "trackLongTasks" ||
                key == "trackUserInteractions") {
-      auto b = (value == "true" ? true : false);
+      auto b = (value == "true");
       rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(), rapidjson::Value(b).Move(),
                     allocator);
     } else if (key == "allowedTracingUrls") {
@@ -94,7 +95,7 @@ IAppHostProperty* get_property(IAppHostElement& xmlElement, std::wstring_view na
 VARIANT get_property_value(IAppHostProperty& property) {
   VARIANT v;
   VariantInit(&v);
-  HRESULT hr = property.get_Value(&v);
+  HRESULT const hr = property.get_Value(&v);
   if (FAILED(hr)) {
     VariantClear(&v);
   }
@@ -104,27 +105,27 @@ VARIANT get_property_value(IAppHostProperty& property) {
 }  // namespace
 
 std::string wstring_to_utf8(const std::wstring& wstr) {
-  if (wstr.empty()) return std::string();
+  if (wstr.empty()) return {};
   const int size_needed =
       WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.size(), nullptr, 0, nullptr, nullptr);
-  if (size_needed <= 0) return std::string();
+  if (size_needed <= 0) return {};
   std::string result(size_needed, 0);
-  int written = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.size(), result.data(),
-                                    size_needed, nullptr, nullptr);
-  if (written <= 0) return std::string();
+  int const written = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.size(), result.data(),
+                                          size_needed, nullptr, nullptr);
+  if (written <= 0) return {};
   return result;
 }
 
 std::optional<ServerConfig> read_server_conf(const IHttpServer& server, Logger& logger) {
   ServerConfig default_config{LogLevel::Info};
-  auto admin_manager = server.GetAdminManager();
+  auto* admin_manager = server.GetAdminManager();
 
   if (admin_manager == nullptr) {
     logger.debug("Admin manager is null, using default server config");
     return default_config;
   }
 
-  IAppHostElement* cfg_root_elem;
+  IAppHostElement* cfg_root_elem = nullptr;
   auto res = admin_manager->GetAdminSection((BSTR)L"system.applicationHost/datadogRumServer",
                                             (BSTR)L"MACHINE/WEBROOT/APPHOST", &cfg_root_elem);
 
@@ -143,7 +144,8 @@ std::optional<ServerConfig> read_server_conf(const IHttpServer& server, Logger& 
     auto log_level_val = get_property_value(*log_level_prop);
     const auto defer_log_level_val = defer([&] { VariantClear(&log_level_val); });
     if (log_level_val.vt == VT_I4 || log_level_val.vt == VT_I2) {
-      int log_level_int = (log_level_val.vt == VT_I4) ? log_level_val.lVal : log_level_val.iVal;
+      int const log_level_int =
+          (log_level_val.vt == VT_I4) ? log_level_val.lVal : log_level_val.iVal;
       if (log_level_int <= static_cast<int>(LogLevel::Debug) &&
           log_level_int >= static_cast<int>(LogLevel::Error)) {
         log_level = static_cast<LogLevel>(log_level_int);
@@ -160,13 +162,13 @@ std::optional<ServerConfig> read_server_conf(const IHttpServer& server, Logger& 
 }
 
 ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& logger) {
-  auto admin_manager = server.GetAdminManager();
+  auto* admin_manager = server.GetAdminManager();
   if (admin_manager == nullptr) {
     logger.debug("Admin manager is null, cannot read RUM config");
     return {ReadConfStatus::Error, std::nullopt};
   }
 
-  IAppHostElement* cfg_root_elem;
+  IAppHostElement* cfg_root_elem = nullptr;
   auto res = admin_manager->GetAdminSection((BSTR)L"system.webServer/datadogRum",
                                             const_cast<BSTR>(cfg_path), &cfg_root_elem);
   if (res != S_OK) {
@@ -218,7 +220,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   std::unordered_map<std::string, std::string> rum_sdk_opts;
 
   IAppHostElementCollection* col = nullptr;
-  HRESULT hr_col = cfg_root_elem->get_Collection(&col);
+  HRESULT const hr_col = cfg_root_elem->get_Collection(&col);
   if (FAILED(hr_col)) {
     logger.error(std::format("Failed to read SDK options collection: {}",
                              std::system_category().message(hr_col)));
@@ -228,7 +230,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     const auto defer_col = defer([&] { col->Release(); });
 
     DWORD n_elem = 0;
-    HRESULT hr_count = col->get_Count(&n_elem);
+    HRESULT const hr_count = col->get_Count(&n_elem);
     if (FAILED(hr_count)) {
       logger.error(std::format("Failed to read SDK option count: {}",
                                std::system_category().message(hr_count)));
@@ -242,7 +244,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
       item_idx.ulVal = i;
 
       IAppHostElement* option_element = nullptr;
-      HRESULT hr_item = col->get_Item(item_idx, &option_element);
+      HRESULT const hr_item = col->get_Item(item_idx, &option_element);
       if (FAILED(hr_item) || option_element == nullptr) {
         logger.debug(
             std::format("Skipping config option at index {}: "
@@ -253,7 +255,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
 
       const auto option_element_guard = defer([&] { option_element->Release(); });
 
-      auto name_property = get_property(*option_element, L"name");
+      auto* name_property = get_property(*option_element, L"name");
       if (name_property == nullptr) {
         logger.debug(
             std::format("Skipping config option at index {}: "
@@ -273,7 +275,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
       }
       std::string opt_name = wstring_to_utf8(std::wstring(name_val.bstrVal));
 
-      auto value_property = get_property(*option_element, L"value");
+      auto* value_property = get_property(*option_element, L"value");
       if (value_property == nullptr) {
         logger.debug(
             std::format("Skipping config option '{}': "
@@ -332,7 +334,8 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
     ctx.application_id_tag.clear();
     ctx.remote_config_tag.clear();
     return;
-  } else if (snippet->error_code != 0) {
+  }
+  if (snippet->error_code != 0) {
     logger.error(std::format("Failed to create RUM snippet: {}", snippet->error_message));
     snippet_cleanup(snippet);
     if (ctx.snippet != nullptr) {

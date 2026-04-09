@@ -20,13 +20,15 @@ namespace {
 constexpr std::string_view k_injection_header = "x-datadog-rum-injected";
 
 std::string_view get_header(IHttpResponse& http_response, std::string_view header) {
-  USHORT length;
-  PCSTR data = http_response.GetHeader(header.data(), &length);
+  USHORT length = 0;
+  PCSTR data =
+      http_response.GetHeader(header.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
+                              &length);
   if (!data) {
     return "";
   }
 
-  return std::string_view(data, length);
+  return {data, length};
 }
 
 // Returns the per-location context if cached on the metadata container,
@@ -84,7 +86,7 @@ HttpModule::OnBeginRequest(IN IHttpContext* http_context, IN IHttpEventProvider*
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  HRESULT result = http_request->SetHeader("x-datadog-rum-injection-pending", "1", 1, TRUE);
+  HRESULT const result = http_request->SetHeader("x-datadog-rum-injection-pending", "1", 1, TRUE);
   if (result != S_OK) {
     event_provider->SetErrorStatus(result);
     ctx->logger->error("Error setting request header: " + std::system_category().message(result));
@@ -96,7 +98,7 @@ HttpModule::OnBeginRequest(IN IHttpContext* http_context, IN IHttpEventProvider*
 REQUEST_NOTIFICATION_STATUS
 HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvider*) {
   assert(http_context != nullptr);
-  auto http_response = http_context->GetResponse();
+  auto* http_response = http_context->GetResponse();
   if (!http_response) {
     return RQ_NOTIFICATION_CONTINUE;
   }
@@ -126,7 +128,7 @@ HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvid
     if (metadata && app_ctx.server) {
       auto* meta_container = metadata->GetModuleContextContainer();
       if (meta_container) {
-        auto* meta_path = metadata->GetMetaPath();
+        const auto* meta_path = metadata->GetMetaPath();
         if (!meta_path) {
           app_ctx.logger->debug("MetaPath is null, using app-level config");
         } else {
@@ -296,7 +298,9 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
 
       injected = true;
 
-      HRESULT result = pHttpResponse.SetHeader(k_injection_header.data(), "1", 1, TRUE);
+      HRESULT const result = pHttpResponse.SetHeader(
+          k_injection_header.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
+          "1", 1, TRUE);
       if (result != S_OK) {
         logger.error("Error setting injection header: " + std::system_category().message(result));
         return RQ_NOTIFICATION_CONTINUE;
@@ -323,8 +327,8 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
 
   logger.debug("Writing new response");
 
-  DWORD bytesSent;
-  HRESULT result = pHttpResponse.Flush(FALSE, FALSE, &bytesSent);
+  DWORD bytesSent = 0;
+  HRESULT const result = pHttpResponse.Flush(FALSE, FALSE, &bytesSent);
   if (FAILED(result)) {
     logger.error("Error while flushing response: " + std::system_category().message(result));
   }

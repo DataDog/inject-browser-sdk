@@ -29,12 +29,12 @@ GlobalModule::GlobalModule(IHttpServer* server, DWORD server_version,
   cfg.integration_version = std::to_string(server_version);
 
   auto maybe_telemetry_cfg = datadog::telemetry::finalize_config(cfg);
-  if (auto* error = maybe_telemetry_cfg.if_error()) {
+  if (auto error = maybe_telemetry_cfg.if_error()) {
     logger_->error(std::format("Failed to configure the telemetry module: {}",
                                error->message));
   } else {
     const datadog::tracing::Clock& clock = datadog::tracing::default_clock;
-    datadog::tracing::DatadogAgentConfig const agent_cfg_for_telemetry;
+    datadog::tracing::DatadogAgentConfig agent_cfg_for_telemetry;
     auto finalized_agent_cfg_result = datadog::tracing::finalize_config(
         agent_cfg_for_telemetry, logger_, clock);
     if (auto* error = finalized_agent_cfg_result.if_error()) {
@@ -44,7 +44,7 @@ GlobalModule::GlobalModule(IHttpServer* server, DWORD server_version,
 
       return;
     }
-    datadog::tracing::FinalizedDatadogAgentConfig const dac =
+    datadog::tracing::FinalizedDatadogAgentConfig dac =
         *finalized_agent_cfg_result;
 
     if (!dac.http_client) {
@@ -76,17 +76,26 @@ GlobalModule::OnGlobalApplicationStart(
   ctx->logger = logger_.get();
   ctx->server = server_;
 
-  auto* app = provider->GetApplication();
+  auto app = provider->GetApplication();
   assert(app);
 
-  const auto* config_path = app->GetAppConfigPath();
+  auto config_path = app->GetAppConfigPath();
+  if (!config_path) {
+    logger_->error("Application config path is null, cannot initialize RUM");
+    return GL_NOTIFICATION_CONTINUE;
+  }
+  auto app_id = app->GetApplicationId();
   logger_->info(std::format("Parsing configuration \"{}\" for app (id: {})",
                             wstring_to_utf8(config_path),
-                            wstring_to_utf8(app->GetApplicationId())));
+                            wstring_to_utf8(app_id ? app_id : L"(unknown)")));
 
   update_module_context(*ctx, *server_, config_path, *logger_);
-  auto hr = app->GetModuleContextContainer()->SetModuleContext(ctx.get(),
-                                                               g_module_id);
+  auto* app_container = app->GetModuleContextContainer();
+  if (!app_container) {
+    logger_->error("Module context container is null for application");
+    return GL_NOTIFICATION_CONTINUE;
+  }
+  auto hr = app_container->SetModuleContext(ctx.get(), g_module_id);
   if (FAILED(hr)) {
     logger_->error(std::format("Failed to set app module context: {}",
                                std::system_category().message(hr)));
@@ -95,7 +104,7 @@ GlobalModule::OnGlobalApplicationStart(
 
   // NOTE(@dmehala): Keep a reference on the module context for
   // `OnGlobalConfigurationChange` event.
-  configurations_.emplace(config_path, ctx.release());
+  configurations_.insert_or_assign(config_path, ctx.release());
 
   return GL_NOTIFICATION_CONTINUE;
 }
@@ -106,7 +115,7 @@ GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider* provider) {
   if (!app) {
     return GL_NOTIFICATION_CONTINUE;
   }
-  const auto* cfg_path = app->GetAppConfigPath();
+  auto cfg_path = app->GetAppConfigPath();
   if (!cfg_path) {
     return GL_NOTIFICATION_CONTINUE;
   }
@@ -127,7 +136,7 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
   assert(provider != nullptr);
   assert(server_ != nullptr);
 
-  const auto* cfg_path = provider->GetChangePath();
+  auto cfg_path = provider->GetChangePath();
   if (cfg_path == nullptr) {
     return GL_NOTIFICATION_CONTINUE;
   }
@@ -135,7 +144,7 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
   logger_->info(std::format("Dispatching configuration update (\"{}\")",
                             wstring_to_utf8(cfg_path)));
 
-  std::wstring_view const change_path_view(cfg_path);
+  std::wstring_view change_path_view(cfg_path);
   if (change_path_view.find(L"MACHINE/WEBROOT/APPHOST") !=
       std::wstring_view::npos) {
     update_server_log_level();

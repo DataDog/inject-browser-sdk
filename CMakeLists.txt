@@ -20,12 +20,7 @@ endif()
 # ---------------------------------------------------------------------------
 # Expose this library's version to consumers
 # ---------------------------------------------------------------------------
-execute_process(
-  COMMAND cargo pkgid --package inject-browser-sdk --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml"
-  OUTPUT_VARIABLE _INJECT_BROWSER_SDK_CARGO_PKGID
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-string(REGEX REPLACE ".*[#@](.*)" "\\1" INJECT_BROWSER_SDK_VERSION "${_INJECT_BROWSER_SDK_CARGO_PKGID}")
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/InjectBrowserSDKVersion.cmake)
 set(INJECT_BROWSER_SDK_VERSION "${INJECT_BROWSER_SDK_VERSION}" PARENT_SCOPE)
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,88 @@
+---
+variables:
+  DEVCONTAINER_IMAGE_NAME: registry.ddbuild.io/ci/inject-browser-sdk/devcontainer
+  NYDUS_DD_IMAGE: registry.ddbuild.io/images/nydus:v105904890-5e6ee6b-v2.4.0-dd.3
+
+.not_scheduled:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: always
+
+# Single job: check registry, build if missing, nydusify if needed, export DEVCONTAINER_IMAGE.
+devcontainer_image:
+  stage: build
+  extends: .not_scheduled
+  image: $NYDUS_DD_IMAGE
+  tags: ["arch:amd64"]
+  needs: []
+  script:
+    - set -euo pipefail
+    - TAG=$(cat .devcontainer/Dockerfile rust-toolchain.toml | sha256sum | cut -c1-12)
+    - IMAGE="${DEVCONTAINER_IMAGE_NAME}:${TAG}"
+    - echo "DEVCONTAINER_IMAGE=${IMAGE}" > build.env
+    - |
+      if crane manifest "${IMAGE}" >/dev/null 2>&1; then
+        echo "Image ${IMAGE} already exists in registry"
+      else
+        echo "Image ${IMAGE} not found — building"
+        docker buildx build \
+          --build-context "repo=$(pwd)" \
+          --platform linux/amd64,linux/arm64 \
+          --push \
+          -t "${IMAGE}" \
+          .devcontainer/
+      fi
+    - |
+      MANIFEST=$(crane manifest --platform linux/amd64 "${IMAGE}") || {
+        echo "WARNING: Failed to fetch manifest for ${IMAGE} — skipping nydus check"
+        exit 0
+      }
+      if echo "${MANIFEST}" | grep -qF "nydus.blob"; then
+        echo "Image ${IMAGE} already has nydus layers"
+      else
+        echo "Converting ${IMAGE} to nydus"
+        nydus-convert "${IMAGE}" && \
+          crane copy "${IMAGE}-nydus" "${IMAGE}" && \
+          echo "Image ${IMAGE} replaced with nydus-optimized version" || \
+          echo "WARNING: nydus conversion/replacement failed — continuing without nydus layers"
+      fi
+  artifacts:
+    reports:
+      dotenv: build.env
+
+manual_devcontainer_nydusify:
+  stage: build
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: manual
+      allow_failure: true
+  needs:
+    - job: devcontainer_image
+      artifacts: true
+  image: $NYDUS_DD_IMAGE
+  tags: ["arch:amd64"]
+  script:
+    - |
+      set -euo pipefail
+      if [ -z "${DEVCONTAINER_IMAGE}" ]; then
+        echo "ERROR: DEVCONTAINER_IMAGE is not set"
+        exit 1
+      fi
+      echo "Converting ${DEVCONTAINER_IMAGE} to nydus"
+      nydus-convert "${DEVCONTAINER_IMAGE}"
+      echo "Replacing original tag with nydus-optimized image"
+      crane copy "${DEVCONTAINER_IMAGE}-nydus" "${DEVCONTAINER_IMAGE}"
+      echo "Done. ${DEVCONTAINER_IMAGE} now has nydus layers."
+
+lint:
+  stage: test
+  extends: .not_scheduled
+  image: $DEVCONTAINER_IMAGE
+  tags: ["arch:amd64"]
+  needs:
+    - job: devcontainer_image
+      artifacts: true
+  script:
+    - make lint

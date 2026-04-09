@@ -26,6 +26,8 @@ libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "1
 [workspace.lints.clippy]
 implicit_return = "deny"
 needless_return = "allow"
+doc_lazy_continuation = "deny"
+iter_nth_zero = "deny"
 
 [profile.dev]
 panic = "abort"

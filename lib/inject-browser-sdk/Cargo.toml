@@ -20,6 +20,9 @@ libdd-library-config.workspace = true
 [target.'cfg(windows)'.dependencies]
 libdd-library-config = { workspace = true, features = ["std"] }
 
+[lints]
+workspace = true
+
 [dev-dependencies]
 pretty_assertions = { version = "1.4.0", features = ["unstable"] }
 rand = "0.10.0"

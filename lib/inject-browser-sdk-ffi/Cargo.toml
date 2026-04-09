@@ -32,6 +32,9 @@ rustix-dlmalloc = { version = "0.2.2", features = ["global"] }
 dlmalloc = { version = "0.2", features = ["global"] }
 
 
+[lints]
+workspace = true
+
 [dev-dependencies]
 pretty_assertions = { version = "1.4.0", features = ["unstable"] }
 rand = "0.10.0"

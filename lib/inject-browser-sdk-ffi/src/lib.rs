@@ -117,6 +117,10 @@ mod no_std_support {
 
 mod injector;
 mod snippet;
+#[cfg(feature = "std")]
+mod stable_config;
 
 pub use injector::*;
 pub use snippet::*;
+#[cfg(feature = "std")]
+pub use stable_config::*;

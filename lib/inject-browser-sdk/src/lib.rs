@@ -12,12 +12,10 @@ extern crate std;
 // Copyright 2024-Present Datadog, Inc.
 
 mod configuration;
-mod env_configuration;
 pub mod error;
 mod injection_point_locator;
 pub mod injector;
 mod snippet;
 
 pub use configuration::*;
-pub use env_configuration::*;
 pub use snippet::*;

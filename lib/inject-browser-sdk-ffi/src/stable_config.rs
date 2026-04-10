@@ -320,7 +320,8 @@ impl StableConfigEntriesInternal {
     }
 
     fn new_err(msg: &str) -> *mut StableConfigEntries {
-        let cstring = CString::new(msg).unwrap_or_else(|_| CString::default());
+        let cstring = CString::new(msg)
+            .unwrap_or_else(|_| CString::new("error message unavailable").unwrap());
         let mut internal = Box::new(Self {
             entries_ptr: null(),
             count: 0,

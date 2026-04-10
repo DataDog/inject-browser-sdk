@@ -78,8 +78,8 @@ impl SnippetInternal {
                 inner: Ok(content),
             },
             Err(error) => {
-                let error_message =
-                    CString::new(error.to_string()).unwrap_or_else(|_| CString::default());
+                let error_message = CString::new(error.to_string())
+                    .unwrap_or_else(|_| CString::new("error message unavailable").unwrap());
                 Self {
                     error_message: error_message.as_ptr(),
                     error_code: error.code(),

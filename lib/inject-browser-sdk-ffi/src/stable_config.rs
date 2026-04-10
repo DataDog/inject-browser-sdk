@@ -19,69 +19,98 @@ use crate::snippet::{Snippet, SnippetInternal};
 
 use alloc::collections::BTreeMap;
 
-/// [`ConfigRead`] implementation using `rustix` for no_std file I/O.
-struct RustixConfigRead;
+// --- Platform-specific ConfigRead and ProcessInfo ---
 
-impl ConfigRead for RustixConfigRead {
-    type IoError = rustix::io::Errno;
+#[cfg(not(windows))]
+mod platform {
+    use super::*;
 
-    fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<rustix::io::Errno>> {
-        use rustix::fs::{fstat, open, Mode, OFlags};
-        use rustix::io::read;
+    /// [`ConfigRead`] implementation using `rustix` for no_std file I/O.
+    pub struct PlatformConfigRead;
 
-        let fd = match open(path, OFlags::RDONLY, Mode::empty()) {
-            Ok(fd) => fd,
-            Err(rustix::io::Errno::NOENT) => return Err(ConfigReadError::NotFound),
-            Err(e) => return Err(ConfigReadError::Io(e)),
-        };
+    impl ConfigRead for PlatformConfigRead {
+        type IoError = rustix::io::Errno;
 
-        let file_size = fstat(&fd)
-            .map(|s| s.st_size as usize)
-            .map_err(ConfigReadError::Io)?;
+        fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<rustix::io::Errno>> {
+            use rustix::fs::{fstat, open, Mode, OFlags};
+            use rustix::io::read;
 
-        if file_size > MAX_CONFIG_FILE_SIZE {
-            return Err(ConfigReadError::TooLarge);
-        }
-
-        let mut buf = vec![0u8; file_size];
-        let mut total = 0;
-        while total < file_size {
-            match read(&fd, &mut buf[total..]) {
-                Ok(0) => break,
-                Ok(n) => total += n,
-                Err(rustix::io::Errno::INTR) => continue,
+            let fd = match open(path, OFlags::RDONLY, Mode::empty()) {
+                Ok(fd) => fd,
+                Err(rustix::io::Errno::NOENT) => return Err(ConfigReadError::NotFound),
                 Err(e) => return Err(ConfigReadError::Io(e)),
+            };
+
+            let file_size = fstat(&fd)
+                .map(|s| s.st_size as usize)
+                .map_err(ConfigReadError::Io)?;
+
+            if file_size > MAX_CONFIG_FILE_SIZE {
+                return Err(ConfigReadError::TooLarge);
             }
+
+            let mut buf = vec![0u8; file_size];
+            let mut total = 0;
+            while total < file_size {
+                match read(&fd, &mut buf[total..]) {
+                    Ok(0) => break,
+                    Ok(n) => total += n,
+                    Err(rustix::io::Errno::INTR) => continue,
+                    Err(e) => return Err(ConfigReadError::Io(e)),
+                }
+            }
+            buf.truncate(total);
+            Ok(buf)
         }
-        buf.truncate(total);
-        Ok(buf)
+    }
+
+    /// Build a [`ProcessInfo`] by reading `/proc/self/environ` and `/proc/self/cmdline`.
+    pub fn detect_process_info(language: &str) -> ProcessInfo {
+        let envp = read_nul_separated("/proc/self/environ").unwrap_or_default();
+        let args = read_nul_separated("/proc/self/cmdline").unwrap_or_default();
+        ProcessInfo {
+            args,
+            envp,
+            language: language.as_bytes().to_vec(),
+        }
+    }
+
+    fn read_nul_separated(path: &str) -> Option<Vec<Vec<u8>>> {
+        let reader = PlatformConfigRead;
+        let bytes = reader.read(path).ok()?;
+        Some(
+            bytes
+                .split(|&b| b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_vec())
+                .collect(),
+        )
+    }
+
+    pub fn write_stderr(msg: &str) {
+        let _ = rustix::io::write(unsafe { rustix::stdio::stderr() }, msg.as_bytes());
     }
 }
 
-/// Build a [`ProcessInfo`] by reading `/proc/self/environ` and `/proc/self/cmdline`
-/// via rustix, avoiding any `std` dependency.
-fn detect_process_info(language: &str) -> ProcessInfo {
-    let envp = read_nul_separated("/proc/self/environ").unwrap_or_default();
-    let args = read_nul_separated("/proc/self/cmdline").unwrap_or_default();
-    ProcessInfo {
-        args,
-        envp,
-        language: language.as_bytes().to_vec(),
+#[cfg(windows)]
+mod platform {
+    use super::*;
+
+    /// On Windows, use the std-based [`StdConfigRead`] (see issue #73 for no_std windows-sys reader).
+    pub use libdd_library_config::StdConfigRead as PlatformConfigRead;
+
+    /// Build a [`ProcessInfo`] using std on Windows.
+    pub fn detect_process_info(language: &str) -> ProcessInfo {
+        ProcessInfo::detect_global(String::from(language))
+    }
+
+    pub fn write_stderr(_msg: &str) {
+        // On Windows with std, eprintln would work but we're in no_std context for the crate.
+        // Debug logs are best-effort; skip on Windows for now.
     }
 }
 
-/// Read a NUL-separated file (like `/proc/self/environ`) into a `Vec<Vec<u8>>`.
-fn read_nul_separated(path: &str) -> Option<Vec<Vec<u8>>> {
-    let reader = RustixConfigRead;
-    let bytes = reader.read(path).ok()?;
-    Some(
-        bytes
-            .split(|&b| b == 0)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_vec())
-            .collect(),
-    )
-}
+use platform::{detect_process_info, write_stderr, PlatformConfigRead};
 
 /// Validate a `*const c_char`: checks for null, reads the C string, and validates UTF-8.
 /// Returns the string slice on success, or `Error::StableConfig` on failure.
@@ -120,7 +149,7 @@ unsafe fn read_stable_configs(
     let fleet_path = Configurator::FLEET_STABLE_CONFIGURATION_PATH;
 
     let logged_result = configurator.get_config_from_reader(
-        &RustixConfigRead,
+        &PlatformConfigRead,
         local_path,
         fleet_path,
         &process_info,
@@ -128,10 +157,7 @@ unsafe fn read_stable_configs(
 
     if debug_logs {
         for msg in logged_result.logs() {
-            let _ = rustix::io::write(
-                rustix::stdio::stderr(),
-                format!("[inject-browser-sdk] {}\n", msg).as_bytes(),
-            );
+            write_stderr(&format!("[inject-browser-sdk] {}\n", msg));
         }
     }
 
@@ -462,7 +488,12 @@ apm_configuration_default:
         let process_info = detect_process_info("browser-sdk");
         let configurator = Configurator::new(false);
         let raw_configs = configurator
-            .get_config_from_reader(&RustixConfigRead, local_path, "/nonexistent", &process_info)
+            .get_config_from_reader(
+                &PlatformConfigRead,
+                local_path,
+                "/nonexistent",
+                &process_info,
+            )
             .data()
             .unwrap();
 

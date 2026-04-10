@@ -24,6 +24,10 @@ rustix = { version = "1.0", default-features = false, features = ["mm", "stdio",
 # From branch: pawel/no-std-library-config
 libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", default-features = false }
 
+# On Windows: enable std for libdd-library-config (no_std windows-sys reader is TODO, see #73)
+[target.'cfg(windows)'.dependencies]
+libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", features = ["std"] }
+
 # on linux use rustix-dlmalloc
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix-dlmalloc = { version = "0.2.2", features = ["global"] }

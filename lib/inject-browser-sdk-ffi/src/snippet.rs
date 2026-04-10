@@ -6,7 +6,6 @@
 // Copyright 2024-Present Datadog, Inc.
 
 use alloc::{
-    borrow::ToOwned,
     boxed::Box,
     ffi::CString,
     format,
@@ -79,8 +78,8 @@ impl SnippetInternal {
                 inner: Ok(content),
             },
             Err(error) => {
-                let error_message = CString::new(error.to_string())
-                    .unwrap_or_else(|_| c"error message unavailable".to_owned());
+                let error_message =
+                    CString::new(error.to_string()).unwrap_or_else(|_| CString::default());
                 Self {
                     error_message: error_message.as_ptr(),
                     error_code: error.code(),

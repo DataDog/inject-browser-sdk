@@ -4,7 +4,7 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-use alloc::{borrow::ToOwned, boxed::Box, ffi::CString, format, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, ffi::CString, format, string::String, vec, vec::Vec};
 use core::{
     ffi::{c_char, CStr},
     ptr::null,
@@ -256,7 +256,7 @@ pub unsafe extern "C" fn snippet_create_from_entries(
             Ok(s) => s,
             Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
         };
-        config_map.insert(name.to_owned(), value.to_owned());
+        config_map.insert(String::from(name), String::from(value));
     }
 
     let result =
@@ -320,8 +320,7 @@ impl StableConfigEntriesInternal {
     }
 
     fn new_err(msg: &str) -> *mut StableConfigEntries {
-        let cstring = CString::new(msg)
-            .unwrap_or_else(|_| c"stable config error: message unavailable".to_owned());
+        let cstring = CString::new(msg).unwrap_or_else(|_| CString::default());
         let mut internal = Box::new(Self {
             entries_ptr: null(),
             count: 0,

@@ -27,21 +27,21 @@ pub struct Injector<'snippet> {
     ///
     /// Example: imagine we write the following chunks: `foo</he`, `ad>bar`.
     /// * When writing the first chunk, the injector will return `foo`, but buffer `</he`, as the
-    ///   snippet might be injected after `foo`.
+    /// snippet might be injected after `foo`.
     /// * When writing the second chunk, the injector will realize that `</he` was indeed the
-    ///   beginning of the `</head>` tag, so it will emit the snippet, then the buffered data `</he`,
-    ///   then the chunk `ad>bar`.
+    /// beginning of the `</head>` tag, so it will emit the snippet, then the buffered data `</he`,
+    /// then the chunk `ad>bar`.
     ///
     /// Second example: imagine we write the following chunks: `foo</he`, `ader>bar`.
     /// * Same as before, the injector will return `foo` and buffer `</he`
     /// * When writing the second chunk, the injector will realize that `</he` was not the start of
-    ///   a `</head>` tag, so it will emit the buffered data `</he`, then the chunk `ader>bar`.
+    /// a `</head>` tag, so it will emit the buffered data `</he`, then the chunk `ader>bar`.
     ///
     /// Third example: imagine we write the following chunks: `foo</he`, `ader>bar</`
     /// * Same as before, the injector will return `foo` and buffer `</he`
     /// * When writing the second chunk, the injector will realize that `</he` was not the start of
-    ///   a `</head>` tag, so it will emit it, then emit `ader>bar`. But it will need to put `</` in
-    ///   a second buffer, as it cannot tell yet if it is a valid injection point.
+    /// a `</head>` tag, so it will emit it, then emit `ader>bar`. But it will need to put `</` in
+    /// a second buffer, as it cannot tell yet if it is a valid injection point.
     incomplete_data: Vec<u8>,
     incomplete_data_public_ref: Vec<u8>,
 
@@ -71,35 +71,39 @@ impl<'snippet> Injector<'snippet> {
         match self.locator.scan(chunk) {
             Location::None => {
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                self.create_result(&[&self.incomplete_data_public_ref, chunk])
+                return self.create_result(&[&self.incomplete_data_public_ref, chunk]);
             }
 
             Location::PotentialFromPreviousChunk => {
                 self.incomplete_data.extend_from_slice(chunk);
-                self.create_result(&[])
+                return self.create_result(&[]);
             }
 
             Location::PotentialFromIndex(index) => {
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
                 self.incomplete_data.extend_from_slice(&chunk[index..]);
-                self.create_result(&[&self.incomplete_data_public_ref, &chunk[..index]])
+                return self.create_result(&[&self.incomplete_data_public_ref, &chunk[..index]]);
             }
 
             Location::MatchFromPreviousChunk => {
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
                 self.injected = true;
-                self.create_result(&[self.snippet, &self.incomplete_data_public_ref, chunk])
+                return self.create_result(&[
+                    self.snippet,
+                    &self.incomplete_data_public_ref,
+                    chunk,
+                ]);
             }
 
             Location::MatchFromIndex(index) => {
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
                 self.injected = true;
-                self.create_result(&[
+                return self.create_result(&[
                     &self.incomplete_data_public_ref,
                     &chunk[..index],
                     self.snippet,
                     &chunk[index..],
-                ])
+                ]);
             }
         }
     }
@@ -107,10 +111,10 @@ impl<'snippet> Injector<'snippet> {
     pub fn end(&mut self) -> Result<'_> {
         self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
         if self.injected {
-            self.create_result(&[&self.incomplete_data_public_ref])
+            return self.create_result(&[&self.incomplete_data_public_ref]);
         } else {
             self.padding_spaces = vec![b' '; self.snippet.len()];
-            self.create_result(&[&self.incomplete_data_public_ref, &self.padding_spaces])
+            return self.create_result(&[&self.incomplete_data_public_ref, &self.padding_spaces]);
         }
     }
 

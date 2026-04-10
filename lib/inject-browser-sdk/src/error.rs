@@ -14,6 +14,8 @@ pub enum Error {
     UnsupportedSite(String),
     OutOfRangeRate(String, f32),
     EmptyMandatoryConf(String),
+    InvalidValue(String, String),
+    StableConfig(String),
 }
 
 impl Error {
@@ -24,6 +26,8 @@ impl Error {
             Error::UnsupportedSite(_) => 3,
             Error::OutOfRangeRate(_, _) => 4,
             Error::EmptyMandatoryConf(_) => 5,
+            Error::InvalidValue(_, _) => 6,
+            Error::StableConfig(_) => 7,
         }
     }
 }
@@ -44,6 +48,13 @@ impl fmt::Display for Error {
             Error::EmptyMandatoryConf(key) => {
                 write!(f, "Validation error: Mandatory field '{key}' is empty.")
             }
+            Error::InvalidValue(key, value) => {
+                write!(
+                    f,
+                    "Validation error: Invalid value '{value}' for key '{key}'."
+                )
+            }
+            Error::StableConfig(cause) => write!(f, "Stable config error: {cause}"),
         }
     }
 }

@@ -8,7 +8,7 @@ use inject_browser_sdk::{
 
 fn main() {
     let Some(input_file_path) = env::args().nth(1) else {
-        println!("Usage: {} <input_file>", env::args().nth(0).unwrap());
+        println!("Usage: {} <input_file>", env::args().next().unwrap());
         process::exit(1);
     };
 

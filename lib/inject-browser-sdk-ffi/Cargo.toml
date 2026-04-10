@@ -14,13 +14,15 @@ crate-type = ["staticlib", "cdylib", "lib"]
 # for now to make the `fuzz` project work correctly we need to set std feature the default
 default = ["std"]
 # default = []
-std = ["inject-browser-sdk/std", "serde/std", "serde_json/std"]
+std = ["inject-browser-sdk/std", "serde/std", "serde_json/std", "dep:libdd-library-config"]
 
 [dependencies]
 inject-browser-sdk = { path = "../inject-browser-sdk" }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 rustix = { version = "1.0", default-features = false, features = ["mm", "stdio"] }
+# From branch: pawel/no-std-library-config
+libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "6263db23", optional = true }
 
 # on linux use rustix-dlmalloc
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -34,6 +36,7 @@ dlmalloc = { version = "0.2", features = ["global"] }
 [dev-dependencies]
 pretty_assertions = { version = "1.4.0", features = ["unstable"] }
 rand = "0.10.0"
+tempfile = "3.3"
 
 [build-dependencies]
 cbindgen = "0.29.0"

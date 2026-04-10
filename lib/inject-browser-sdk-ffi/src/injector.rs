@@ -47,20 +47,22 @@ pub unsafe extern "C" fn injector_create(snippet: *const Snippet) -> *mut Inject
         Err(_) => &[],
     };
 
-    return Box::into_raw(Box::new(Injector {
+    Box::into_raw(Box::new(Injector {
         inner: injector::Injector::new(snippet_content),
         slices_memory_storage: core::array::from_fn(|_| BytesSlice::empty()),
-    }));
+    }))
 }
 
 /// Free the [`Injector`] associated memory.
 ///
 /// # Memory safety
 ///
-/// Do not use the `injector` instance after calling this function.
+/// Do not use the `injector` instance after calling this function. Passing `NULL` is a no-op.
 #[no_mangle]
 pub unsafe extern "C" fn injector_cleanup(injector: *mut Injector) {
-    _ = Box::from_raw(injector);
+    if !injector.is_null() {
+        _ = Box::from_raw(injector);
+    }
 }
 
 /// Write part of an HTML document to the [`Injector`].
@@ -93,10 +95,10 @@ pub unsafe extern "C" fn injector_write(
 ) -> InjectorResult {
     let ffi_injector = &mut *injector;
     let chunk = slice::from_raw_parts(chunk, length as usize);
-    return InjectorResult::new(
+    InjectorResult::new(
         ffi_injector.inner.write(chunk),
         &mut ffi_injector.slices_memory_storage,
-    );
+    )
 }
 
 /// Notify the [`Injector`] that the full HTML document has been written.
@@ -124,10 +126,10 @@ pub unsafe extern "C" fn injector_write(
 #[no_mangle]
 pub unsafe extern "C" fn injector_end(ffi_injector: *mut Injector) -> InjectorResult {
     let ffi_injector = &mut *ffi_injector;
-    return InjectorResult::new(
+    InjectorResult::new(
         ffi_injector.inner.end(),
         &mut ffi_injector.slices_memory_storage,
-    );
+    )
 }
 
 /// The result of a call to [`injector_write`] or [`injector_end`]. It represents a list of binary
@@ -145,10 +147,10 @@ pub unsafe extern "C" fn injector_end(ffi_injector: *mut Injector) -> InjectorRe
 /// contain pointers to:
 ///
 /// * portions of the chunk provided to [`injector_write`]. This chunk is owned by the library
-/// consumer and should be freed once it is not used anymore.
+///   consumer and should be freed once it is not used anymore.
 ///
 /// * internal buffers owned by the [`Injector`] instance. Those buffers will be cleared by
-/// [`injector_cleanup`].
+///   [`injector_cleanup`].
 #[repr(C)]
 pub struct InjectorResult {
     /// Number of returned slices (any number from 0 to 4).

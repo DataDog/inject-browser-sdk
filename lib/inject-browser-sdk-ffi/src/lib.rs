@@ -24,12 +24,12 @@
 //! This library has two mains concepts:
 //!
 //! * [`Snippet`], created by [`snippet_create_from_json`] by providing a configuration
-//! formatted as JSON. `Snippet` are generally created once at the start of the process. Multiple
-//! instances can be created if multiple configuration are being used.
+//!   formatted as JSON. `Snippet` are generally created once at the start of the process. Multiple
+//!   instances can be created if multiple configuration are being used.
 //!
 //! * [`Injector`], created by [`injector_create`] by providing a `Snippet` instance. One
-//! [Injector] instance is usually created for each HTTP response where we want to inject the
-//! snippet.
+//!   [Injector] instance is usually created for each HTTP response where we want to inject the
+//!   snippet.
 //!
 //! A typical usage of this library consists in the following steps:
 //!

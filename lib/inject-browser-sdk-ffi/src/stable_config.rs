@@ -372,9 +372,8 @@ impl StableConfigEntriesInternal {
     }
 
     fn new_err(msg: &str) -> *mut StableConfigEntries {
-        let sanitized = msg.replace('\0', "\\0");
-        let cstring = CString::new(sanitized)
-            .unwrap_or_else(|_| CString::new("Stable config error").unwrap());
+        let cstring = CString::new(msg)
+            .unwrap_or_else(|_| c"stable config error: message unavailable".to_owned());
         let mut internal = Box::new(Self {
             entries_ptr: null(),
             count: 0,

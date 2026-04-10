@@ -16,6 +16,8 @@ pub mod error;
 mod injection_point_locator;
 pub mod injector;
 mod snippet;
+mod stable_config;
 
 pub use configuration::*;
 pub use snippet::*;
+pub use stable_config::*;

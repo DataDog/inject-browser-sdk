@@ -6,6 +6,7 @@
 // Copyright 2024-Present Datadog, Inc.
 
 use alloc::{
+    borrow::ToOwned,
     boxed::Box,
     ffi::CString,
     format,

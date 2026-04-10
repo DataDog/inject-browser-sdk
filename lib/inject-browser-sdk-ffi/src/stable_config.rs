@@ -4,17 +4,84 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-use alloc::{boxed::Box, ffi::CString, format, string::String, vec::Vec};
+use alloc::{borrow::ToOwned, boxed::Box, ffi::CString, format, string::String, vec, vec::Vec};
 use core::{
     ffi::{c_char, CStr},
     ptr::null,
 };
 
 use inject_browser_sdk::{configuration_from_entries, error::Error, generate_snippet};
+use libdd_library_config::{
+    ConfigRead, ConfigReadError, Configurator, ProcessInfo, MAX_CONFIG_FILE_SIZE,
+};
 
 use crate::snippet::{Snippet, SnippetInternal};
 
 use alloc::collections::BTreeMap;
+
+/// [`ConfigRead`] implementation using `rustix` for no_std file I/O.
+struct RustixConfigRead;
+
+impl ConfigRead for RustixConfigRead {
+    type IoError = rustix::io::Errno;
+
+    fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<rustix::io::Errno>> {
+        use rustix::fs::{open, stat, Mode, OFlags};
+        use rustix::io::read;
+
+        let fd = match open(path, OFlags::RDONLY, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => return Err(ConfigReadError::NotFound),
+            Err(e) => return Err(ConfigReadError::Io(e)),
+        };
+
+        let file_size = stat(path)
+            .map(|s| s.st_size as usize)
+            .map_err(ConfigReadError::Io)?;
+
+        if file_size > MAX_CONFIG_FILE_SIZE {
+            return Err(ConfigReadError::TooLarge);
+        }
+
+        let mut buf = vec![0u8; file_size];
+        let mut total = 0;
+        while total < file_size {
+            match read(&fd, &mut buf[total..]) {
+                Ok(0) => break,
+                Ok(n) => total += n,
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(e) => return Err(ConfigReadError::Io(e)),
+            }
+        }
+        buf.truncate(total);
+        Ok(buf)
+    }
+}
+
+/// Build a [`ProcessInfo`] by reading `/proc/self/environ` and `/proc/self/cmdline`
+/// via rustix, avoiding any `std` dependency.
+fn detect_process_info(language: &str) -> ProcessInfo {
+    let envp = read_nul_separated("/proc/self/environ").unwrap_or_default();
+    let args = read_nul_separated("/proc/self/cmdline").unwrap_or_default();
+    ProcessInfo {
+        args,
+        envp,
+        language: language.as_bytes().to_vec(),
+    }
+}
+
+/// Read a NUL-separated file (like `/proc/self/environ`) into a `Vec<Vec<u8>>`.
+fn read_nul_separated(path: &str) -> Option<Vec<Vec<u8>>> {
+    let reader = RustixConfigRead;
+    let bytes = reader.read(path).ok()?;
+    Some(
+        bytes
+            .split(|&b| b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_vec())
+            .collect(),
+    )
+}
 
 /// Validate a `*const c_char`: checks for null, reads the C string, and validates UTF-8.
 /// Returns the string slice on success, or `Error::StableConfig` on failure.
@@ -44,22 +111,27 @@ unsafe fn read_stable_configs(
 ) -> Result<Vec<(String, String)>, String> {
     let language_str = CStr::from_ptr(language)
         .to_str()
-        .map_err(|_| String::from("language parameter is not valid UTF-8"))?
-        .to_owned();
+        .map_err(|_| String::from("language parameter is not valid UTF-8"))?;
 
-    let process_info = libdd_library_config::ProcessInfo::detect_global(language_str);
-    let configurator = libdd_library_config::Configurator::new(debug_logs);
+    let process_info = detect_process_info(language_str);
+    let configurator = Configurator::new(debug_logs);
 
-    let local_path =
-        std::path::Path::new(libdd_library_config::Configurator::LOCAL_STABLE_CONFIGURATION_PATH);
-    let fleet_path =
-        std::path::Path::new(libdd_library_config::Configurator::FLEET_STABLE_CONFIGURATION_PATH);
+    let local_path = Configurator::LOCAL_STABLE_CONFIGURATION_PATH;
+    let fleet_path = Configurator::FLEET_STABLE_CONFIGURATION_PATH;
 
-    let logged_result = configurator.get_config_from_file(local_path, fleet_path, &process_info);
+    let logged_result = configurator.get_config_from_reader(
+        &RustixConfigRead,
+        local_path,
+        fleet_path,
+        &process_info,
+    );
 
     if debug_logs {
         for msg in logged_result.logs() {
-            eprintln!("[inject-browser-sdk] {}", msg);
+            let _ = rustix::io::write(
+                rustix::stdio::stderr(),
+                format!("[inject-browser-sdk] {}\n", msg).as_bytes(),
+            );
         }
     }
 
@@ -365,7 +437,7 @@ mod tests {
         // Without config files, stable config returns empty entries and the required
         // DD_RUM_APPLICATION_ID / DD_RUM_CLIENT_TOKEN are absent → error code 5
         // (EmptyMandatoryConf). If the underlying library errors on missing files instead,
-        // code 7 (StableConfig) is also acceptable.
+        // code 6 (StableConfig) is also acceptable.
         assert!(
             matches!(s.error_code, 5 | 6),
             "expected error code 5 or 6, got {}",
@@ -385,20 +457,12 @@ apm_configuration_default:
 ";
         let mut local_file = tempfile::NamedTempFile::new().unwrap();
         local_file.write_all(local_yaml).unwrap();
-        let local_path = local_file.path();
+        let local_path = local_file.path().to_str().unwrap();
 
-        // Test the full config-entries-to-snippet pipeline via snippet_create_from_entries.
-        // (snippet_create_from_stable_config itself uses hardcoded agent paths and cannot be
-        // given custom paths in tests; its file-reading is covered by snippet_create_from_stable_config_no_files.)
-        let process_info =
-            libdd_library_config::ProcessInfo::detect_global("browser-sdk".to_owned());
-        let configurator = libdd_library_config::Configurator::new(false);
+        let process_info = detect_process_info("browser-sdk");
+        let configurator = Configurator::new(false);
         let raw_configs = configurator
-            .get_config_from_file(
-                local_path,
-                std::path::Path::new("/nonexistent"),
-                &process_info,
-            )
+            .get_config_from_reader(&RustixConfigRead, local_path, "/nonexistent", &process_info)
             .data()
             .unwrap();
 

@@ -26,7 +26,7 @@ impl ConfigRead for RustixConfigRead {
     type IoError = rustix::io::Errno;
 
     fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<rustix::io::Errno>> {
-        use rustix::fs::{open, stat, Mode, OFlags};
+        use rustix::fs::{fstat, open, Mode, OFlags};
         use rustix::io::read;
 
         let fd = match open(path, OFlags::RDONLY, Mode::empty()) {
@@ -35,7 +35,7 @@ impl ConfigRead for RustixConfigRead {
             Err(e) => return Err(ConfigReadError::Io(e)),
         };
 
-        let file_size = stat(path)
+        let file_size = fstat(&fd)
             .map(|s| s.st_size as usize)
             .map_err(ConfigReadError::Io)?;
 

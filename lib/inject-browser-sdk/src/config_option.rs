@@ -30,6 +30,33 @@ pub struct ConfigOptionMeta {
     pub value_type: ValueType,
 }
 
+impl ConfigOptionMeta {
+    const fn req(primary: &'static str, vt: ValueType) -> Self {
+        Self {
+            primary_key: primary,
+            fallback_key: None,
+            required: true,
+            value_type: vt,
+        }
+    }
+    const fn opt(primary: &'static str, vt: ValueType) -> Self {
+        Self {
+            primary_key: primary,
+            fallback_key: None,
+            required: false,
+            value_type: vt,
+        }
+    }
+    const fn opt_fb(primary: &'static str, fallback: &'static str, vt: ValueType) -> Self {
+        Self {
+            primary_key: primary,
+            fallback_key: Some(fallback),
+            required: false,
+            value_type: vt,
+        }
+    }
+}
+
 /// A known DD_* configuration option for RUM injection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigOption {
@@ -49,110 +76,51 @@ pub enum ConfigOption {
     RemoteConfigurationId,
 }
 
+use ConfigOption::*;
+use ValueType as VT;
+
 impl ConfigOption {
     pub const ALL: &[ConfigOption] = &[
-        ConfigOption::ApplicationId,
-        ConfigOption::ClientToken,
-        ConfigOption::Site,
-        ConfigOption::Service,
-        ConfigOption::Environment,
-        ConfigOption::Version,
-        ConfigOption::TrackUserInteractions,
-        ConfigOption::TrackResources,
-        ConfigOption::TrackLongTasks,
-        ConfigOption::DefaultPrivacyLevel,
-        ConfigOption::SessionSampleRate,
-        ConfigOption::SessionReplaySampleRate,
-        ConfigOption::MajorVersion,
-        ConfigOption::RemoteConfigurationId,
+        ApplicationId,
+        ClientToken,
+        Site,
+        Service,
+        Environment,
+        Version,
+        TrackUserInteractions,
+        TrackResources,
+        TrackLongTasks,
+        DefaultPrivacyLevel,
+        SessionSampleRate,
+        SessionReplaySampleRate,
+        MajorVersion,
+        RemoteConfigurationId,
     ];
 
     pub const fn meta(&self) -> ConfigOptionMeta {
         match self {
-            Self::ApplicationId => ConfigOptionMeta {
-                primary_key: "DD_RUM_APPLICATION_ID",
-                fallback_key: None,
-                required: true,
-                value_type: ValueType::Str,
-            },
-            Self::ClientToken => ConfigOptionMeta {
-                primary_key: "DD_RUM_CLIENT_TOKEN",
-                fallback_key: None,
-                required: true,
-                value_type: ValueType::Str,
-            },
-            Self::Site => ConfigOptionMeta {
-                primary_key: "DD_RUM_SITE",
-                fallback_key: Some("DD_SITE"),
-                required: false,
-                value_type: ValueType::Str,
-            },
-            Self::Service => ConfigOptionMeta {
-                primary_key: "DD_RUM_SERVICE",
-                fallback_key: Some("DD_SERVICE"),
-                required: false,
-                value_type: ValueType::Str,
-            },
-            Self::Environment => ConfigOptionMeta {
-                primary_key: "DD_RUM_ENVIRONMENT",
-                fallback_key: Some("DD_ENV"),
-                required: false,
-                value_type: ValueType::Str,
-            },
-            Self::Version => ConfigOptionMeta {
-                primary_key: "DD_VERSION",
-                fallback_key: None,
-                required: false,
-                value_type: ValueType::Str,
-            },
-            Self::TrackUserInteractions => ConfigOptionMeta {
-                primary_key: "DD_RUM_TRACK_USER_INTERACTIONS",
-                fallback_key: None,
-                required: false,
-                value_type: ValueType::Bool,
-            },
-            Self::TrackResources => ConfigOptionMeta {
-                primary_key: "DD_RUM_TRACK_RESOURCES",
-                fallback_key: None,
-                required: false,
-                value_type: ValueType::Bool,
-            },
-            Self::TrackLongTasks => ConfigOptionMeta {
-                primary_key: "DD_RUM_TRACK_LONG_TASKS",
-                fallback_key: None,
-                required: false,
-                value_type: ValueType::Bool,
-            },
-            Self::DefaultPrivacyLevel => ConfigOptionMeta {
-                primary_key: "DD_RUM_DEFAULT_PRIVACY_LEVEL",
-                fallback_key: None,
-                required: false,
-                value_type: ValueType::PrivacyLevel,
-            },
-            Self::SessionSampleRate => ConfigOptionMeta {
-                primary_key: "DD_RUM_SESSION_SAMPLE_RATE",
-                fallback_key: None,
-                required: false,
-                value_type: ValueType::F32,
-            },
-            Self::SessionReplaySampleRate => ConfigOptionMeta {
-                primary_key: "DD_RUM_SESSION_REPLAY_SAMPLE_RATE",
-                fallback_key: None,
-                required: false,
-                value_type: ValueType::F32,
-            },
-            Self::MajorVersion => ConfigOptionMeta {
-                primary_key: "DD_RUM_MAJOR_VERSION",
-                fallback_key: None,
-                required: false,
-                value_type: ValueType::U32,
-            },
-            Self::RemoteConfigurationId => ConfigOptionMeta {
-                primary_key: "DD_RUM_REMOTE_CONFIGURATION_ID",
-                fallback_key: None,
-                required: false,
-                value_type: ValueType::Str,
-            },
+            ApplicationId => ConfigOptionMeta::req("DD_RUM_APPLICATION_ID", VT::Str),
+            ClientToken => ConfigOptionMeta::req("DD_RUM_CLIENT_TOKEN", VT::Str),
+            Site => ConfigOptionMeta::opt_fb("DD_RUM_SITE", "DD_SITE", VT::Str),
+            Service => ConfigOptionMeta::opt_fb("DD_RUM_SERVICE", "DD_SERVICE", VT::Str),
+            Environment => ConfigOptionMeta::opt_fb("DD_RUM_ENVIRONMENT", "DD_ENV", VT::Str),
+            Version => ConfigOptionMeta::opt("DD_VERSION", VT::Str),
+            TrackUserInteractions => {
+                ConfigOptionMeta::opt("DD_RUM_TRACK_USER_INTERACTIONS", VT::Bool)
+            }
+            TrackResources => ConfigOptionMeta::opt("DD_RUM_TRACK_RESOURCES", VT::Bool),
+            TrackLongTasks => ConfigOptionMeta::opt("DD_RUM_TRACK_LONG_TASKS", VT::Bool),
+            DefaultPrivacyLevel => {
+                ConfigOptionMeta::opt("DD_RUM_DEFAULT_PRIVACY_LEVEL", VT::PrivacyLevel)
+            }
+            SessionSampleRate => ConfigOptionMeta::opt("DD_RUM_SESSION_SAMPLE_RATE", VT::F32),
+            SessionReplaySampleRate => {
+                ConfigOptionMeta::opt("DD_RUM_SESSION_REPLAY_SAMPLE_RATE", VT::F32)
+            }
+            MajorVersion => ConfigOptionMeta::opt("DD_RUM_MAJOR_VERSION", VT::U32),
+            RemoteConfigurationId => {
+                ConfigOptionMeta::opt("DD_RUM_REMOTE_CONFIGURATION_ID", VT::Str)
+            }
         }
     }
 
@@ -170,55 +138,43 @@ impl ConfigOption {
     }
 }
 
-/// A parsed configuration value.
-pub enum ParsedValue<'a> {
-    Str(&'a str),
-    Bool(bool),
-    U32(u32),
-    F32(f32),
-    Privacy(PrivacyLevel),
+// --- Typed parse helpers ---
+
+fn parse_bool(raw: &str, key: &str) -> Result<bool, Error> {
+    match raw.to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(Error::StableConfig(format!(
+            "Invalid boolean value '{raw}' for key '{key}'"
+        ))),
+    }
 }
 
-/// Parse a raw string value according to the expected type.
-pub fn parse_value<'a>(
-    raw: &'a str,
-    value_type: ValueType,
-    key_name: &str,
-) -> Result<ParsedValue<'a>, Error> {
-    match value_type {
-        ValueType::Str => Ok(ParsedValue::Str(raw)),
-        ValueType::Bool => match raw.to_ascii_lowercase().as_str() {
-            "true" => Ok(ParsedValue::Bool(true)),
-            "false" => Ok(ParsedValue::Bool(false)),
-            _ => Err(Error::StableConfig(format!(
-                "Invalid boolean value '{raw}' for key '{key_name}'"
-            ))),
-        },
-        ValueType::U32 => {
-            let val: u32 = raw.parse().map_err(|_| {
-                Error::StableConfig(format!("Invalid u32 value '{raw}' for key '{key_name}'"))
-            })?;
-            Ok(ParsedValue::U32(val))
-        }
-        ValueType::F32 => {
-            let val: f32 = raw.parse().map_err(|_| {
-                Error::StableConfig(format!("Invalid float value '{raw}' for key '{key_name}'"))
-            })?;
-            if !val.is_finite() {
-                return Err(Error::StableConfig(format!(
-                    "Invalid float value '{raw}' for key '{key_name}'"
-                )));
-            }
-            Ok(ParsedValue::F32(val))
-        }
-        ValueType::PrivacyLevel => match raw.to_ascii_lowercase().as_str() {
-            "allow" => Ok(ParsedValue::Privacy(PrivacyLevel::Allow)),
-            "mask" => Ok(ParsedValue::Privacy(PrivacyLevel::Mask)),
-            "mask-user-input" => Ok(ParsedValue::Privacy(PrivacyLevel::MaskUserInput)),
-            _ => Err(Error::StableConfig(format!(
-                "Invalid privacy level '{raw}' for key '{key_name}'"
-            ))),
-        },
+fn parse_u32(raw: &str, key: &str) -> Result<u32, Error> {
+    raw.parse()
+        .map_err(|_| Error::StableConfig(format!("Invalid u32 value '{raw}' for key '{key}'")))
+}
+
+fn parse_f32(raw: &str, key: &str) -> Result<f32, Error> {
+    let val: f32 = raw
+        .parse()
+        .map_err(|_| Error::StableConfig(format!("Invalid float value '{raw}' for key '{key}'")))?;
+    if !val.is_finite() {
+        return Err(Error::StableConfig(format!(
+            "Invalid float value '{raw}' for key '{key}'"
+        )));
+    }
+    Ok(val)
+}
+
+fn parse_privacy(raw: &str, key: &str) -> Result<PrivacyLevel, Error> {
+    match raw.to_ascii_lowercase().as_str() {
+        "allow" => Ok(PrivacyLevel::Allow),
+        "mask" => Ok(PrivacyLevel::Mask),
+        "mask-user-input" => Ok(PrivacyLevel::MaskUserInput),
+        _ => Err(Error::StableConfig(format!(
+            "Invalid privacy level '{raw}' for key '{key}'"
+        ))),
     }
 }
 
@@ -230,129 +186,50 @@ pub fn parse_value<'a>(
 pub fn build_configuration<'a>(
     lookup: impl Fn(&str) -> Option<&'a str>,
 ) -> Result<Configuration, Error> {
-    let mut application_id: Option<&'a str> = None;
-    let mut client_token: Option<&'a str> = None;
-    let mut site: Option<&'a str> = None;
-    let mut service: Option<&'a str> = None;
-    let mut env: Option<&'a str> = None;
-    let mut version: Option<&'a str> = None;
-    let mut track_user_interactions: Option<bool> = None;
-    let mut track_resources: Option<bool> = None;
-    let mut track_long_task: Option<bool> = None;
-    let mut default_privacy_level: Option<PrivacyLevel> = None;
-    let mut session_sample_rate: Option<f32> = None;
-    let mut session_replay_sample_rate: Option<f32> = None;
-    let mut major_version: u32 = 5;
-    let mut remote_configuration_id: Option<&'a str> = None;
+    let resolve = |opt: ConfigOption| opt.resolve(&lookup);
 
-    for option in ConfigOption::ALL {
-        let meta = option.meta();
-        let raw = match option.resolve(&lookup) {
-            Some(v) => v,
-            None => {
-                if meta.required {
-                    return Err(Error::EmptyMandatoryConf(String::from(meta.primary_key)));
-                }
-                continue;
-            }
-        };
-
-        if meta.required && raw.is_empty() {
-            return Err(Error::EmptyMandatoryConf(String::from(meta.primary_key)));
+    let require_str = |opt: ConfigOption| -> Result<&'a str, Error> {
+        match resolve(opt) {
+            Some(v) if !v.is_empty() => Ok(v),
+            _ => Err(Error::EmptyMandatoryConf(String::from(
+                opt.meta().primary_key,
+            ))),
         }
+    };
 
-        let parsed = parse_value(raw, meta.value_type, meta.primary_key)?;
+    let opt_bool = |opt: ConfigOption| -> Result<Option<bool>, Error> {
+        resolve(opt)
+            .map(|v| parse_bool(v, opt.meta().primary_key))
+            .transpose()
+    };
 
-        match option {
-            ConfigOption::ApplicationId => {
-                if let ParsedValue::Str(v) = parsed {
-                    application_id = Some(v);
-                }
-            }
-            ConfigOption::ClientToken => {
-                if let ParsedValue::Str(v) = parsed {
-                    client_token = Some(v);
-                }
-            }
-            ConfigOption::Site => {
-                if let ParsedValue::Str(v) = parsed {
-                    site = Some(v);
-                }
-            }
-            ConfigOption::Service => {
-                if let ParsedValue::Str(v) = parsed {
-                    service = Some(v);
-                }
-            }
-            ConfigOption::Environment => {
-                if let ParsedValue::Str(v) = parsed {
-                    env = Some(v);
-                }
-            }
-            ConfigOption::Version => {
-                if let ParsedValue::Str(v) = parsed {
-                    version = Some(v);
-                }
-            }
-            ConfigOption::TrackUserInteractions => {
-                if let ParsedValue::Bool(v) = parsed {
-                    track_user_interactions = Some(v);
-                }
-            }
-            ConfigOption::TrackResources => {
-                if let ParsedValue::Bool(v) = parsed {
-                    track_resources = Some(v);
-                }
-            }
-            ConfigOption::TrackLongTasks => {
-                if let ParsedValue::Bool(v) = parsed {
-                    track_long_task = Some(v);
-                }
-            }
-            ConfigOption::DefaultPrivacyLevel => {
-                if let ParsedValue::Privacy(v) = parsed {
-                    default_privacy_level = Some(v);
-                }
-            }
-            ConfigOption::SessionSampleRate => {
-                if let ParsedValue::F32(v) = parsed {
-                    session_sample_rate = Some(v);
-                }
-            }
-            ConfigOption::SessionReplaySampleRate => {
-                if let ParsedValue::F32(v) = parsed {
-                    session_replay_sample_rate = Some(v);
-                }
-            }
-            ConfigOption::MajorVersion => {
-                if let ParsedValue::U32(v) = parsed {
-                    major_version = v;
-                }
-            }
-            ConfigOption::RemoteConfigurationId => {
-                if let ParsedValue::Str(v) = parsed {
-                    remote_configuration_id = Some(v);
-                }
-            }
-        }
-    }
+    let opt_f32 = |opt: ConfigOption| -> Result<Option<f32>, Error> {
+        resolve(opt)
+            .map(|v| parse_f32(v, opt.meta().primary_key))
+            .transpose()
+    };
 
     let configuration = Configuration {
-        major_version,
+        major_version: match resolve(MajorVersion) {
+            Some(v) => parse_u32(v, MajorVersion.meta().primary_key)?,
+            None => 5,
+        },
         rum: RumConfiguration {
-            application_id: Box::from(application_id.unwrap_or("")),
-            client_token: Box::from(client_token.unwrap_or("")),
-            site: site.map(Box::from),
-            service: service.map(Box::from),
-            env: env.map(Box::from),
-            version: version.map(Box::from),
-            track_user_interactions,
-            track_resources,
-            track_long_task,
-            default_privacy_level,
-            session_sample_rate,
-            session_replay_sample_rate,
-            remote_configuration_id: remote_configuration_id.map(Box::from),
+            application_id: Box::from(require_str(ApplicationId)?),
+            client_token: Box::from(require_str(ClientToken)?),
+            site: resolve(Site).map(Box::from),
+            service: resolve(Service).map(Box::from),
+            env: resolve(Environment).map(Box::from),
+            version: resolve(Version).map(Box::from),
+            track_user_interactions: opt_bool(TrackUserInteractions)?,
+            track_resources: opt_bool(TrackResources)?,
+            track_long_task: opt_bool(TrackLongTasks)?,
+            default_privacy_level: resolve(DefaultPrivacyLevel)
+                .map(|v| parse_privacy(v, DefaultPrivacyLevel.meta().primary_key))
+                .transpose()?,
+            session_sample_rate: opt_f32(SessionSampleRate)?,
+            session_replay_sample_rate: opt_f32(SessionReplaySampleRate)?,
+            remote_configuration_id: resolve(RemoteConfigurationId).map(Box::from),
             other: Default::default(),
         },
     };
@@ -373,96 +250,44 @@ mod tests {
     }
 
     #[test]
-    fn parse_value_str() {
-        let result = parse_value("hello", ValueType::Str, "test").unwrap();
-        assert!(matches!(result, ParsedValue::Str("hello")));
+    fn parse_helpers() {
+        assert_eq!(parse_bool("True", "k").unwrap(), true);
+        assert_eq!(parse_bool("FALSE", "k").unwrap(), false);
+        assert!(parse_bool("yes", "k").is_err());
+
+        assert_eq!(parse_u32("42", "k").unwrap(), 42);
+        assert!(parse_u32("abc", "k").is_err());
+
+        assert!((parse_f32("42.5", "k").unwrap() - 42.5).abs() < f32::EPSILON);
+        assert!(parse_f32("inf", "k").is_err());
+
+        assert_eq!(parse_privacy("allow", "k").unwrap(), PrivacyLevel::Allow);
+        assert_eq!(
+            parse_privacy("mask-user-input", "k").unwrap(),
+            PrivacyLevel::MaskUserInput
+        );
+        assert!(parse_privacy("none", "k").is_err());
     }
 
     #[test]
-    fn parse_value_bool_true() {
-        let result = parse_value("True", ValueType::Bool, "test").unwrap();
-        assert!(matches!(result, ParsedValue::Bool(true)));
-    }
-
-    #[test]
-    fn parse_value_bool_false() {
-        let result = parse_value("FALSE", ValueType::Bool, "test").unwrap();
-        assert!(matches!(result, ParsedValue::Bool(false)));
-    }
-
-    #[test]
-    fn parse_value_bool_invalid() {
-        let result = parse_value("yes", ValueType::Bool, "DD_TEST");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_value_u32_valid() {
-        let result = parse_value("42", ValueType::U32, "test").unwrap();
-        assert!(matches!(result, ParsedValue::U32(42)));
-    }
-
-    #[test]
-    fn parse_value_u32_invalid() {
-        let result = parse_value("abc", ValueType::U32, "DD_TEST");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_value_f32_valid() {
-        let result = parse_value("42.5", ValueType::F32, "test").unwrap();
-        assert!(matches!(result, ParsedValue::F32(v) if (v - 42.5).abs() < f32::EPSILON));
-    }
-
-    #[test]
-    fn parse_value_f32_infinity() {
-        let result = parse_value("inf", ValueType::F32, "DD_TEST");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_value_privacy_allow() {
-        let result = parse_value("Allow", ValueType::PrivacyLevel, "test").unwrap();
-        assert!(matches!(result, ParsedValue::Privacy(PrivacyLevel::Allow)));
-    }
-
-    #[test]
-    fn parse_value_privacy_mask_user_input() {
-        let result = parse_value("mask-user-input", ValueType::PrivacyLevel, "test").unwrap();
-        assert!(matches!(
-            result,
-            ParsedValue::Privacy(PrivacyLevel::MaskUserInput)
-        ));
-    }
-
-    #[test]
-    fn parse_value_privacy_invalid() {
-        let result = parse_value("none", ValueType::PrivacyLevel, "DD_TEST");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn resolve_primary_key() {
+    fn resolve_primary_over_fallback() {
         let map = BTreeMap::from([
             (String::from("DD_RUM_SITE"), String::from("datadoghq.com")),
             (String::from("DD_SITE"), String::from("datadoghq.eu")),
         ]);
-        let result = ConfigOption::Site.resolve(lookup_from_map(&map));
-        assert_eq!(result, Some("datadoghq.com"));
+        assert_eq!(Site.resolve(lookup_from_map(&map)), Some("datadoghq.com"));
     }
 
     #[test]
-    fn resolve_fallback_key() {
+    fn resolve_fallback() {
         let map = BTreeMap::from([(String::from("DD_SITE"), String::from("datadoghq.eu"))]);
-        let result = ConfigOption::Site.resolve(lookup_from_map(&map));
-        assert_eq!(result, Some("datadoghq.eu"));
+        assert_eq!(Site.resolve(lookup_from_map(&map)), Some("datadoghq.eu"));
     }
 
     #[test]
     fn resolve_missing() {
         let map: BTreeMap<String, String> = BTreeMap::new();
-        let result = ConfigOption::Site.resolve(lookup_from_map(&map));
-        assert_eq!(result, None);
+        assert_eq!(Site.resolve(lookup_from_map(&map)), None);
     }
 
     #[test]
@@ -580,7 +405,7 @@ mod tests {
             (String::from("DD_RUM_TRACK_RESOURCES"), String::from("yes")),
         ]);
         let err = build_configuration(lookup_from_map(&map)).unwrap_err();
-        assert_eq!(err.code(), 6); // StableConfig error
+        assert_eq!(err.code(), 6);
     }
 
     #[test]

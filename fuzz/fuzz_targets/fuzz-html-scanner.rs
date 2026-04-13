@@ -28,6 +28,7 @@ fuzz_target!(|data: &[u8]| {
             default_privacy_level: None,
             session_sample_rate: None,
             session_replay_sample_rate: None,
+            remote_configuration_id: None,
             other: Map::new(),
         },
     };

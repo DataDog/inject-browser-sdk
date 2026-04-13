@@ -10,9 +10,11 @@ use core::{
     ptr::null,
 };
 
-use inject_browser_sdk::{configuration_from_entries, error::Error, generate_snippet};
+use inject_browser_sdk::{
+    build_configuration, configuration_from_entries, error::Error, generate_snippet,
+};
 use libdd_library_config::{
-    ConfigRead, ConfigReadError, Configurator, ProcessInfo, MAX_CONFIG_FILE_SIZE,
+    ConfigRead, ConfigReadError, Configurator, LibraryConfig, ProcessInfo, MAX_CONFIG_FILE_SIZE,
 };
 
 use crate::snippet::{Snippet, SnippetInternal};
@@ -127,8 +129,7 @@ unsafe fn cstr_to_str<'a>(ptr: *const c_char, field: &str) -> Result<&'a str, Er
 }
 
 /// Reads configuration entries from both local and fleet-managed `application_monitoring.yaml`
-/// files and returns them as a `Vec<(name, value)>`. Handles UTF-8 validation of `language` and
-/// formats file-read errors.
+/// files via `get_config_from_reader`, preserving the full [`LibraryConfig`] metadata.
 ///
 /// When `debug_logs` is `true`, diagnostic messages from the configurator are written to stderr.
 ///
@@ -137,7 +138,7 @@ unsafe fn cstr_to_str<'a>(ptr: *const c_char, field: &str) -> Result<&'a str, Er
 unsafe fn read_stable_configs(
     language: *const c_char,
     debug_logs: bool,
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<Vec<LibraryConfig>, String> {
     let language_str = CStr::from_ptr(language)
         .to_str()
         .map_err(|_| String::from("language parameter is not valid UTF-8"))?;
@@ -161,10 +162,7 @@ unsafe fn read_stable_configs(
         }
     }
 
-    logged_result
-        .data()
-        .map(|configs| configs.into_iter().map(|c| (c.name, c.value)).collect())
-        .map_err(|err| format!("{}", err))
+    logged_result.data().map_err(|err| format!("{}", err))
 }
 
 /// Create a snippet from Datadog stable configuration files.
@@ -223,9 +221,13 @@ pub unsafe extern "C" fn snippet_create_from_stable_config(
         }
     };
 
-    let config_map: BTreeMap<String, String> = configs.into_iter().collect();
-    let result =
-        configuration_from_entries(&config_map).and_then(|config| generate_snippet(&config));
+    let result = build_configuration(|key| {
+        configs
+            .iter()
+            .find(|c| c.name == key)
+            .map(|c| c.value.as_str())
+    })
+    .and_then(|config| generate_snippet(&config));
 
     SnippetInternal::new(result).into_public_ptr()
 }
@@ -401,22 +403,22 @@ pub unsafe extern "C" fn stable_config_get_entries(
     let mut strings = Vec::with_capacity(configs.len() * 2);
     let mut entries = Vec::with_capacity(configs.len());
 
-    for (name_str, value_str) in configs {
-        let name = match CString::new(name_str.clone()) {
+    for config in &configs {
+        let name = match CString::new(config.name.clone()) {
             Ok(s) => s,
             Err(_) => {
                 return StableConfigEntriesInternal::new_err(&format!(
                     "Config entry name contains a NUL byte: {:?}",
-                    name_str
+                    config.name
                 ));
             }
         };
-        let value = match CString::new(value_str.clone()) {
+        let value = match CString::new(config.value.clone()) {
             Ok(s) => s,
             Err(_) => {
                 return StableConfigEntriesInternal::new_err(&format!(
                     "Config entry '{}' value contains a NUL byte",
-                    name_str
+                    config.name
                 ));
             }
         };
@@ -445,7 +447,7 @@ mod tests {
     use super::*;
     use alloc::ffi::CString;
     use pretty_assertions::{assert_eq, assert_ne};
-    use std::{borrow::ToOwned, ptr::null_mut};
+    use std::ptr::null_mut;
 
     use crate::snippet::{snippet_cleanup, SnippetInternal};
 

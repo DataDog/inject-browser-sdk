@@ -67,6 +67,9 @@ pub struct RumConfiguration {
     /// The value should be between 0.0 and 100.0
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_replay_sample_rate: Option<f32>,
+    /// Remote configuration identifier used for config management
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_configuration_id: Option<Box<str>>,
     /// Stores any additional fields that are not recognized by this struct.
     ///
     /// This enables the configuration to be forward-compatible with future updates.

@@ -78,8 +78,9 @@ impl SnippetInternal {
                 inner: Ok(content),
             },
             Err(error) => {
-                let error_message = CString::new(error.to_string())
-                    .unwrap_or_else(|_| CString::new("error message unavailable").unwrap());
+                let error_string = error.to_string().replace('\0', "\\0");
+                let error_message =
+                    CString::new(error_string).expect("replacement removed all NUL bytes");
                 Self {
                     error_message: error_message.as_ptr(),
                     error_code: error.code(),
@@ -171,6 +172,10 @@ impl SnippetInternal {
 /// [1]: https://docs.datadoghq.com/real_user_monitoring/browser/#initialization-parameters
 #[no_mangle]
 pub unsafe extern "C" fn snippet_create_from_json(json: *const c_char) -> *mut Snippet {
+    if json.is_null() {
+        return SnippetInternal::new(Err(Error::Json(String::from("json parameter is NULL"))))
+            .into_public_ptr();
+    }
     let json_bytes = CStr::from_ptr(json).to_bytes();
 
     let result = serde_json::from_slice::<Configuration>(json_bytes)
@@ -195,6 +200,7 @@ pub unsafe extern "C" fn snippet_cleanup(snippet: *mut Snippet) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::ptr::null;
     use pretty_assertions::{assert_eq, assert_ne};
     use std::{borrow::ToOwned, ptr::null_mut, string::String};
 
@@ -256,5 +262,36 @@ mod tests {
             snippet.error_code,
             String::from_utf8(snippet.inner.unwrap_err().as_bytes().to_vec()).unwrap(),
         )
+    }
+
+    #[test]
+    fn snippet_create_from_json_null() {
+        let snippet = unsafe { snippet_create_from_json(null()) };
+        assert_ne!(snippet, null_mut());
+        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_eq!(s.error_code, 1);
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn snippet_cleanup_null_is_noop() {
+        unsafe { snippet_cleanup(null_mut()) };
+    }
+
+    #[test]
+    fn snippet_layout() {
+        use core::mem;
+        assert_eq!(
+            mem::offset_of!(Snippet, error_code),
+            mem::offset_of!(SnippetInternal, error_code),
+        );
+        assert_eq!(
+            mem::offset_of!(Snippet, error_message),
+            mem::offset_of!(SnippetInternal, error_message),
+        );
+        assert_eq!(
+            mem::offset_of!(Snippet, length),
+            mem::offset_of!(SnippetInternal, length),
+        );
     }
 }

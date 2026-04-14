@@ -131,11 +131,45 @@ function Uninstall-Datadog-RUMConfiguration {
         }
     }
 
-    $sectionPath = "system.webServer/datadogRum"
+    function Remove-DatadogRumFromLocations {
+        param (
+            [string]$SiteName
+        )
+
+        $sectionPath = "system.webServer/datadogRum"
+        $psPath = "MACHINE/WEBROOT/APPHOST/$SiteName"
+
+        $locations = Get-WebConfigurationLocation -Name $SiteName -ErrorAction SilentlyContinue
+        foreach ($location in $locations) {
+            $locationPath = $location.Name
+            if (-not $locationPath) { continue }
+
+            $rumConfig = Get-WebConfiguration -Filter $sectionPath -PSPath $psPath -Location $locationPath -ErrorAction SilentlyContinue
+            if (-not $rumConfig) { continue }
+
+            try {
+                Start-WebCommitDelay
+
+                $options = Get-WebConfiguration -PSPath $psPath -Location $locationPath -Filter "$sectionPath/option" -ErrorAction SilentlyContinue
+                foreach ($option in $options) {
+                    Clear-WebConfiguration -PSPath $psPath -Location $locationPath -Filter "$sectionPath/option[@name='$($option.name)']" -ErrorAction SilentlyContinue
+                }
+                Clear-WebConfiguration -PSPath $psPath -Location $locationPath -Filter $sectionPath -ErrorAction SilentlyContinue
+
+                Stop-WebCommitDelay -Commit $True
+                Write-Host "Successfully removed Datadog RUM configuration from '$SiteName' location '$locationPath'"
+            }
+            catch {
+                Stop-WebCommitDelay
+                Write-Warning "Failed to remove Datadog RUM configuration from '$SiteName' location '$locationPath': $_"
+            }
+        }
+    }
 
     $sites = Get-ChildItem IIS:\Sites
-    
+
     foreach ($site in $sites) {
         Remove-DatadogRumFromApp -SiteName $site.Name -AppPath ""
+        Remove-DatadogRumFromLocations -SiteName $site.Name
     }
 }

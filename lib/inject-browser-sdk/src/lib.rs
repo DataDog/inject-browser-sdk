@@ -11,7 +11,7 @@ extern crate std;
 //
 // Copyright 2024-Present Datadog, Inc.
 
-mod config_option;
+pub mod config_option;
 mod configuration;
 pub mod error;
 mod injection_point_locator;
@@ -19,7 +19,6 @@ pub mod injector;
 mod snippet;
 mod stable_config;
 
-pub use config_option::*;
 pub use configuration::*;
 pub use snippet::*;
 pub use stable_config::*;

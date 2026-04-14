@@ -11,75 +11,56 @@ use alloc::string::String;
 use crate::configuration::{validate_configuration, Configuration, PrivacyLevel, RumConfiguration};
 use crate::error::Error;
 
-/// The type of value a config option expects.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ValueType {
-    Str,
-    Bool,
-    U32,
-    F32,
-    PrivacyLevel,
-}
-
 /// Metadata describing how to read a config option from DD_* entries.
 #[derive(Clone, Copy, Debug)]
-pub struct ConfigOptionMeta {
-    pub primary_key: &'static str,
-    pub fallback_key: Option<&'static str>,
-    pub required: bool,
-    pub value_type: ValueType,
+struct ConfigOptionMeta {
+    primary_key: &'static str,
+    fallback_key: Option<&'static str>,
 }
 
 impl ConfigOptionMeta {
-    const fn req(primary: &'static str, vt: ValueType) -> Self {
+    const fn key(primary: &'static str) -> Self {
         Self {
             primary_key: primary,
             fallback_key: None,
-            required: true,
-            value_type: vt,
         }
     }
-    const fn opt(primary: &'static str, vt: ValueType) -> Self {
-        Self {
-            primary_key: primary,
-            fallback_key: None,
-            required: false,
-            value_type: vt,
-        }
-    }
-    const fn opt_fb(primary: &'static str, fallback: &'static str, vt: ValueType) -> Self {
+    const fn key_fb(primary: &'static str, fallback: &'static str) -> Self {
         Self {
             primary_key: primary,
             fallback_key: Some(fallback),
-            required: false,
-            value_type: vt,
         }
     }
 }
 
-/// A known DD_* configuration option for RUM injection.
+/// A known configuration option for RUM injection.
+///
+/// Each variant maps to one or more `DD_*` environment-variable keys used in
+/// Datadog stable configuration files. Use [`ConfigOption::key`] to obtain the
+/// primary key name at runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ConfigOption {
-    ApplicationId,
-    ClientToken,
-    Site,
-    Service,
-    Environment,
-    Version,
-    TrackUserInteractions,
-    TrackResources,
-    TrackLongTasks,
-    DefaultPrivacyLevel,
-    SessionSampleRate,
-    SessionReplaySampleRate,
-    MajorVersion,
-    RemoteConfigurationId,
+    ApplicationId = 0,
+    ClientToken = 1,
+    Site = 2,
+    Service = 3,
+    Environment = 4,
+    Version = 5,
+    TrackUserInteractions = 6,
+    TrackResources = 7,
+    TrackLongTasks = 8,
+    DefaultPrivacyLevel = 9,
+    SessionSampleRate = 10,
+    SessionReplaySampleRate = 11,
+    MajorVersion = 12,
+    RemoteConfigurationId = 13,
 }
 
 use ConfigOption::*;
-use ValueType as VT;
 
 impl ConfigOption {
+    /// All known config options.
     pub const ALL: &[ConfigOption] = &[
         ApplicationId,
         ClientToken,
@@ -97,36 +78,33 @@ impl ConfigOption {
         RemoteConfigurationId,
     ];
 
-    pub const fn meta(&self) -> ConfigOptionMeta {
+    /// The primary `DD_*` key name for this option.
+    pub const fn key(&self) -> &'static str {
+        self.meta().primary_key
+    }
+
+    const fn meta(&self) -> ConfigOptionMeta {
         match self {
-            ApplicationId => ConfigOptionMeta::req("DD_RUM_APPLICATION_ID", VT::Str),
-            ClientToken => ConfigOptionMeta::req("DD_RUM_CLIENT_TOKEN", VT::Str),
-            Site => ConfigOptionMeta::opt_fb("DD_RUM_SITE", "DD_SITE", VT::Str),
-            Service => ConfigOptionMeta::opt_fb("DD_RUM_SERVICE", "DD_SERVICE", VT::Str),
-            Environment => ConfigOptionMeta::opt_fb("DD_RUM_ENVIRONMENT", "DD_ENV", VT::Str),
-            Version => ConfigOptionMeta::opt("DD_VERSION", VT::Str),
-            TrackUserInteractions => {
-                ConfigOptionMeta::opt("DD_RUM_TRACK_USER_INTERACTIONS", VT::Bool)
-            }
-            TrackResources => ConfigOptionMeta::opt("DD_RUM_TRACK_RESOURCES", VT::Bool),
-            TrackLongTasks => ConfigOptionMeta::opt("DD_RUM_TRACK_LONG_TASKS", VT::Bool),
-            DefaultPrivacyLevel => {
-                ConfigOptionMeta::opt("DD_RUM_DEFAULT_PRIVACY_LEVEL", VT::PrivacyLevel)
-            }
-            SessionSampleRate => ConfigOptionMeta::opt("DD_RUM_SESSION_SAMPLE_RATE", VT::F32),
-            SessionReplaySampleRate => {
-                ConfigOptionMeta::opt("DD_RUM_SESSION_REPLAY_SAMPLE_RATE", VT::F32)
-            }
-            MajorVersion => ConfigOptionMeta::opt("DD_RUM_MAJOR_VERSION", VT::U32),
-            RemoteConfigurationId => {
-                ConfigOptionMeta::opt("DD_RUM_REMOTE_CONFIGURATION_ID", VT::Str)
-            }
+            ApplicationId => ConfigOptionMeta::key("DD_RUM_APPLICATION_ID"),
+            ClientToken => ConfigOptionMeta::key("DD_RUM_CLIENT_TOKEN"),
+            Site => ConfigOptionMeta::key_fb("DD_RUM_SITE", "DD_SITE"),
+            Service => ConfigOptionMeta::key_fb("DD_RUM_SERVICE", "DD_SERVICE"),
+            Environment => ConfigOptionMeta::key_fb("DD_RUM_ENVIRONMENT", "DD_ENV"),
+            Version => ConfigOptionMeta::key("DD_VERSION"),
+            TrackUserInteractions => ConfigOptionMeta::key("DD_RUM_TRACK_USER_INTERACTIONS"),
+            TrackResources => ConfigOptionMeta::key("DD_RUM_TRACK_RESOURCES"),
+            TrackLongTasks => ConfigOptionMeta::key("DD_RUM_TRACK_LONG_TASKS"),
+            DefaultPrivacyLevel => ConfigOptionMeta::key("DD_RUM_DEFAULT_PRIVACY_LEVEL"),
+            SessionSampleRate => ConfigOptionMeta::key("DD_RUM_SESSION_SAMPLE_RATE"),
+            SessionReplaySampleRate => ConfigOptionMeta::key("DD_RUM_SESSION_REPLAY_SAMPLE_RATE"),
+            MajorVersion => ConfigOptionMeta::key("DD_RUM_MAJOR_VERSION"),
+            RemoteConfigurationId => ConfigOptionMeta::key("DD_RUM_REMOTE_CONFIGURATION_ID"),
         }
     }
 
     /// Resolve the value for this option using a lookup function.
     /// Tries the primary key first, then the fallback key if present.
-    pub fn resolve<'a>(&self, lookup: impl Fn(&str) -> Option<&'a str>) -> Option<&'a str> {
+    fn resolve<'a>(&self, lookup: impl Fn(&str) -> Option<&'a str>) -> Option<&'a str> {
         let meta = self.meta();
         if let Some(v) = lookup(meta.primary_key) {
             return Some(v);
@@ -183,7 +161,7 @@ fn parse_privacy(raw: &str, key: &str) -> Result<PrivacyLevel, Error> {
 /// The `lookup` closure takes a DD_* key name and returns the value if present.
 /// This drives extraction directly from any source (e.g., `Vec<LibraryConfig>`,
 /// `BTreeMap`, C entry arrays) without an intermediate representation.
-pub fn build_configuration<'a>(
+pub(crate) fn build_configuration<'a>(
     lookup: impl Fn(&str) -> Option<&'a str>,
 ) -> Result<Configuration, Error> {
     let resolve = |opt: ConfigOption| opt.resolve(&lookup);
@@ -260,6 +238,7 @@ mod tests {
 
         assert!((parse_f32("42.5", "k").unwrap() - 42.5).abs() < f32::EPSILON);
         assert!(parse_f32("inf", "k").is_err());
+        assert!(parse_f32("NaN", "k").is_err());
 
         assert_eq!(parse_privacy("allow", "k").unwrap(), PrivacyLevel::Allow);
         assert_eq!(
@@ -411,5 +390,58 @@ mod tests {
     #[test]
     fn all_contains_all_variants() {
         assert_eq!(ConfigOption::ALL.len(), 14);
+    }
+
+    #[test]
+    fn parse_privacy_case_insensitive() {
+        assert_eq!(parse_privacy("MASK", "k").unwrap(), PrivacyLevel::Mask);
+        assert_eq!(parse_privacy("Allow", "k").unwrap(), PrivacyLevel::Allow);
+        assert_eq!(
+            parse_privacy("Mask-User-Input", "k").unwrap(),
+            PrivacyLevel::MaskUserInput
+        );
+    }
+
+    #[test]
+    fn build_configuration_fallback_only() {
+        let map = BTreeMap::from([
+            (String::from("DD_RUM_APPLICATION_ID"), String::from("app-1")),
+            (String::from("DD_RUM_CLIENT_TOKEN"), String::from("tok-1")),
+            (String::from("DD_SITE"), String::from("datadoghq.eu")),
+            (String::from("DD_SERVICE"), String::from("my-svc")),
+            (String::from("DD_ENV"), String::from("prod")),
+        ]);
+        let config = build_configuration(lookup_from_map(&map)).unwrap();
+        assert_eq!(config.rum.site.as_deref(), Some("datadoghq.eu"));
+        assert_eq!(config.rum.service.as_deref(), Some("my-svc"));
+        assert_eq!(config.rum.env.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn build_configuration_invalid_float() {
+        let map = BTreeMap::from([
+            (String::from("DD_RUM_APPLICATION_ID"), String::from("app-1")),
+            (String::from("DD_RUM_CLIENT_TOKEN"), String::from("tok-1")),
+            (
+                String::from("DD_RUM_SESSION_SAMPLE_RATE"),
+                String::from("abc"),
+            ),
+        ]);
+        let err = build_configuration(lookup_from_map(&map)).unwrap_err();
+        assert_eq!(err.code(), 6);
+    }
+
+    #[test]
+    fn build_configuration_out_of_range_rate() {
+        let map = BTreeMap::from([
+            (String::from("DD_RUM_APPLICATION_ID"), String::from("app-1")),
+            (String::from("DD_RUM_CLIENT_TOKEN"), String::from("tok-1")),
+            (
+                String::from("DD_RUM_SESSION_SAMPLE_RATE"),
+                String::from("105.0"),
+            ),
+        ]);
+        let err = build_configuration(lookup_from_map(&map)).unwrap_err();
+        assert_eq!(err.code(), 4);
     }
 }

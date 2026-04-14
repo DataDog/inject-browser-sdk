@@ -42,6 +42,12 @@ pub struct Injector {
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn injector_create(snippet: *const Snippet) -> *mut Injector {
+    if snippet.is_null() {
+        return Box::into_raw(Box::new(Injector {
+            inner: injector::Injector::new(&[]),
+            slices_memory_storage: core::array::from_fn(|_| BytesSlice::empty()),
+        }));
+    }
     let snippet_content = match { SnippetInternal::borrow_public_ptr(snippet) }.inner {
         Ok(ref content) => content.as_slice(),
         Err(_) => &[],

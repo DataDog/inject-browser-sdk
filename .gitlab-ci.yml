@@ -1,9 +1,11 @@
 include:
   - local: .adms/go/gitlab.yaml
   - local: .adms/python/gitlab.yaml
+  - local: .gitlab/images.yml
   - local: .gitlab/iis.yml
   - local: .gitlab/java.yml
   - local: .gitlab/installer.yml
+  - local: .gitlab/cmake.yml
 
 stages:
   - build

@@ -76,6 +76,10 @@ var sitesToTest = []windows.IISSiteDefinition{
       },
     },
   },
+  {
+    Name: "location_site", // tests <location> override disabling RUM for a sub-path
+    BindingPort: "*:8083:",
+  },
 }
 type injectionTest struct {
   url string
@@ -120,7 +124,19 @@ var expected_results = []injectionTest {
   {
     url: "http://localhost:8082/site1/app2/nested",
     injectionService: `"service":"nested"`,
-    title: "deep app injection test, sitewithapps/app2/nested", 
+    title: "deep app injection test, sitewithapps/app2/nested",
+    allowedTracingUrls: nil,
+  },
+  {
+    url: "http://localhost:8083",
+    injectionService: `"service":"location-test"`,
+    title: "location override test, root path should inject",
+    allowedTracingUrls: nil,
+  },
+  {
+    url: "http://localhost:8083/api/",
+    injectionService: "",  // disabled via <location path="api">
+    title: "location override test, /api path should NOT inject",
     allowedTracingUrls: nil,
   },
 }
@@ -222,7 +238,7 @@ func (v *rumvmSuite) testInstall() {
     v.T().Logf("Found %s", iname)
   }
   vm.CopyFile(iname, remoteFilePath)
-  v.doTestInstall(remoteFilePath, "1.2.0", false)
+  v.doTestInstall(remoteFilePath, "1.2.1", false)
 }
 
 func (v *rumvmSuite) installOldVersionForUpgrade() {

@@ -1,6 +1,6 @@
 CIRCLE_CFG ?= .circleci/continue_config.yml
 COMMIT_SHA ?= $(shell git rev-parse --short HEAD)
-DOCKER_REPO ?= public.ecr.aws/b1o7r7e0/inject-browser-sdk
+DOCKER_REPO ?= ghcr.io/datadog/inject-browser-sdk
 
 .PHONY: lint
 lint:
@@ -30,3 +30,15 @@ push-ci-images:
 	docker buildx imagetools create -t $(DOCKER_REPO):builder-$(COMMIT_SHA) \
 			$(DOCKER_REPO):builder-$(COMMIT_SHA)-amd64 \
 			$(DOCKER_REPO):builder-$(COMMIT_SHA)-arm64
+
+.PHONY: test-cmake-version
+test-cmake-version:
+	ci/cmake-consumer-test/run_validate_version.sh
+
+.PHONY: artifacts
+artifacts:
+	docker buildx bake artifacts
+
+.PHONY: artifacts-all
+artifacts-all:
+	docker buildx bake artifacts-all

@@ -12,7 +12,7 @@
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|x86' ">
     <OutputPath>bin\$(Configuration)\</OutputPath>
     <IntermediateOutputPath>obj\$(Configuration)\</IntermediateOutputPath>
-    <DefineConstants>Debug;MAJ_VER=$(MAJ_VER);MIN_VER=$(MIN_VER);PATCH_VER=$(PATCH_VER)</DefineConstants>
+    <DefineConstants>Debug;MAJ_VER=$(MAJ_VER);MIN_VER=$(MIN_VER);PATCH_VER=$(PATCH_VER);VERSION_PRE=$(VERSION_PRE)</DefineConstants>
     <CompilerAdditionalOptions>-ext WixUtilExtension
 -ext WixUIExtension</CompilerAdditionalOptions>
     <LinkerAdditionalOptions>-ext WixUtilExtension
@@ -27,12 +27,12 @@
 -ext WixUIExtension</LinkerAdditionalOptions>
     <CompilerAdditionalOptions>-ext WixUtilExtension
 -ext WixUIExtension</CompilerAdditionalOptions>
-    <DefineConstants>MAJ_VER=$(MAJ_VER);MIN_VER=$(MIN_VER);PATCH_VER=$(PATCH_VER)</DefineConstants>
+    <DefineConstants>MAJ_VER=$(MAJ_VER);MIN_VER=$(MIN_VER);PATCH_VER=$(PATCH_VER);VERSION_PRE=$(VERSION_PRE)</DefineConstants>
     <Cultures>
     </Cultures>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|x64' ">
-    <DefineConstants>Debug;MAJ_VER=$(MAJ_VER);MIN_VER=$(MIN_VER);PATCH_VER=$(PATCH_VER);InjectorDll=$(InjectorDll)</DefineConstants>
+    <DefineConstants>Debug;MAJ_VER=$(MAJ_VER);MIN_VER=$(MIN_VER);PATCH_VER=$(PATCH_VER);VERSION_PRE=$(VERSION_PRE);InjectorDll=$(InjectorDll)</DefineConstants>
     <CompilerAdditionalOptions>-ext WixUtilExtension
 -ext WixUIExtension</CompilerAdditionalOptions>
     <OutputPath>bin\$(Platform)\$(Configuration)\</OutputPath>
@@ -49,7 +49,7 @@
 -ext WixUIExtension</LinkerAdditionalOptions>
     <CompilerAdditionalOptions>-ext WixUtilExtension
 -ext WixUIExtension</CompilerAdditionalOptions>
-    <DefineConstants>MAJ_VER=$(MAJ_VER);MIN_VER=$(MIN_VER);PATCH_VER=$(PATCH_VER);InjectorDll=$(InjectorDll)</DefineConstants>
+    <DefineConstants>MAJ_VER=$(MAJ_VER);MIN_VER=$(MIN_VER);PATCH_VER=$(PATCH_VER);VERSION_PRE=$(VERSION_PRE);InjectorDll=$(InjectorDll)</DefineConstants>
     <Cultures>
     </Cultures>
   </PropertyGroup>

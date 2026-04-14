@@ -4,7 +4,9 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-use std::mem;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::mem;
 
 use crate::injection_point_locator::{InjectionPointLocator, Location};
 
@@ -121,7 +123,7 @@ impl<'snippet> Injector<'snippet> {
         let mut non_empty_slices = slices.iter().filter(|slice| !slice.is_empty());
 
         Result {
-            slices: std::array::from_fn(|_| match non_empty_slices.next() {
+            slices: core::array::from_fn(|_| match non_empty_slices.next() {
                 Some(slice) => {
                     length += 1;
                     BytesSlice {
@@ -163,9 +165,12 @@ impl<'a> Result<'a> {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
-    use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng};
+    use rand::distr::Uniform;
+    use rand::prelude::IndexedRandom;
+    use rand::RngExt;
 
     use super::*;
+    use alloc::string::String;
 
     #[test]
     fn injector_basic() {
@@ -263,7 +268,7 @@ mod tests {
             Part::new("网络", false),
         ];
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..1000 {
             // Build a random input from 'parts'
@@ -271,7 +276,7 @@ mod tests {
             let mut expected = String::new();
             let mut has_head = false;
 
-            let parts_count = Uniform::new(0, 20).sample(&mut rng);
+            let parts_count = rng.random_range(0usize..20);
             for part in parts.choose_multiple(&mut rng, parts_count) {
                 input.push_str(part.string);
 
@@ -290,7 +295,7 @@ mod tests {
             // character boundary, we need to use &[u8] chunks instead of &str.
             let chunks = rng
                 .clone()
-                .sample_iter(Uniform::new(0, input.len() + 1))
+                .sample_iter(Uniform::new(0usize, input.len() + 1).unwrap())
                 .scan(input.as_bytes(), |input, chunk_size| {
                     if input.is_empty() {
                         None
@@ -306,7 +311,7 @@ mod tests {
         }
     }
 
-    fn test_injector<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn test_injector<T: AsRef<[u8]> + core::fmt::Debug>(
         input_chunks: impl IntoIterator<Item = T>,
         expected: &str,
     ) {

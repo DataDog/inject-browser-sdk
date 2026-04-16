@@ -17,7 +17,12 @@ use crate::{configuration::validate_configuration, configuration::Configuration,
 pub fn generate_snippet(configuration: &Configuration) -> Result<Vec<u8>, Error> {
     validate_configuration(configuration)?;
 
-    let site = configuration.rum.site.as_deref().unwrap_or("datadoghq.com");
+    let site = configuration
+        .rum
+        .fields
+        .get("site")
+        .and_then(|v| v.as_str())
+        .unwrap_or("datadoghq.com");
     let url = format_cdn_url(configuration.major_version, site)?;
 
     let mut output = Vec::new();
@@ -88,11 +93,19 @@ fn format_cdn_url(major_version: u32, site: &str) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{configuration::PrivacyLevel, configuration::RumConfiguration};
+    use crate::configuration::RumConfiguration;
     use alloc::boxed::Box;
-    use alloc::collections::BTreeMap;
     use pretty_assertions::assert_eq;
-    use serde_json::json;
+    use serde_json::{json, Value};
+
+    fn rum_config(pairs: &[(&str, Value)]) -> RumConfiguration {
+        RumConfiguration {
+            fields: pairs
+                .iter()
+                .map(|(k, v)| (Box::from(*k), v.clone()))
+                .collect(),
+        }
+    }
 
     #[test]
     fn test_generate_snippet_with_minimal_configuration() {
@@ -113,11 +126,10 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
-                    rum: RumConfiguration {
-                        client_token: Box::from("foo"),
-                        application_id: Box::from("bar"),
-                        ..Default::default()
-                    }
+                    rum: rum_config(&[
+                        ("applicationId", json!("bar")),
+                        ("clientToken", json!("foo")),
+                    ]),
                 })
                 .unwrap()
             )
@@ -136,7 +148,7 @@ window.DD_RUM.onReady(function() {
   n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
 })(window,document,'script','https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js','DD_RUM')
 window.DD_RUM.onReady(function() {
-  window.DD_RUM.init({"applicationId":"bar","clientToken":"foo","site":"datadoghq.com","trackResources":true,"defaultPrivacyLevel":"mask","sessionSampleRate":42.42});
+  window.DD_RUM.init({"applicationId":"bar","clientToken":"foo","defaultPrivacyLevel":"mask","sessionSampleRate":42.42,"site":"datadoghq.com","trackResources":true});
 });
 </script>
 "#;
@@ -145,15 +157,14 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
-                    rum: RumConfiguration {
-                        client_token: Box::from("foo"),
-                        application_id: Box::from("bar"),
-                        site: Some(Box::from("datadoghq.com")),
-                        default_privacy_level: Some(PrivacyLevel::Mask),
-                        track_resources: Some(true),
-                        session_sample_rate: Some(42.42),
-                        ..Default::default()
-                    }
+                    rum: rum_config(&[
+                        ("applicationId", json!("bar")),
+                        ("clientToken", json!("foo")),
+                        ("site", json!("datadoghq.com")),
+                        ("defaultPrivacyLevel", json!("mask")),
+                        ("trackResources", json!(true)),
+                        ("sessionSampleRate", json!(42.42)),
+                    ]),
                 })
                 .unwrap()
             )
@@ -183,12 +194,11 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
-                    rum: RumConfiguration {
-                        client_token: Box::from("foo"),
-                        application_id: Box::from("☺ € é"),
-                        site: Some(Box::from("datadoghq.com")),
-                        ..Default::default()
-                    }
+                    rum: rum_config(&[
+                        ("applicationId", json!("☺ € é")),
+                        ("clientToken", json!("foo")),
+                        ("site", json!("datadoghq.com")),
+                    ]),
                 })
                 .unwrap()
             )
@@ -207,7 +217,7 @@ window.DD_RUM.onReady(function() {
   n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
 })(window,document,'script','https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js','DD_RUM')
 window.DD_RUM.onReady(function() {
-  window.DD_RUM.init({"applicationId":"foo","clientToken":"bar","site":"datadoghq.com","newopt":"value","newopt2":true});
+  window.DD_RUM.init({"applicationId":"foo","clientToken":"bar","newopt":"value","newopt2":true,"site":"datadoghq.com"});
 });
 </script>
 "#;
@@ -216,16 +226,13 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
-                    rum: RumConfiguration {
-                        application_id: Box::from("foo"),
-                        client_token: Box::from("bar"),
-                        site: Some(Box::from("datadoghq.com")),
-                        other: BTreeMap::from([
-                            (Box::from("newopt"), json!("value")),
-                            (Box::from("newopt2"), json!(true)),
-                        ]),
-                        ..Default::default()
-                    }
+                    rum: rum_config(&[
+                        ("applicationId", json!("foo")),
+                        ("clientToken", json!("bar")),
+                        ("site", json!("datadoghq.com")),
+                        ("newopt", json!("value")),
+                        ("newopt2", json!(true)),
+                    ]),
                 })
                 .unwrap()
             )

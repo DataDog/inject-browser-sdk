@@ -5,30 +5,58 @@
 // Copyright 2024-Present Datadog, Inc.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap as Map;
 use alloc::format;
 use alloc::string::String;
 
-use crate::configuration::{validate_configuration, Configuration, PrivacyLevel, RumConfiguration};
+use crate::configuration::{validate_configuration, Configuration, RumConfiguration};
 use crate::error::Error;
+use serde_json::Value;
 
-/// Metadata describing how to read a config option from DD_* entries.
+/// The type of value a config option expects.
+#[derive(Clone, Copy, Debug)]
+enum ConfigValueType {
+    Str,
+    Bool,
+    F32,
+    U32,
+    Privacy,
+}
+
+/// Metadata describing how to read a config option from DD_* entries and
+/// how to map it to a RUM configuration field.
 #[derive(Clone, Copy, Debug)]
 struct ConfigOptionMeta {
     primary_key: &'static str,
     fallback_key: Option<&'static str>,
+    rum_field: &'static str,
+    value_type: ConfigValueType,
 }
 
 impl ConfigOptionMeta {
-    const fn key(primary: &'static str) -> Self {
+    const fn new(
+        primary: &'static str,
+        rum_field: &'static str,
+        value_type: ConfigValueType,
+    ) -> Self {
         Self {
             primary_key: primary,
             fallback_key: None,
+            rum_field,
+            value_type,
         }
     }
-    const fn key_fb(primary: &'static str, fallback: &'static str) -> Self {
+    const fn with_fallback(
+        primary: &'static str,
+        fallback: &'static str,
+        rum_field: &'static str,
+        value_type: ConfigValueType,
+    ) -> Self {
         Self {
             primary_key: primary,
             fallback_key: Some(fallback),
+            rum_field,
+            value_type,
         }
     }
 }
@@ -58,6 +86,7 @@ pub enum ConfigOption {
 }
 
 use ConfigOption::*;
+use ConfigValueType::*;
 
 impl ConfigOption {
     /// All known config options.
@@ -85,20 +114,46 @@ impl ConfigOption {
 
     const fn meta(&self) -> ConfigOptionMeta {
         match self {
-            ApplicationId => ConfigOptionMeta::key("DD_RUM_APPLICATION_ID"),
-            ClientToken => ConfigOptionMeta::key("DD_RUM_CLIENT_TOKEN"),
-            Site => ConfigOptionMeta::key_fb("DD_RUM_SITE", "DD_SITE"),
-            Service => ConfigOptionMeta::key_fb("DD_RUM_SERVICE", "DD_SERVICE"),
-            Environment => ConfigOptionMeta::key_fb("DD_RUM_ENVIRONMENT", "DD_ENV"),
-            Version => ConfigOptionMeta::key("DD_VERSION"),
-            TrackUserInteractions => ConfigOptionMeta::key("DD_RUM_TRACK_USER_INTERACTIONS"),
-            TrackResources => ConfigOptionMeta::key("DD_RUM_TRACK_RESOURCES"),
-            TrackLongTasks => ConfigOptionMeta::key("DD_RUM_TRACK_LONG_TASKS"),
-            DefaultPrivacyLevel => ConfigOptionMeta::key("DD_RUM_DEFAULT_PRIVACY_LEVEL"),
-            SessionSampleRate => ConfigOptionMeta::key("DD_RUM_SESSION_SAMPLE_RATE"),
-            SessionReplaySampleRate => ConfigOptionMeta::key("DD_RUM_SESSION_REPLAY_SAMPLE_RATE"),
-            MajorVersion => ConfigOptionMeta::key("DD_RUM_MAJOR_VERSION"),
-            RemoteConfigurationId => ConfigOptionMeta::key("DD_RUM_REMOTE_CONFIGURATION_ID"),
+            ApplicationId => ConfigOptionMeta::new("DD_RUM_APPLICATION_ID", "applicationId", Str),
+            ClientToken => ConfigOptionMeta::new("DD_RUM_CLIENT_TOKEN", "clientToken", Str),
+            Site => ConfigOptionMeta::with_fallback("DD_RUM_SITE", "DD_SITE", "site", Str),
+            Service => {
+                ConfigOptionMeta::with_fallback("DD_RUM_SERVICE", "DD_SERVICE", "service", Str)
+            }
+            Environment => {
+                ConfigOptionMeta::with_fallback("DD_RUM_ENVIRONMENT", "DD_ENV", "env", Str)
+            }
+            Version => ConfigOptionMeta::new("DD_VERSION", "version", Str),
+            TrackUserInteractions => ConfigOptionMeta::new(
+                "DD_RUM_TRACK_USER_INTERACTIONS",
+                "trackUserInteractions",
+                Bool,
+            ),
+            TrackResources => {
+                ConfigOptionMeta::new("DD_RUM_TRACK_RESOURCES", "trackResources", Bool)
+            }
+            TrackLongTasks => {
+                ConfigOptionMeta::new("DD_RUM_TRACK_LONG_TASKS", "trackLongTasks", Bool)
+            }
+            DefaultPrivacyLevel => ConfigOptionMeta::new(
+                "DD_RUM_DEFAULT_PRIVACY_LEVEL",
+                "defaultPrivacyLevel",
+                Privacy,
+            ),
+            SessionSampleRate => {
+                ConfigOptionMeta::new("DD_RUM_SESSION_SAMPLE_RATE", "sessionSampleRate", F32)
+            }
+            SessionReplaySampleRate => ConfigOptionMeta::new(
+                "DD_RUM_SESSION_REPLAY_SAMPLE_RATE",
+                "sessionReplaySampleRate",
+                F32,
+            ),
+            MajorVersion => ConfigOptionMeta::new("DD_RUM_MAJOR_VERSION", "majorVersion", U32),
+            RemoteConfigurationId => ConfigOptionMeta::new(
+                "DD_RUM_REMOTE_CONFIGURATION_ID",
+                "remoteConfigurationId",
+                Str,
+            ),
         }
     }
 
@@ -145,14 +200,35 @@ fn parse_f32(raw: &str, key: &str) -> Result<f32, Error> {
     Ok(val)
 }
 
-fn parse_privacy(raw: &str, key: &str) -> Result<PrivacyLevel, Error> {
+fn parse_privacy(raw: &str, key: &str) -> Result<&'static str, Error> {
     match raw.to_ascii_lowercase().as_str() {
-        "allow" => Ok(PrivacyLevel::Allow),
-        "mask" => Ok(PrivacyLevel::Mask),
-        "mask-user-input" => Ok(PrivacyLevel::MaskUserInput),
+        "allow" => Ok("allow"),
+        "mask" => Ok("mask"),
+        "mask-user-input" => Ok("mask-user-input"),
         _ => Err(Error::StableConfig(format!(
             "Invalid privacy level '{raw}' for key '{key}'"
         ))),
+    }
+}
+
+/// Parse a raw string value into a [`serde_json::Value`] according to the option's type.
+fn parse_value(raw: &str, opt: ConfigOption) -> Result<Value, Error> {
+    let meta = opt.meta();
+    let key = meta.primary_key;
+    match meta.value_type {
+        Str => Ok(Value::String(raw.into())),
+        Bool => parse_bool(raw, key).map(Value::Bool),
+        F32 => {
+            let v = parse_f32(raw, key)?;
+            Ok(serde_json::Number::from_f64(v as f64)
+                .map(Value::Number)
+                .unwrap_or(Value::Null))
+        }
+        U32 => {
+            let v = parse_u32(raw, key)?;
+            Ok(Value::Number(v.into()))
+        }
+        Privacy => parse_privacy(raw, key).map(|s| Value::String(s.into())),
     }
 }
 
@@ -164,56 +240,39 @@ fn parse_privacy(raw: &str, key: &str) -> Result<PrivacyLevel, Error> {
 pub(crate) fn build_configuration<'a>(
     lookup: impl Fn(&str) -> Option<&'a str>,
 ) -> Result<Configuration, Error> {
-    let resolve = |opt: ConfigOption| opt.resolve(&lookup);
+    let mut fields: Map<Box<str>, Value> = Map::new();
 
-    let require_str = |opt: ConfigOption| -> Result<&'a str, Error> {
-        match resolve(opt) {
-            Some(v) if !v.is_empty() => Ok(v),
-            _ => Err(Error::EmptyMandatoryConf(String::from(
-                opt.meta().primary_key,
-            ))),
+    for &opt in ConfigOption::ALL {
+        if let Some(raw) = opt.resolve(&lookup) {
+            let value = parse_value(raw, opt)?;
+            fields.insert(Box::from(opt.meta().rum_field), value);
+        }
+    }
+
+    // Require mandatory fields
+    let require_field = |fields: &Map<Box<str>, Value>, key: &str| -> Result<(), Error> {
+        match fields.get(key).and_then(|v| v.as_str()) {
+            Some(v) if !v.is_empty() => Ok(()),
+            _ => Err(Error::EmptyMandatoryConf(String::from(key))),
         }
     };
 
-    let opt_bool = |opt: ConfigOption| -> Result<Option<bool>, Error> {
-        resolve(opt)
-            .map(|v| parse_bool(v, opt.meta().primary_key))
-            .transpose()
-    };
+    require_field(&fields, "applicationId")?;
+    require_field(&fields, "clientToken")?;
 
-    let opt_f32 = |opt: ConfigOption| -> Result<Option<f32>, Error> {
-        resolve(opt)
-            .map(|v| parse_f32(v, opt.meta().primary_key))
-            .transpose()
-    };
+    // TODO(INPLAT-1104): support unknown DD_RUM_* keys as pass-through string values.
 
-    let configuration = Configuration {
-        major_version: match resolve(MajorVersion) {
-            Some(v) => parse_u32(v, MajorVersion.meta().primary_key)?,
-            None => 5,
-        },
-        rum: RumConfiguration {
-            application_id: Box::from(require_str(ApplicationId)?),
-            client_token: Box::from(require_str(ClientToken)?),
-            site: resolve(Site).map(Box::from),
-            service: resolve(Service).map(Box::from),
-            env: resolve(Environment).map(Box::from),
-            version: resolve(Version).map(Box::from),
-            track_user_interactions: opt_bool(TrackUserInteractions)?,
-            track_resources: opt_bool(TrackResources)?,
-            track_long_task: opt_bool(TrackLongTasks)?,
-            default_privacy_level: resolve(DefaultPrivacyLevel)
-                .map(|v| parse_privacy(v, DefaultPrivacyLevel.meta().primary_key))
-                .transpose()?,
-            session_sample_rate: opt_f32(SessionSampleRate)?,
-            session_replay_sample_rate: opt_f32(SessionReplaySampleRate)?,
-            remote_configuration_id: resolve(RemoteConfigurationId).map(Box::from),
-            other: Default::default(),
-        },
-    };
+    let major_version = fields
+        .remove("majorVersion")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5) as u32;
 
-    validate_configuration(&configuration)?;
-    Ok(configuration)
+    let config = Configuration {
+        major_version,
+        rum: RumConfiguration { fields },
+    };
+    validate_configuration(&config)?;
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -240,10 +299,10 @@ mod tests {
         assert!(parse_f32("inf", "k").is_err());
         assert!(parse_f32("NaN", "k").is_err());
 
-        assert_eq!(parse_privacy("allow", "k").unwrap(), PrivacyLevel::Allow);
+        assert_eq!(parse_privacy("allow", "k").unwrap(), "allow");
         assert_eq!(
             parse_privacy("mask-user-input", "k").unwrap(),
-            PrivacyLevel::MaskUserInput
+            "mask-user-input"
         );
         assert!(parse_privacy("none", "k").is_err());
     }
@@ -276,10 +335,24 @@ mod tests {
             (String::from("DD_RUM_CLIENT_TOKEN"), String::from("tok-1")),
         ]);
         let config = build_configuration(lookup_from_map(&map)).unwrap();
-        assert_eq!(config.rum.application_id.as_ref(), "app-1");
-        assert_eq!(config.rum.client_token.as_ref(), "tok-1");
+        assert_eq!(
+            config
+                .rum
+                .fields
+                .get("applicationId")
+                .and_then(|v| v.as_str()),
+            Some("app-1")
+        );
+        assert_eq!(
+            config
+                .rum
+                .fields
+                .get("clientToken")
+                .and_then(|v| v.as_str()),
+            Some("tok-1")
+        );
         assert_eq!(config.major_version, 5);
-        assert_eq!(config.rum.site, None);
+        assert_eq!(config.rum.fields.get("site"), None);
     }
 
     #[test]
@@ -322,21 +395,93 @@ mod tests {
             ),
         ]);
         let config = build_configuration(lookup_from_map(&map)).unwrap();
-        assert_eq!(config.rum.application_id.as_ref(), "app-1");
-        assert_eq!(config.rum.client_token.as_ref(), "tok-1");
-        assert_eq!(config.rum.site.as_deref(), Some("datadoghq.com"));
-        assert_eq!(config.rum.service.as_deref(), Some("my-svc"));
-        assert_eq!(config.rum.env.as_deref(), Some("prod"));
-        assert_eq!(config.rum.version.as_deref(), Some("1.0"));
-        assert_eq!(config.rum.track_user_interactions, Some(true));
-        assert_eq!(config.rum.track_resources, Some(false));
-        assert_eq!(config.rum.track_long_task, Some(true));
-        assert_eq!(config.rum.default_privacy_level, Some(PrivacyLevel::Mask));
-        assert_eq!(config.rum.session_sample_rate, Some(80.5));
-        assert_eq!(config.rum.session_replay_sample_rate, Some(50.0));
+        assert_eq!(
+            config
+                .rum
+                .fields
+                .get("applicationId")
+                .and_then(|v| v.as_str()),
+            Some("app-1")
+        );
+        assert_eq!(
+            config
+                .rum
+                .fields
+                .get("clientToken")
+                .and_then(|v| v.as_str()),
+            Some("tok-1")
+        );
+        assert_eq!(
+            config.rum.fields.get("site").and_then(|v| v.as_str()),
+            Some("datadoghq.com")
+        );
+        assert_eq!(
+            config.rum.fields.get("service").and_then(|v| v.as_str()),
+            Some("my-svc")
+        );
+        assert_eq!(
+            config.rum.fields.get("env").and_then(|v| v.as_str()),
+            Some("prod")
+        );
+        assert_eq!(
+            config.rum.fields.get("version").and_then(|v| v.as_str()),
+            Some("1.0")
+        );
+        assert_eq!(
+            config
+                .rum
+                .fields
+                .get("trackUserInteractions")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            config
+                .rum
+                .fields
+                .get("trackResources")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            config
+                .rum
+                .fields
+                .get("trackLongTasks")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            config
+                .rum
+                .fields
+                .get("defaultPrivacyLevel")
+                .and_then(|v| v.as_str()),
+            Some("mask")
+        );
+        assert_eq!(
+            config
+                .rum
+                .fields
+                .get("sessionSampleRate")
+                .and_then(|v| v.as_f64()),
+            Some(80.5)
+        );
+        assert_eq!(
+            config
+                .rum
+                .fields
+                .get("sessionReplaySampleRate")
+                .and_then(|v| v.as_f64()),
+            Some(50.0)
+        );
         assert_eq!(config.major_version, 6);
         assert_eq!(
-            config.rum.remote_configuration_id.as_deref(),
+            config
+                .rum
+                .fields
+                .get("remoteConfigurationId")
+                .and_then(|v| v.as_str()),
             Some("rc-123")
         );
     }
@@ -354,9 +499,18 @@ mod tests {
             (String::from("DD_ENV"), String::from("production")),
         ]);
         let config = build_configuration(lookup_from_map(&map)).unwrap();
-        assert_eq!(config.rum.site.as_deref(), Some("datadoghq.com"));
-        assert_eq!(config.rum.service.as_deref(), Some("rum-svc"));
-        assert_eq!(config.rum.env.as_deref(), Some("staging"));
+        assert_eq!(
+            config.rum.fields.get("site").and_then(|v| v.as_str()),
+            Some("datadoghq.com")
+        );
+        assert_eq!(
+            config.rum.fields.get("service").and_then(|v| v.as_str()),
+            Some("rum-svc")
+        );
+        assert_eq!(
+            config.rum.fields.get("env").and_then(|v| v.as_str()),
+            Some("staging")
+        );
     }
 
     #[test]
@@ -394,11 +548,11 @@ mod tests {
 
     #[test]
     fn parse_privacy_case_insensitive() {
-        assert_eq!(parse_privacy("MASK", "k").unwrap(), PrivacyLevel::Mask);
-        assert_eq!(parse_privacy("Allow", "k").unwrap(), PrivacyLevel::Allow);
+        assert_eq!(parse_privacy("MASK", "k").unwrap(), "mask");
+        assert_eq!(parse_privacy("Allow", "k").unwrap(), "allow");
         assert_eq!(
             parse_privacy("Mask-User-Input", "k").unwrap(),
-            PrivacyLevel::MaskUserInput
+            "mask-user-input"
         );
     }
 
@@ -412,9 +566,18 @@ mod tests {
             (String::from("DD_ENV"), String::from("prod")),
         ]);
         let config = build_configuration(lookup_from_map(&map)).unwrap();
-        assert_eq!(config.rum.site.as_deref(), Some("datadoghq.eu"));
-        assert_eq!(config.rum.service.as_deref(), Some("my-svc"));
-        assert_eq!(config.rum.env.as_deref(), Some("prod"));
+        assert_eq!(
+            config.rum.fields.get("site").and_then(|v| v.as_str()),
+            Some("datadoghq.eu")
+        );
+        assert_eq!(
+            config.rum.fields.get("service").and_then(|v| v.as_str()),
+            Some("my-svc")
+        );
+        assert_eq!(
+            config.rum.fields.get("env").and_then(|v| v.as_str()),
+            Some("prod")
+        );
     }
 
     #[test]

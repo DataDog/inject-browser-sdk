@@ -337,8 +337,10 @@ dependencies = [
 name = "inject-browser-sdk"
 version = "1.2.1-dev"
 dependencies = [
+ "libdd-library-config",
  "pretty_assertions",
  "rand 0.10.0",
+ "rustix",
  "serde",
  "serde_json",
 ]
@@ -351,7 +353,6 @@ dependencies = [
  "csbindgen",
  "dlmalloc",
  "inject-browser-sdk",
- "libdd-library-config",
  "pretty_assertions",
  "rand 0.10.0",
  "rustix",
@@ -367,6 +368,7 @@ version = "1.2.1-dev"
 dependencies = [
  "inject-browser-sdk",
  "libfuzzer-sys",
+ "serde_json",
 ]
 
 [[package]]
@@ -845,6 +847,7 @@ name = "test_inject"
 version = "1.2.1-dev"
 dependencies = [
  "inject-browser-sdk",
+ "serde_json",
 ]
 
 [[package]]

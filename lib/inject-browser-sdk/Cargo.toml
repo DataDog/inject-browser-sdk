@@ -6,16 +6,23 @@ version.workspace = true
 rust-version.workspace = true
 
 [features]
-default = []
+default = ["stable-config"]
 std = ["serde/std", "serde_json/std"]
+stable-config = ["dep:rustix", "dep:libdd-library-config"]
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+rustix = { version = "1.0", default-features = false, features = ["fs", "stdio"], optional = true }
+# From branch: pawel/no-std-library-config
+libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", default-features = false, optional = true }
+
+# On Windows: enable std for libdd-library-config when stable-config is active
+[target.'cfg(windows)'.dependencies]
+libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", features = ["std"], optional = true }
 
 [dev-dependencies]
 pretty_assertions = { version = "1.4.0", features = ["unstable"] }
 rand = "0.10.0"
 serde = { version = "1.0", features = ["std"] }
 serde_json = { version = "1.0", features = ["std"] }
-

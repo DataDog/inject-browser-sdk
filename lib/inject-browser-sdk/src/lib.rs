@@ -16,6 +16,8 @@ mod configuration;
 pub mod error;
 mod injection_point_locator;
 pub mod injector;
+#[cfg(feature = "stable-config")]
+pub mod platform;
 mod snippet;
 mod stable_config;
 

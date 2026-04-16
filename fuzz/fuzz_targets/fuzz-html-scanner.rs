@@ -10,26 +10,17 @@ extern crate libfuzzer_sys;
 
 use inject_browser_sdk::{generate_snippet, injector::Injector, Configuration, RumConfiguration};
 use libfuzzer_sys::fuzz_target;
+use serde_json::json;
 use std::collections::BTreeMap as Map;
 
 fuzz_target!(|data: &[u8]| {
     let conf: Configuration = Configuration {
         major_version: 5,
         rum: RumConfiguration {
-            application_id: Box::from("foo"),
-            client_token: Box::from("bar"),
-            site: None,
-            service: None,
-            env: None,
-            version: None,
-            track_user_interactions: None,
-            track_resources: None,
-            track_long_task: None,
-            default_privacy_level: None,
-            session_sample_rate: None,
-            session_replay_sample_rate: None,
-            remote_configuration_id: None,
-            other: Map::new(),
+            fields: Map::from([
+                (Box::from("applicationId"), json!("foo")),
+                (Box::from("clientToken"), json!("bar")),
+            ]),
         },
     };
 

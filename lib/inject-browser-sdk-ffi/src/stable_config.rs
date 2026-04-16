@@ -7,7 +7,7 @@
 use alloc::{format, string::String};
 use core::ffi::{c_char, CStr};
 
-use inject_browser_sdk::{config_option::ConfigOption, error::Error, snippet_from_lookup};
+use inject_browser_sdk::{config_option::ConfigOption, error::Error, snippet_from_stable_config};
 
 use crate::snippet::{Snippet, SnippetInternal};
 
@@ -92,9 +92,8 @@ pub unsafe extern "C" fn snippet_create_from_stable_config(
         return SnippetInternal::stable_config_err("language parameter is NULL");
     }
 
-    // Parse overrides into a map keyed by DD_* key name.
-    let override_map = match parse_overrides(overrides, override_count) {
-        Ok(map) => map,
+    let override_vec = match parse_overrides(overrides, override_count) {
+        Ok(v) => v,
         Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
     };
 
@@ -103,34 +102,20 @@ pub unsafe extern "C" fn snippet_create_from_stable_config(
         Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
     };
 
-    let configs = match inject_browser_sdk::platform::read_stable_configs(language_str, debug_logs)
-    {
-        Ok(configs) => configs,
-        Err(err) => {
-            return SnippetInternal::new(Err(Error::StableConfig(err))).into_public_ptr();
-        }
-    };
+    let overrides_refs: alloc::vec::Vec<(&ConfigOption, &str)> = override_vec
+        .iter()
+        .map(|(opt, val)| (opt, val.as_str()))
+        .collect();
 
-    let result = snippet_from_lookup(|key| {
-        if let Some(v) = override_map.get(key) {
-            return Some(v.as_str());
-        }
-        configs
-            .iter()
-            .find(|c| c.name == key)
-            .map(|c| c.value.as_str())
-    });
-
+    let result = snippet_from_stable_config(language_str, debug_logs, &overrides_refs);
     SnippetInternal::new(result).into_public_ptr()
 }
 
-/// Parse a C array of [`ConfigOverride`] into a `BTreeMap` keyed by DD_* key name.
+/// Parse a C array of [`ConfigOverride`] into a `Vec` of (ConfigOption, value) pairs.
 unsafe fn parse_overrides(
     entries: *const ConfigOverride,
     count: u32,
-) -> Result<alloc::collections::BTreeMap<&'static str, String>, Error> {
-    use alloc::collections::BTreeMap;
-
+) -> Result<alloc::vec::Vec<(ConfigOption, String)>, Error> {
     if entries.is_null() && count > 0 {
         return Err(Error::StableConfig(String::from(
             "overrides pointer is NULL but count is non-zero",
@@ -141,13 +126,13 @@ unsafe fn parse_overrides(
     } else {
         core::slice::from_raw_parts(entries, count as usize)
     };
-    let mut map = BTreeMap::new();
+    let mut result = alloc::vec::Vec::with_capacity(slice.len());
     for entry in slice {
         let key = entry.config_option.key();
         let value = cstr_to_str(entry.value, &format!("Value for override '{key}'"))?;
-        map.insert(key, String::from(value));
+        result.push((entry.config_option, String::from(value)));
     }
-    Ok(map)
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -159,10 +144,7 @@ mod tests {
     use std::ptr::null_mut;
 
     use crate::snippet::{snippet_cleanup, SnippetInternal};
-
-    fn cstr_ptr(bytes: &[u8]) -> *const i8 {
-        bytes.as_ptr() as *const i8
-    }
+    use crate::test_utils::cstr_ptr;
 
     #[test]
     fn no_files_no_overrides() {

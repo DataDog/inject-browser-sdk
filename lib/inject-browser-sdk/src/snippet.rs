@@ -94,18 +94,8 @@ fn format_cdn_url(major_version: u32, site: &str) -> Result<String, Error> {
 mod tests {
     use super::*;
     use crate::configuration::RumConfiguration;
-    use alloc::boxed::Box;
     use pretty_assertions::assert_eq;
-    use serde_json::{json, Value};
-
-    fn rum_config(pairs: &[(&str, Value)]) -> RumConfiguration {
-        RumConfiguration {
-            fields: pairs
-                .iter()
-                .map(|(k, v)| (Box::from(*k), v.clone()))
-                .collect(),
-        }
-    }
+    use serde_json::json;
 
     #[test]
     fn test_generate_snippet_with_minimal_configuration() {
@@ -126,7 +116,7 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
-                    rum: rum_config(&[
+                    rum: RumConfiguration::from_pairs(&[
                         ("applicationId", json!("bar")),
                         ("clientToken", json!("foo")),
                     ]),
@@ -157,7 +147,7 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
-                    rum: rum_config(&[
+                    rum: RumConfiguration::from_pairs(&[
                         ("applicationId", json!("bar")),
                         ("clientToken", json!("foo")),
                         ("site", json!("datadoghq.com")),
@@ -194,7 +184,7 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
-                    rum: rum_config(&[
+                    rum: RumConfiguration::from_pairs(&[
                         ("applicationId", json!("☺ € é")),
                         ("clientToken", json!("foo")),
                         ("site", json!("datadoghq.com")),
@@ -226,7 +216,7 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
-                    rum: rum_config(&[
+                    rum: RumConfiguration::from_pairs(&[
                         ("applicationId", json!("foo")),
                         ("clientToken", json!("bar")),
                         ("site", json!("datadoghq.com")),

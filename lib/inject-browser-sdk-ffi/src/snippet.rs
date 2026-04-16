@@ -252,9 +252,7 @@ mod tests {
         );
     }
 
-    fn cstr_ptr(bytes: &[u8]) -> *const i8 {
-        bytes.as_ptr() as *const i8
-    }
+    use crate::test_utils::cstr_ptr;
 
     fn get_error(snippet: *const Snippet) -> (u8, String) {
         let snippet = unsafe { SnippetInternal::from_public_ptr(snippet) };

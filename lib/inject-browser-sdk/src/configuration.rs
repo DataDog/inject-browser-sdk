@@ -34,6 +34,18 @@ pub struct RumConfiguration {
     pub fields: Map<Box<str>, Value>,
 }
 
+#[cfg(test)]
+impl RumConfiguration {
+    pub fn from_pairs(pairs: &[(&str, Value)]) -> Self {
+        Self {
+            fields: pairs
+                .iter()
+                .map(|(k, v)| (Box::from(*k), v.clone()))
+                .collect(),
+        }
+    }
+}
+
 impl Serialize for RumConfiguration {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(self.fields.len()))?;
@@ -109,15 +121,6 @@ mod test {
     use alloc::vec;
     use pretty_assertions::assert_eq;
 
-    fn rum_config(pairs: &[(&str, Value)]) -> RumConfiguration {
-        RumConfiguration {
-            fields: pairs
-                .iter()
-                .map(|(k, v)| (Box::from(*k), v.clone()))
-                .collect(),
-        }
-    }
-
     #[test]
     fn from_json() {
         let configuration: Configuration = serde_json::from_slice(
@@ -174,7 +177,7 @@ mod test {
             TestCase {
                 input: Configuration {
                     major_version: 6,
-                    rum: rum_config(&[
+                    rum: RumConfiguration::from_pairs(&[
                         ("applicationId", Value::from("")),
                         ("clientToken", Value::from("foo")),
                     ]),
@@ -184,7 +187,7 @@ mod test {
             TestCase {
                 input: Configuration {
                     major_version: 5,
-                    rum: rum_config(&[
+                    rum: RumConfiguration::from_pairs(&[
                         ("applicationId", Value::from("bar")),
                         ("clientToken", Value::from("")),
                     ]),
@@ -194,7 +197,7 @@ mod test {
             TestCase {
                 input: Configuration {
                     major_version: 5,
-                    rum: rum_config(&[
+                    rum: RumConfiguration::from_pairs(&[
                         ("clientToken", Value::from("foo")),
                         ("applicationId", Value::from("bar")),
                         ("sessionSampleRate", serde_json::json!(105.0)),
@@ -205,7 +208,7 @@ mod test {
             TestCase {
                 input: Configuration {
                     major_version: 5,
-                    rum: rum_config(&[
+                    rum: RumConfiguration::from_pairs(&[
                         ("clientToken", Value::from("foo")),
                         ("applicationId", Value::from("bar")),
                         ("sessionReplaySampleRate", serde_json::json!(2469.0)),
@@ -223,7 +226,7 @@ mod test {
             TestCase {
                 input: Configuration {
                     major_version: 5,
-                    rum: rum_config(&[
+                    rum: RumConfiguration::from_pairs(&[
                         ("clientToken", Value::from("foo")),
                         ("applicationId", Value::from("bar")),
                         ("site", Value::from("example.com")),

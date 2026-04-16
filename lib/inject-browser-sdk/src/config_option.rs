@@ -7,7 +7,6 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap as Map;
 use alloc::format;
-use alloc::string::String;
 
 use crate::configuration::{validate_configuration, Configuration, RumConfiguration};
 use crate::error::Error;
@@ -18,7 +17,7 @@ use serde_json::Value;
 enum ConfigValueType {
     Str,
     Bool,
-    F32,
+    F64,
     U32,
     Privacy,
 }
@@ -141,12 +140,12 @@ impl ConfigOption {
                 Privacy,
             ),
             SessionSampleRate => {
-                ConfigOptionMeta::new("DD_RUM_SESSION_SAMPLE_RATE", "sessionSampleRate", F32)
+                ConfigOptionMeta::new("DD_RUM_SESSION_SAMPLE_RATE", "sessionSampleRate", F64)
             }
             SessionReplaySampleRate => ConfigOptionMeta::new(
                 "DD_RUM_SESSION_REPLAY_SAMPLE_RATE",
                 "sessionReplaySampleRate",
-                F32,
+                F64,
             ),
             MajorVersion => ConfigOptionMeta::new("DD_RUM_MAJOR_VERSION", "majorVersion", U32),
             RemoteConfigurationId => ConfigOptionMeta::new(
@@ -188,8 +187,8 @@ fn parse_u32(raw: &str, key: &str) -> Result<u32, Error> {
         .map_err(|_| Error::StableConfig(format!("Invalid u32 value '{raw}' for key '{key}'")))
 }
 
-fn parse_f32(raw: &str, key: &str) -> Result<f32, Error> {
-    let val: f32 = raw
+fn parse_f64(raw: &str, key: &str) -> Result<f64, Error> {
+    let val: f64 = raw
         .parse()
         .map_err(|_| Error::StableConfig(format!("Invalid float value '{raw}' for key '{key}'")))?;
     if !val.is_finite() {
@@ -218,11 +217,12 @@ fn parse_value(raw: &str, opt: ConfigOption) -> Result<Value, Error> {
     match meta.value_type {
         Str => Ok(Value::String(raw.into())),
         Bool => parse_bool(raw, key).map(Value::Bool),
-        F32 => {
-            let v = parse_f32(raw, key)?;
-            Ok(serde_json::Number::from_f64(v as f64)
-                .map(Value::Number)
-                .unwrap_or(Value::Null))
+        F64 => {
+            let v = parse_f64(raw, key)?;
+            Ok(Value::Number(
+                serde_json::Number::from_f64(v)
+                    .expect("parse_f64 already rejects non-finite values"),
+            ))
         }
         U32 => {
             let v = parse_u32(raw, key)?;
@@ -248,17 +248,6 @@ pub(crate) fn build_configuration<'a>(
             fields.insert(Box::from(opt.meta().rum_field), value);
         }
     }
-
-    // Require mandatory fields
-    let require_field = |fields: &Map<Box<str>, Value>, key: &str| -> Result<(), Error> {
-        match fields.get(key).and_then(|v| v.as_str()) {
-            Some(v) if !v.is_empty() => Ok(()),
-            _ => Err(Error::EmptyMandatoryConf(String::from(key))),
-        }
-    };
-
-    require_field(&fields, "applicationId")?;
-    require_field(&fields, "clientToken")?;
 
     // TODO(INPLAT-1104): support unknown DD_RUM_* keys as pass-through string values.
 
@@ -295,9 +284,9 @@ mod tests {
         assert_eq!(parse_u32("42", "k").unwrap(), 42);
         assert!(parse_u32("abc", "k").is_err());
 
-        assert!((parse_f32("42.5", "k").unwrap() - 42.5).abs() < f32::EPSILON);
-        assert!(parse_f32("inf", "k").is_err());
-        assert!(parse_f32("NaN", "k").is_err());
+        assert!((parse_f64("42.5", "k").unwrap() - 42.5).abs() < f64::EPSILON);
+        assert!(parse_f64("inf", "k").is_err());
+        assert!(parse_f64("NaN", "k").is_err());
 
         assert_eq!(parse_privacy("allow", "k").unwrap(), "allow");
         assert_eq!(
@@ -543,7 +532,8 @@ mod tests {
 
     #[test]
     fn all_contains_all_variants() {
-        assert_eq!(ConfigOption::ALL.len(), 14);
+        // Ensure ALL is updated when new variants are added to the enum.
+        assert_eq!(ConfigOption::ALL.len(), RemoteConfigurationId as usize + 1);
     }
 
     #[test]

@@ -122,3 +122,10 @@ mod stable_config;
 pub use injector::*;
 pub use snippet::*;
 pub use stable_config::*;
+
+#[cfg(test)]
+pub(crate) mod test_utils {
+    pub fn cstr_ptr(bytes: &[u8]) -> *const i8 {
+        bytes.as_ptr() as *const i8
+    }
+}

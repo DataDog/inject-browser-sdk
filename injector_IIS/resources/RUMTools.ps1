@@ -101,10 +101,10 @@ function Uninstall-Datadog-RUMConfiguration {
     
                 $options = Get-WebConfiguration -PSPath $psPath -Filter "$sectionPath/option" -ErrorAction SilentlyContinue
                 foreach ($option in $options) {
-                    Clear-WebConfiguration -PSPath $psPath -Filter "$sectionPath/option[@name='$($option.name)']" -ErrorAction SilentlyContinue
+                    Clear-WebConfiguration -PSPath $psPath -Filter "$sectionPath/option[@name='$($option.name)']" -ErrorAction Stop
                 }
-                Clear-WebConfiguration -PSPath $psPath -Filter $sectionPath -ErrorAction SilentlyContinue
-    
+                Clear-WebConfiguration -PSPath $psPath -Filter $sectionPath -ErrorAction Stop
+
                 Stop-WebCommitDelay -Commit $True
                 Write-Host "Successfully removed Datadog RUM configuration from '$SiteName$AppPath'"
             }
@@ -152,9 +152,9 @@ function Uninstall-Datadog-RUMConfiguration {
 
                 $options = Get-WebConfiguration -PSPath $psPath -Location $locationPath -Filter "$sectionPath/option" -ErrorAction SilentlyContinue
                 foreach ($option in $options) {
-                    Clear-WebConfiguration -PSPath $psPath -Location $locationPath -Filter "$sectionPath/option[@name='$($option.name)']" -ErrorAction SilentlyContinue
+                    Clear-WebConfiguration -PSPath $psPath -Location $locationPath -Filter "$sectionPath/option[@name='$($option.name)']" -ErrorAction Stop
                 }
-                Clear-WebConfiguration -PSPath $psPath -Location $locationPath -Filter $sectionPath -ErrorAction SilentlyContinue
+                Clear-WebConfiguration -PSPath $psPath -Location $locationPath -Filter $sectionPath -ErrorAction Stop
 
                 Stop-WebCommitDelay -Commit $True
                 Write-Host "Successfully removed Datadog RUM configuration from '$SiteName' location '$locationPath'"
@@ -166,7 +166,12 @@ function Uninstall-Datadog-RUMConfiguration {
         }
     }
 
-    $sites = Get-ChildItem IIS:\Sites
+    try {
+        $sites = Get-ChildItem IIS:\Sites -ErrorAction Stop
+    } catch {
+        Write-Error "Unable to enumerate IIS sites: $_"
+        return
+    }
 
     foreach ($site in $sites) {
         Remove-DatadogRumFromApp -SiteName $site.Name -AppPath ""

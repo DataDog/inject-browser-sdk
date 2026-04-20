@@ -80,29 +80,21 @@ pub unsafe extern "C" fn snippet_create_from_stable_config(
         Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
     };
 
-    let overlay = match parse_overlay(json_overlay) {
-        Ok(o) => o,
-        Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
+    let overlay = if json_overlay.is_null() {
+        None
+    } else {
+        match serde_json::from_slice::<ConfigurationOverlay>(
+            CStr::from_ptr(json_overlay).to_bytes(),
+        ) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                return SnippetInternal::new(Err(Error::Json(format!("{e}")))).into_public_ptr();
+            }
+        }
     };
 
     let result = snippet_from_stable_config(language_str, debug_logs, overlay);
     SnippetInternal::new(result).into_public_ptr()
-}
-
-/// Parse a nullable C string as a [`ConfigurationOverlay`]. A null pointer means
-/// "no overlay"; a non-null pointer is parsed as JSON.
-///
-/// # Safety
-///
-/// If non-null, `json` must point to a valid NUL-terminated C string.
-unsafe fn parse_overlay(json: *const c_char) -> Result<Option<ConfigurationOverlay>, Error> {
-    if json.is_null() {
-        return Ok(None);
-    }
-    let bytes = CStr::from_ptr(json).to_bytes();
-    serde_json::from_slice::<ConfigurationOverlay>(bytes)
-        .map(Some)
-        .map_err(|e| Error::Json(format!("{e}")))
 }
 
 #[cfg(test)]

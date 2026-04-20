@@ -26,10 +26,6 @@ pub struct Configuration {
 /// Known fields are strongly typed. Unknown JSON keys are captured in
 /// [`RumConfiguration::other`] so future Browser-SDK additions flow through
 /// without an injector release.
-///
-/// The derived `Serialize` emits Option fields only when `Some(_)`; callers
-/// that need deterministic key ordering should route the value through
-/// `serde_json::to_value` + `Value::sort_all_objects` before writing.
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(test, derive(Debug, PartialEq))]
@@ -80,11 +76,19 @@ pub struct ConfigurationOverlay {
     pub rum: RumConfiguration,
 }
 
+fn overlay_field<T>(dst: &mut Option<T>, src: Option<T>) {
+    if src.is_some() {
+        *dst = src;
+    }
+}
+
 impl RumConfiguration {
     /// Merge `overlay` into `self`: overlay `Some(_)` fields win; unknown keys
     /// in `overlay.other` are inserted into `self.other`, replacing any entry
     /// with the same name.
     pub fn merge(&mut self, overlay: RumConfiguration) {
+        // Destructure so the compiler catches any field added to the struct but
+        // missed here.
         let RumConfiguration {
             application_id,
             client_token,
@@ -101,45 +105,22 @@ impl RumConfiguration {
             remote_configuration_id,
             other,
         } = overlay;
-        if application_id.is_some() {
-            self.application_id = application_id;
-        }
-        if client_token.is_some() {
-            self.client_token = client_token;
-        }
-        if site.is_some() {
-            self.site = site;
-        }
-        if service.is_some() {
-            self.service = service;
-        }
-        if env.is_some() {
-            self.env = env;
-        }
-        if version.is_some() {
-            self.version = version;
-        }
-        if track_user_interactions.is_some() {
-            self.track_user_interactions = track_user_interactions;
-        }
-        if track_resources.is_some() {
-            self.track_resources = track_resources;
-        }
-        if track_long_tasks.is_some() {
-            self.track_long_tasks = track_long_tasks;
-        }
-        if default_privacy_level.is_some() {
-            self.default_privacy_level = default_privacy_level;
-        }
-        if session_sample_rate.is_some() {
-            self.session_sample_rate = session_sample_rate;
-        }
-        if session_replay_sample_rate.is_some() {
-            self.session_replay_sample_rate = session_replay_sample_rate;
-        }
-        if remote_configuration_id.is_some() {
-            self.remote_configuration_id = remote_configuration_id;
-        }
+        overlay_field(&mut self.application_id, application_id);
+        overlay_field(&mut self.client_token, client_token);
+        overlay_field(&mut self.site, site);
+        overlay_field(&mut self.service, service);
+        overlay_field(&mut self.env, env);
+        overlay_field(&mut self.version, version);
+        overlay_field(&mut self.track_user_interactions, track_user_interactions);
+        overlay_field(&mut self.track_resources, track_resources);
+        overlay_field(&mut self.track_long_tasks, track_long_tasks);
+        overlay_field(&mut self.default_privacy_level, default_privacy_level);
+        overlay_field(&mut self.session_sample_rate, session_sample_rate);
+        overlay_field(
+            &mut self.session_replay_sample_rate,
+            session_replay_sample_rate,
+        );
+        overlay_field(&mut self.remote_configuration_id, remote_configuration_id);
         for (k, v) in other {
             self.other.insert(k, v);
         }
@@ -172,8 +153,6 @@ const DD_FIELDS: &[(&str, Setter)] = &[
         c.rum.env = Some(r.into());
         Ok(())
     }),
-    // Service/app version (e.g. "1.2.3"), emitted as snippet field "version".
-    // Distinct from DD_RUM_MAJOR_VERSION, which selects the RUM library major version.
     ("DD_RUM_VERSION", |c, r| {
         c.rum.version = Some(r.into());
         Ok(())
@@ -202,7 +181,6 @@ const DD_FIELDS: &[(&str, Setter)] = &[
         c.rum.session_replay_sample_rate = Some(parse_f64(r, "DD_RUM_SESSION_REPLAY_SAMPLE_RATE")?);
         Ok(())
     }),
-    // Writes to the outer Configuration, not RumConfiguration — not a snippet field.
     ("DD_RUM_MAJOR_VERSION", |c, r| {
         c.major_version = parse_u32(r, "DD_RUM_MAJOR_VERSION")?;
         Ok(())

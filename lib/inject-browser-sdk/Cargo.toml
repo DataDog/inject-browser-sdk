@@ -13,13 +13,17 @@ serde = { version = "1.0", default-features = false, features = ["derive", "allo
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 rustix = { version = "1.0", default-features = false, features = ["fs", "stdio"] }
 # Stopgap: pins `pawel/no-std-library-config` on DataDog/libdatadog which
-# transitively pulls a personal `yaml_serde` fork (see Cargo.lock). A later PR
-# will land the no_std changes upstream and repoint this dep.
+# transitively pulls a personal `yaml_serde` fork (see Cargo.lock).
+#
+# KNOWN RISK: this points at a personal feature branch. Although the rev is
+# pinned, a force-push on that branch would make the commit unreachable and
+# break reproducible builds downstream. This is acknowledged and accepted as a
+# short-term stopgap; a follow-up PR will land the no_std changes upstream on
+# DataDog/libdatadog main and repoint both entries below to the upstream rev.
 libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", default-features = false }
 
 # On Windows: libdd-library-config needs `std` because its StdConfigRead reader
-# uses std::fs. TODO: same personal-fork pin as above; repoint to upstream in a
-# later PR.
+# uses std::fs. Same personal-fork pin as above; see the KNOWN RISK note.
 [target.'cfg(windows)'.dependencies]
 libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", features = ["std"] }
 

@@ -40,8 +40,11 @@ window.DD_RUM.onReady(function() {
   window.DD_RUM.init("#,
     );
 
-    let json_string =
-        serde_json::to_string(&configuration.rum).map_err(|e| Error::Json(e.to_string()))?;
+    let mut rum_value =
+        serde_json::to_value(&configuration.rum).map_err(|e| Error::Json(e.to_string()))?;
+    // Deterministic key ordering, independent of serde_json's `preserve_order` feature.
+    rum_value.sort_all_objects();
+    let json_string = serde_json::to_string(&rum_value).map_err(|e| Error::Json(e.to_string()))?;
     for ch in json_string.chars() {
         if ch.is_ascii() {
             let mut buf = [0; 4];

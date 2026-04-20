@@ -9,8 +9,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap as Map;
 use alloc::format;
 use alloc::string::String;
-use serde::ser::SerializeMap;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Deserialize)]
@@ -28,100 +27,43 @@ pub struct Configuration {
 /// [`RumConfiguration::other`] so future Browser-SDK additions flow through
 /// without an injector release.
 ///
-/// Serializes as a flat JSON object with keys sorted alphabetically.
-#[derive(Default, Deserialize)]
+/// The derived `Serialize` emits Option fields only when `Some(_)`; callers
+/// that need deterministic key ordering should route the value through
+/// `serde_json::to_value` + `Value::sort_all_objects` before writing.
+#[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 #[allow(missing_docs)]
 pub struct RumConfiguration {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub application_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub site: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub track_user_interactions: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub track_resources: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub track_long_tasks: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_privacy_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_sample_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_replay_sample_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_configuration_id: Option<String>,
 
     #[serde(flatten)]
     pub other: Map<Box<str>, Value>,
-}
-
-enum SerializedValue<'a> {
-    Str(&'a str),
-    Bool(bool),
-    F64(f64),
-    Json(&'a Value),
-}
-
-impl Serialize for SerializedValue<'_> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            SerializedValue::Str(v) => serializer.serialize_str(v),
-            SerializedValue::Bool(v) => serializer.serialize_bool(*v),
-            SerializedValue::F64(v) => serializer.serialize_f64(*v),
-            SerializedValue::Json(v) => v.serialize(serializer),
-        }
-    }
-}
-
-impl Serialize for RumConfiguration {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut entries: Map<&str, SerializedValue<'_>> = Map::new();
-        if let Some(v) = &self.application_id {
-            entries.insert("applicationId", SerializedValue::Str(v));
-        }
-        if let Some(v) = &self.client_token {
-            entries.insert("clientToken", SerializedValue::Str(v));
-        }
-        if let Some(v) = &self.site {
-            entries.insert("site", SerializedValue::Str(v));
-        }
-        if let Some(v) = &self.service {
-            entries.insert("service", SerializedValue::Str(v));
-        }
-        if let Some(v) = &self.env {
-            entries.insert("env", SerializedValue::Str(v));
-        }
-        if let Some(v) = &self.version {
-            entries.insert("version", SerializedValue::Str(v));
-        }
-        if let Some(v) = self.track_user_interactions {
-            entries.insert("trackUserInteractions", SerializedValue::Bool(v));
-        }
-        if let Some(v) = self.track_resources {
-            entries.insert("trackResources", SerializedValue::Bool(v));
-        }
-        if let Some(v) = self.track_long_tasks {
-            entries.insert("trackLongTasks", SerializedValue::Bool(v));
-        }
-        if let Some(v) = &self.default_privacy_level {
-            entries.insert("defaultPrivacyLevel", SerializedValue::Str(v));
-        }
-        if let Some(v) = self.session_sample_rate {
-            entries.insert("sessionSampleRate", SerializedValue::F64(v));
-        }
-        if let Some(v) = self.session_replay_sample_rate {
-            entries.insert("sessionReplaySampleRate", SerializedValue::F64(v));
-        }
-        if let Some(v) = &self.remote_configuration_id {
-            entries.insert("remoteConfigurationId", SerializedValue::Str(v));
-        }
-        for (k, v) in &self.other {
-            entries.insert(k.as_ref(), SerializedValue::Json(v));
-        }
-
-        let mut map = serializer.serialize_map(Some(entries.len()))?;
-        for (k, v) in &entries {
-            map.serialize_entry(*k, v)?;
-        }
-        map.end()
-    }
 }
 
 /// Partial [`Configuration`] used to overlay values on top of an existing one.

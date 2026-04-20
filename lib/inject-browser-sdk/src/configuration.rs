@@ -23,9 +23,13 @@ pub struct Configuration {
 
 /// Configuration settings for Real User Monitoring (RUM).
 ///
-/// Known fields are strongly typed. Unknown JSON keys are captured in
-/// [`RumConfiguration::other`] so future Browser-SDK additions flow through
-/// without an injector release.
+/// Known fields are strongly typed. [`RumConfiguration::other`] is a
+/// `#[serde(flatten)]` catch-all that captures unknown keys when this struct
+/// is deserialized directly, and flattens them back into the init JSON on
+/// serialization. Note that the public [`parse_configuration`] helper walks
+/// the input first and rejects unknown `rum.*` keys with
+/// [`Error::InvalidField`] (code 9) for typo safety — unknown keys only
+/// reach `other` when callers bypass the helper.
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(test, derive(Debug, PartialEq))]
@@ -76,9 +80,12 @@ pub struct RumConfiguration {
 /// - **Unknown keys at the top level** (outside `rum`): rejected with a
 ///   deserialization error, so typos like `"rumm"` surface instead of being
 ///   silently dropped.
-/// - **Unknown keys inside `rum`**: accumulated into
-///   [`RumConfiguration::other`] via `#[serde(flatten)]` so future
-///   Browser-SDK additions flow through without an injector release.
+/// - **Unknown keys inside `rum`**: at the struct level `#[serde(flatten)]`
+///   captures them into [`RumConfiguration::other`], but the public
+///   [`parse_configuration_overlay`] helper walks the input first and
+///   rejects any unknown `rum.*` key with [`Error::InvalidField`] (code 9)
+///   for typo safety. Direct `serde_json::from_slice::<ConfigurationOverlay>`
+///   is the only path that preserves the `other` catch-all behavior.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(test, derive(Debug, PartialEq))]
@@ -771,9 +778,11 @@ mod test {
 
     #[test]
     fn overlay_unknown_rum_key_is_captured_in_other() {
-        // Unknown keys inside `rum` still flow into `other` via
-        // #[serde(flatten)] so future Browser-SDK additions don't require an
-        // injector release.
+        // At the struct level, `#[serde(flatten)] other` captures unknown
+        // keys inside `rum` when ConfigurationOverlay is deserialized
+        // directly. The public `parse_configuration_overlay` helper rejects
+        // them for typo safety — see
+        // `parse_configuration_overlay_rejects_typo_inside_rum`.
         let overlay: ConfigurationOverlay = serde_json::from_slice(br#"{"rum":{"newKnob":"x"}}"#)
             .expect("unknown rum key must be accepted");
         assert_eq!(overlay.rum.other.get("newKnob"), Some(&Value::from("x")));

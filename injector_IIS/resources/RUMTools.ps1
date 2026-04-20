@@ -109,7 +109,7 @@ function Uninstall-Datadog-RUMConfiguration {
                 Write-Host "Successfully removed Datadog RUM configuration from '$SiteName$AppPath'"
             }
             catch {
-                Stop-WebCommitDelay
+                Stop-WebCommitDelay -Commit $False
                 Write-Warning "Failed to remove Datadog RUM configuration from '$SiteName$AppPath': $_"
             }
         }
@@ -139,7 +139,13 @@ function Uninstall-Datadog-RUMConfiguration {
         $sectionPath = "system.webServer/datadogRum"
         $psPath = "MACHINE/WEBROOT/APPHOST/$SiteName"
 
-        $locations = Get-WebConfigurationLocation -Name $SiteName -ErrorAction SilentlyContinue
+        try {
+            $locations = Get-WebConfigurationLocation -Name $SiteName -ErrorAction Stop
+        }
+        catch {
+            Write-Warning "Unable to enumerate location configurations for site '$SiteName': $_"
+            return
+        }
         foreach ($location in $locations) {
             $locationPath = $location.Name
             if (-not $locationPath) { continue }
@@ -160,7 +166,7 @@ function Uninstall-Datadog-RUMConfiguration {
                 Write-Host "Successfully removed Datadog RUM configuration from '$SiteName' location '$locationPath'"
             }
             catch {
-                Stop-WebCommitDelay
+                Stop-WebCommitDelay -Commit $False
                 Write-Warning "Failed to remove Datadog RUM configuration from '$SiteName' location '$locationPath': $_"
             }
         }

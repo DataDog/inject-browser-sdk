@@ -29,9 +29,15 @@ unsafe fn cstr_to_str<'a>(ptr: *const c_char, field: &str) -> Result<&'a str, Er
 ///
 /// Used with [`snippet_create_from_stable_config`] to supply or override values
 /// on top of what the Agent's stable configuration files provide.
+///
+/// `config_option` carries a [`ConfigOption`] discriminant as `u8`. Using the raw
+/// integer (rather than the enum type) keeps invalid values out of UB territory:
+/// the FFI layer validates via [`ConfigOption::from_u8`] before use. C callers
+/// keep writing `.config_option = ConfigOption_Service` — enum constants are
+/// integer-typed in C and convert freely to `uint8_t`.
 #[repr(C)]
 pub struct ConfigOverride {
-    pub config_option: ConfigOption,
+    pub config_option: u8,
     pub value: *const c_char,
 }
 
@@ -58,7 +64,7 @@ pub struct ConfigOverride {
 /// # Memory ownership
 ///
 /// All input pointers are owned by the caller. The returned `Snippet` must be freed
-/// with [`snippet_cleanup`].
+/// with [`crate::snippet_cleanup`].
 ///
 /// # Example
 ///
@@ -81,6 +87,7 @@ pub struct ConfigOverride {
 /// - `language` must be a valid, non-null, NUL-terminated C string.
 /// - If `override_count > 0`, `overrides` must point to a valid array of at least
 ///   `override_count` [`ConfigOverride`] entries, each with a valid NUL-terminated `value`.
+/// - When `override_count == 0`, `overrides` is ignored and may be `NULL` or dangling.
 #[no_mangle]
 pub unsafe extern "C" fn snippet_create_from_stable_config(
     language: *const c_char,
@@ -112,6 +119,15 @@ pub unsafe extern "C" fn snippet_create_from_stable_config(
 }
 
 /// Parse a C array of [`ConfigOverride`] into a `Vec` of (ConfigOption, value) pairs.
+///
+/// # Safety
+///
+/// - If `count > 0`, `entries` must point to a valid, readable array of at
+///   least `count` [`ConfigOverride`] elements.
+/// - Each `ConfigOverride::value` must be a valid NUL-terminated C string,
+///   or null (which returns an error rather than UB).
+/// - `ConfigOverride::config_option` is validated via [`ConfigOption::from_u8`];
+///   invalid discriminants return an error rather than UB.
 unsafe fn parse_overrides(
     entries: *const ConfigOverride,
     count: u32,
@@ -128,9 +144,15 @@ unsafe fn parse_overrides(
     };
     let mut result = alloc::vec::Vec::with_capacity(slice.len());
     for entry in slice {
-        let key = entry.config_option.key();
+        let opt = ConfigOption::from_u8(entry.config_option).ok_or_else(|| {
+            Error::StableConfig(format!(
+                "Invalid ConfigOption discriminant: {}",
+                entry.config_option
+            ))
+        })?;
+        let key = opt.key();
         let value = cstr_to_str(entry.value, &format!("Value for override '{key}'"))?;
-        result.push((entry.config_option, String::from(value)));
+        result.push((opt, String::from(value)));
     }
     Ok(result)
 }
@@ -177,11 +199,11 @@ mod tests {
 
         let overrides = [
             ConfigOverride {
-                config_option: ConfigOption::ApplicationId,
+                config_option: ConfigOption::ApplicationId as u8,
                 value: app_val.as_ptr(),
             },
             ConfigOverride {
-                config_option: ConfigOption::ClientToken,
+                config_option: ConfigOption::ClientToken as u8,
                 value: tok_val.as_ptr(),
             },
         ];
@@ -221,7 +243,7 @@ mod tests {
     #[test]
     fn null_override_value() {
         let entry = ConfigOverride {
-            config_option: ConfigOption::Service,
+            config_option: ConfigOption::Service as u8,
             value: null(),
         };
         let snippet = unsafe {
@@ -230,6 +252,31 @@ mod tests {
         assert_ne!(snippet, null_mut());
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
         assert_eq!(s.error_code, 6);
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn invalid_config_option_discriminant() {
+        let val = CString::new("ignored").unwrap();
+        let entry = ConfigOverride {
+            config_option: 99,
+            value: val.as_ptr(),
+        };
+        let snippet = unsafe {
+            snippet_create_from_stable_config(cstr_ptr(b"browser-sdk\0"), false, &entry, 1)
+        };
+        assert_ne!(snippet, null_mut());
+        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_eq!(s.error_code, 6);
+        let msg = unsafe {
+            CStr::from_ptr(s.error_message)
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert!(
+            msg.contains("Invalid ConfigOption discriminant: 99"),
+            "unexpected error message: {msg}"
+        );
         unsafe { snippet_cleanup(snippet) };
     }
 }

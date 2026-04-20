@@ -53,10 +53,10 @@ pub unsafe extern "C" fn injector_create(snippet: *const Snippet) -> *mut Inject
         Err(_) => &[],
     };
 
-    return Box::into_raw(Box::new(Injector {
+    Box::into_raw(Box::new(Injector {
         inner: injector::Injector::new(snippet_content),
         slices_memory_storage: core::array::from_fn(|_| BytesSlice::empty()),
-    }));
+    }))
 }
 
 /// Free the [`Injector`] associated memory.
@@ -101,10 +101,10 @@ pub unsafe extern "C" fn injector_write(
 ) -> InjectorResult {
     let ffi_injector = &mut *injector;
     let chunk = slice::from_raw_parts(chunk, length as usize);
-    return InjectorResult::new(
+    InjectorResult::new(
         ffi_injector.inner.write(chunk),
         &mut ffi_injector.slices_memory_storage,
-    );
+    )
 }
 
 /// Notify the [`Injector`] that the full HTML document has been written.
@@ -132,10 +132,10 @@ pub unsafe extern "C" fn injector_write(
 #[no_mangle]
 pub unsafe extern "C" fn injector_end(ffi_injector: *mut Injector) -> InjectorResult {
     let ffi_injector = &mut *ffi_injector;
-    return InjectorResult::new(
+    InjectorResult::new(
         ffi_injector.inner.end(),
         &mut ffi_injector.slices_memory_storage,
-    );
+    )
 }
 
 /// The result of a call to [`injector_write`] or [`injector_end`]. It represents a list of binary

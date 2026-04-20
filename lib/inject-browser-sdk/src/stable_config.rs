@@ -12,7 +12,7 @@ use crate::config_option::build_configuration;
 use crate::error::Error;
 use crate::generate_snippet;
 
-/// Build a [`Configuration`] from a lookup function and generate the snippet bytes.
+/// Build a [`crate::Configuration`] from a lookup function and generate the snippet bytes.
 ///
 /// The `lookup` closure takes a DD_* key name and returns the value if present.
 /// RUM-specific keys (e.g. `DD_RUM_SITE`) take precedence over generic keys (e.g. `DD_SITE`).
@@ -20,7 +20,7 @@ pub fn snippet_from_lookup<'a>(lookup: impl Fn(&str) -> Option<&'a str>) -> Resu
     build_configuration(lookup).and_then(|config| generate_snippet(&config))
 }
 
-/// Build a [`Configuration`] from a map of `DD_*` key-value pairs and generate the snippet bytes.
+/// Build a [`crate::Configuration`] from a map of `DD_*` key-value pairs and generate the snippet bytes.
 ///
 /// Convenience wrapper around [`snippet_from_lookup`].
 pub fn snippet_from_entries(entries: &BTreeMap<String, String>) -> Result<Vec<u8>, Error> {
@@ -59,4 +59,67 @@ pub fn snippet_from_stable_config(
             .find(|c| c.name == key)
             .map(|c| c.value.as_str())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn entries(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (String::from(*k), String::from(*v)))
+            .collect()
+    }
+
+    #[test]
+    fn snippet_from_entries_minimal() {
+        let map = entries(&[
+            ("DD_RUM_APPLICATION_ID", "app-1"),
+            ("DD_RUM_CLIENT_TOKEN", "tok-1"),
+        ]);
+        let result = snippet_from_entries(&map);
+        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
+        let bytes = result.unwrap();
+        assert!(bytes
+            .windows(b"applicationId".len())
+            .any(|w| w == b"applicationId"));
+        assert!(bytes.windows(b"app-1".len()).any(|w| w == b"app-1"));
+    }
+
+    #[test]
+    fn snippet_from_entries_missing_required() {
+        let map: BTreeMap<String, String> = BTreeMap::new();
+        let err = snippet_from_entries(&map).unwrap_err();
+        assert_eq!(err.code(), 5);
+    }
+
+    #[test]
+    fn snippet_from_lookup_invalid_rate() {
+        let map = entries(&[
+            ("DD_RUM_APPLICATION_ID", "app-1"),
+            ("DD_RUM_CLIENT_TOKEN", "tok-1"),
+            ("DD_RUM_SESSION_SAMPLE_RATE", "150.0"),
+        ]);
+        let err = snippet_from_lookup(|key| map.get(key).map(|v| v.as_str())).unwrap_err();
+        assert_eq!(err.code(), 4);
+    }
+
+    #[test]
+    fn snippet_from_entries_precedence() {
+        let map = entries(&[
+            ("DD_RUM_APPLICATION_ID", "app-1"),
+            ("DD_RUM_CLIENT_TOKEN", "tok-1"),
+            ("DD_RUM_SITE", "datadoghq.com"),
+            ("DD_SITE", "datadoghq.eu"),
+        ]);
+        let bytes = snippet_from_entries(&map).unwrap();
+        assert!(bytes
+            .windows(b"datadoghq.com".len())
+            .any(|w| w == b"datadoghq.com"));
+        assert!(!bytes
+            .windows(b"datadoghq.eu".len())
+            .any(|w| w == b"datadoghq.eu"));
+    }
 }

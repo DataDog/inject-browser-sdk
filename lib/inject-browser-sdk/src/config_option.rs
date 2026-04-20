@@ -111,6 +111,28 @@ impl ConfigOption {
         self.meta().primary_key
     }
 
+    /// Parse a raw `u8` into a [`ConfigOption`]. Returns `None` for unknown values.
+    /// Use this at FFI boundaries before materializing a `ConfigOption` from caller input.
+    pub const fn from_u8(n: u8) -> Option<ConfigOption> {
+        match n {
+            0 => Some(ApplicationId),
+            1 => Some(ClientToken),
+            2 => Some(Site),
+            3 => Some(Service),
+            4 => Some(Environment),
+            5 => Some(Version),
+            6 => Some(TrackUserInteractions),
+            7 => Some(TrackResources),
+            8 => Some(TrackLongTasks),
+            9 => Some(DefaultPrivacyLevel),
+            10 => Some(SessionSampleRate),
+            11 => Some(SessionReplaySampleRate),
+            12 => Some(MajorVersion),
+            13 => Some(RemoteConfigurationId),
+            _ => None,
+        }
+    }
+
     const fn meta(&self) -> ConfigOptionMeta {
         match self {
             ApplicationId => ConfigOptionMeta::new("DD_RUM_APPLICATION_ID", "applicationId", Str),
@@ -252,7 +274,7 @@ pub(crate) fn build_configuration<'a>(
     // TODO(INPLAT-1104): support unknown DD_RUM_* keys as pass-through string values.
 
     let major_version = fields
-        .remove("majorVersion")
+        .remove(MajorVersion.meta().rum_field)
         .and_then(|v| v.as_u64())
         .unwrap_or(5) as u32;
 
@@ -534,6 +556,19 @@ mod tests {
     fn all_contains_all_variants() {
         // Ensure ALL is updated when new variants are added to the enum.
         assert_eq!(ConfigOption::ALL.len(), RemoteConfigurationId as usize + 1);
+    }
+
+    #[test]
+    fn from_u8_round_trip() {
+        for &opt in ConfigOption::ALL {
+            assert_eq!(ConfigOption::from_u8(opt as u8), Some(opt));
+        }
+    }
+
+    #[test]
+    fn from_u8_rejects_unknown() {
+        assert_eq!(ConfigOption::from_u8(14), None);
+        assert_eq!(ConfigOption::from_u8(255), None);
     }
 
     #[test]

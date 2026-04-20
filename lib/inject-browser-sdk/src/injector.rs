@@ -71,39 +71,35 @@ impl<'snippet> Injector<'snippet> {
         match self.locator.scan(chunk) {
             Location::None => {
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                return self.create_result(&[&self.incomplete_data_public_ref, chunk]);
+                self.create_result(&[&self.incomplete_data_public_ref, chunk])
             }
 
             Location::PotentialFromPreviousChunk => {
                 self.incomplete_data.extend_from_slice(chunk);
-                return self.create_result(&[]);
+                self.create_result(&[])
             }
 
             Location::PotentialFromIndex(index) => {
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
                 self.incomplete_data.extend_from_slice(&chunk[index..]);
-                return self.create_result(&[&self.incomplete_data_public_ref, &chunk[..index]]);
+                self.create_result(&[&self.incomplete_data_public_ref, &chunk[..index]])
             }
 
             Location::MatchFromPreviousChunk => {
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
                 self.injected = true;
-                return self.create_result(&[
-                    self.snippet,
-                    &self.incomplete_data_public_ref,
-                    chunk,
-                ]);
+                self.create_result(&[self.snippet, &self.incomplete_data_public_ref, chunk])
             }
 
             Location::MatchFromIndex(index) => {
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
                 self.injected = true;
-                return self.create_result(&[
+                self.create_result(&[
                     &self.incomplete_data_public_ref,
                     &chunk[..index],
                     self.snippet,
                     &chunk[index..],
-                ]);
+                ])
             }
         }
     }
@@ -111,10 +107,10 @@ impl<'snippet> Injector<'snippet> {
     pub fn end(&mut self) -> Result<'_> {
         self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
         if self.injected {
-            return self.create_result(&[&self.incomplete_data_public_ref]);
+            self.create_result(&[&self.incomplete_data_public_ref])
         } else {
             self.padding_spaces = vec![b' '; self.snippet.len()];
-            return self.create_result(&[&self.incomplete_data_public_ref, &self.padding_spaces]);
+            self.create_result(&[&self.incomplete_data_public_ref, &self.padding_spaces])
         }
     }
 

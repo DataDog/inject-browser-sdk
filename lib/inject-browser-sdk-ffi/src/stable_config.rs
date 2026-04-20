@@ -4,10 +4,10 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-use alloc::{format, string::String};
+use alloc::format;
 use core::ffi::{c_char, CStr};
 
-use inject_browser_sdk::{error::Error, snippet_from_stable_config};
+use inject_browser_sdk::{error::Error, snippet_from_stable_config, ConfigurationOverlay};
 
 use crate::snippet::{Snippet, SnippetInternal};
 
@@ -25,35 +25,22 @@ unsafe fn cstr_to_str<'a>(ptr: *const c_char, field: &str) -> Result<&'a str, Er
         .map_err(|_| Error::StableConfig(format!("{field} is not valid UTF-8")))
 }
 
-/// A configuration override: a `DD_RUM_*` key name paired with a C string value.
-///
-/// Used with [`snippet_create_from_stable_config`] to supply or override values
-/// on top of what the Agent's stable configuration files provide.
-#[repr(C)]
-pub struct ConfigOverride {
-    pub name: *const c_char,
-    pub value: *const c_char,
-}
-
-/// Create a snippet from Datadog stable configuration files, with optional overrides.
+/// Create a snippet from Datadog stable configuration files, with an optional JSON overlay.
 ///
 /// Reads configuration from the Datadog Agent's `application_monitoring.yaml` files
-/// (local and fleet-managed). Caller-supplied `overrides` take precedence over values
-/// read from disk.
+/// (local and fleet-managed). If `json_overlay` is non-null, it is parsed as a JSON
+/// object with the same shape as [`snippet_create_from_json`] — except every field
+/// is optional — and layered on top of the disk-sourced configuration.
 ///
 /// The `language` parameter identifies the current process's language (e.g. `"browser-sdk"`)
 /// and is used for rule-based process matching in the configuration files.
 ///
 /// When `debug_logs` is `true`, diagnostic messages are written to stderr.
 ///
-/// # Overrides
-///
-/// Pass `overrides` / `override_count` to supply or replace specific options.
-/// Pass `NULL` / `0` to use only the on-disk configuration.
-///
 /// # Error handling
 ///
 /// Always returns a valid `Snippet` pointer. Check `error_code` for failures.
+/// A malformed `json_overlay` surfaces as error code `1` (JSON error).
 ///
 /// # Memory ownership
 ///
@@ -64,15 +51,12 @@ pub struct ConfigOverride {
 ///
 /// ```c
 /// // Use stable config as-is:
-/// Snippet* s = snippet_create_from_stable_config("browser-sdk", false, NULL, 0);
+/// Snippet* s = snippet_create_from_stable_config("browser-sdk", false, NULL);
 ///
-/// // Override the application id:
-/// ConfigOverride overrides[] = {
-///     { .name = "DD_RUM_APPLICATION_ID", .value = "abc" },
-///     { .name = "DD_RUM_SITE",           .value = "datadoghq.com" },
-/// };
-/// Snippet* s = snippet_create_from_stable_config(
-///     "browser-sdk", false, overrides, 2);
+/// // Overlay a JSON blob:
+/// const char* overlay =
+///     "{\"rum\":{\"applicationId\":\"abc\",\"site\":\"datadoghq.com\"}}";
+/// Snippet* s = snippet_create_from_stable_config("browser-sdk", false, overlay);
 ///
 /// snippet_cleanup(s);
 /// ```
@@ -80,108 +64,50 @@ pub struct ConfigOverride {
 /// # Safety
 ///
 /// - `language` must be a valid, non-null, NUL-terminated C string.
-/// - If `override_count > 0`, `overrides` must point to a valid array of at least
-///   `override_count` [`ConfigOverride`] entries, each with valid NUL-terminated
-///   `name` and `value`.
-/// - When `override_count == 0`, `overrides` is ignored and may be `NULL` or dangling.
+/// - If `json_overlay` is non-null, it must point to a valid NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn snippet_create_from_stable_config(
     language: *const c_char,
     debug_logs: bool,
-    overrides: *const ConfigOverride,
-    override_count: u32,
+    json_overlay: *const c_char,
 ) -> *mut Snippet {
     if language.is_null() {
         return SnippetInternal::stable_config_err("language parameter is NULL");
     }
-
-    let override_vec = match parse_overrides(overrides, override_count) {
-        Ok(v) => v,
-        Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
-    };
 
     let language_str = match cstr_to_str(language, "language") {
         Ok(s) => s,
         Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
     };
 
-    let overrides_refs: alloc::vec::Vec<(&str, &str)> = override_vec
-        .iter()
-        .map(|(name, val)| (name.as_str(), val.as_str()))
-        .collect();
+    let overlay = match parse_overlay(json_overlay) {
+        Ok(o) => o,
+        Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
+    };
 
-    let result = snippet_from_stable_config(language_str, debug_logs, &overrides_refs);
+    let result = snippet_from_stable_config(language_str, debug_logs, overlay);
     SnippetInternal::new(result).into_public_ptr()
 }
 
-/// Parse a C array of [`ConfigOverride`] into a `Vec` of (name, value) string pairs.
-///
-/// Rejects overrides whose `name` is not a known `DD_RUM_*` key accepted by
-/// [`inject_browser_sdk::Configuration::from_lookup`], so typos surface at
-/// ingestion rather than being silently ignored.
+/// Parse a nullable C string as a [`ConfigurationOverlay`]. A null pointer means
+/// "no overlay"; a non-null pointer is parsed as JSON.
 ///
 /// # Safety
 ///
-/// - If `count > 0`, `entries` must point to a valid, readable array of at
-///   least `count` [`ConfigOverride`] elements.
-/// - Each `ConfigOverride::name` and `ConfigOverride::value` must be a valid
-///   NUL-terminated C string, or null (which returns an error rather than UB).
-unsafe fn parse_overrides(
-    entries: *const ConfigOverride,
-    count: u32,
-) -> Result<alloc::vec::Vec<(String, String)>, Error> {
-    if entries.is_null() && count > 0 {
-        return Err(Error::StableConfig(String::from(
-            "overrides pointer is NULL but count is non-zero",
-        )));
+/// If non-null, `json` must point to a valid NUL-terminated C string.
+unsafe fn parse_overlay(json: *const c_char) -> Result<Option<ConfigurationOverlay>, Error> {
+    if json.is_null() {
+        return Ok(None);
     }
-    let slice = if count == 0 || entries.is_null() {
-        &[]
-    } else {
-        core::slice::from_raw_parts(entries, count as usize)
-    };
-    let mut result = alloc::vec::Vec::with_capacity(slice.len());
-    for entry in slice {
-        let name = cstr_to_str(entry.name, "Override name")?;
-        if !is_known_override_name(name) {
-            return Err(Error::StableConfig(format!(
-                "Unknown override name: '{name}'"
-            )));
-        }
-        let value = cstr_to_str(entry.value, &format!("Value for override '{name}'"))?;
-        result.push((String::from(name), String::from(value)));
-    }
-    Ok(result)
-}
-
-/// Returns true if `name` is a `DD_RUM_*` key accepted by [`Configuration::from_lookup`].
-fn is_known_override_name(name: &str) -> bool {
-    // Source of truth: DD_FIELDS in lib/inject-browser-sdk/src/configuration.rs.
-    // Listed explicitly here so we fail closed if from_lookup ever accepts a new key
-    // we haven't decided to expose through the FFI.
-    matches!(
-        name,
-        "DD_RUM_APPLICATION_ID"
-            | "DD_RUM_CLIENT_TOKEN"
-            | "DD_RUM_SITE"
-            | "DD_RUM_SERVICE"
-            | "DD_RUM_ENVIRONMENT"
-            | "DD_RUM_VERSION"
-            | "DD_RUM_TRACK_USER_INTERACTIONS"
-            | "DD_RUM_TRACK_RESOURCES"
-            | "DD_RUM_TRACK_LONG_TASKS"
-            | "DD_RUM_DEFAULT_PRIVACY_LEVEL"
-            | "DD_RUM_SESSION_SAMPLE_RATE"
-            | "DD_RUM_SESSION_REPLAY_SAMPLE_RATE"
-            | "DD_RUM_MAJOR_VERSION"
-            | "DD_RUM_REMOTE_CONFIGURATION_ID"
-    )
+    let bytes = CStr::from_ptr(json).to_bytes();
+    serde_json::from_slice::<ConfigurationOverlay>(bytes)
+        .map(Some)
+        .map_err(|e| Error::Json(format!("{e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::ffi::CString;
     use core::ptr::null;
     use pretty_assertions::{assert_eq, assert_ne};
     use std::ptr::null_mut;
@@ -190,10 +116,9 @@ mod tests {
     use crate::test_utils::cstr_ptr;
 
     #[test]
-    fn no_files_no_overrides() {
-        let snippet = unsafe {
-            snippet_create_from_stable_config(cstr_ptr(b"browser-sdk\0"), false, null(), 0)
-        };
+    fn no_files_no_overlay() {
+        let snippet =
+            unsafe { snippet_create_from_stable_config(cstr_ptr(b"browser-sdk\0"), false, null()) };
         assert_ne!(snippet, null_mut());
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
         assert!(
@@ -206,7 +131,7 @@ mod tests {
 
     #[test]
     fn null_language() {
-        let snippet = unsafe { snippet_create_from_stable_config(null(), false, null(), 0) };
+        let snippet = unsafe { snippet_create_from_stable_config(null(), false, null()) };
         assert_ne!(snippet, null_mut());
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
         assert_eq!(s.error_code, 6);
@@ -214,27 +139,12 @@ mod tests {
     }
 
     #[test]
-    fn overrides_supply_required_fields() {
-        let app_val = CString::new("app-1").unwrap();
-        let tok_val = CString::new("tok-1").unwrap();
-
-        let overrides = [
-            ConfigOverride {
-                name: cstr_ptr(b"DD_RUM_APPLICATION_ID\0"),
-                value: app_val.as_ptr(),
-            },
-            ConfigOverride {
-                name: cstr_ptr(b"DD_RUM_CLIENT_TOKEN\0"),
-                value: tok_val.as_ptr(),
-            },
-        ];
-
+    fn overlay_supplies_required_fields() {
         let snippet = unsafe {
             snippet_create_from_stable_config(
                 cstr_ptr(b"browser-sdk\0"),
                 false,
-                overrides.as_ptr(),
-                overrides.len() as u32,
+                cstr_ptr(b"{\"rum\":{\"applicationId\":\"app-1\",\"clientToken\":\"tok-1\"}}\0"),
             )
         };
         assert_ne!(snippet, null_mut());
@@ -251,69 +161,32 @@ mod tests {
     }
 
     #[test]
-    fn null_overrides_with_nonzero_count() {
+    fn invalid_overlay_json() {
         let snippet = unsafe {
-            snippet_create_from_stable_config(cstr_ptr(b"browser-sdk\0"), false, null(), 5)
+            snippet_create_from_stable_config(
+                cstr_ptr(b"browser-sdk\0"),
+                false,
+                cstr_ptr(b"{not json\0"),
+            )
         };
         assert_ne!(snippet, null_mut());
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
-        assert_eq!(s.error_code, 6);
+        assert_eq!(s.error_code, 1);
         unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]
-    fn null_override_value() {
-        let entry = ConfigOverride {
-            name: cstr_ptr(b"DD_RUM_SERVICE\0"),
-            value: null(),
-        };
+    fn overlay_type_mismatch_fails_at_parse() {
         let snippet = unsafe {
-            snippet_create_from_stable_config(cstr_ptr(b"browser-sdk\0"), false, &entry, 1)
+            snippet_create_from_stable_config(
+                cstr_ptr(b"browser-sdk\0"),
+                false,
+                cstr_ptr(b"{\"rum\":{\"applicationId\":42}}\0"),
+            )
         };
         assert_ne!(snippet, null_mut());
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
-        assert_eq!(s.error_code, 6);
-        unsafe { snippet_cleanup(snippet) };
-    }
-
-    #[test]
-    fn unknown_override_name() {
-        let val = CString::new("ignored").unwrap();
-        let entry = ConfigOverride {
-            name: cstr_ptr(b"DD_RUM_BOGUS\0"),
-            value: val.as_ptr(),
-        };
-        let snippet = unsafe {
-            snippet_create_from_stable_config(cstr_ptr(b"browser-sdk\0"), false, &entry, 1)
-        };
-        assert_ne!(snippet, null_mut());
-        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
-        assert_eq!(s.error_code, 6);
-        let msg = unsafe {
-            CStr::from_ptr(s.error_message)
-                .to_string_lossy()
-                .into_owned()
-        };
-        assert!(
-            msg.contains("Unknown override name: 'DD_RUM_BOGUS'"),
-            "unexpected error message: {msg}"
-        );
-        unsafe { snippet_cleanup(snippet) };
-    }
-
-    #[test]
-    fn null_override_name() {
-        let val = CString::new("ignored").unwrap();
-        let entry = ConfigOverride {
-            name: null(),
-            value: val.as_ptr(),
-        };
-        let snippet = unsafe {
-            snippet_create_from_stable_config(cstr_ptr(b"browser-sdk\0"), false, &entry, 1)
-        };
-        assert_ne!(snippet, null_mut());
-        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
-        assert_eq!(s.error_code, 6);
+        assert_eq!(s.error_code, 1);
         unsafe { snippet_cleanup(snippet) };
     }
 }

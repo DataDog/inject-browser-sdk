@@ -8,7 +8,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::configuration::Configuration;
+use crate::configuration::{Configuration, ConfigurationOverlay};
 use crate::error::Error;
 use crate::generate_snippet;
 
@@ -26,15 +26,12 @@ pub fn snippet_from_entries(entries: &BTreeMap<String, String>) -> Result<Vec<u8
     snippet_from_lookup(|key| entries.get(key).map(|v| v.as_str()))
 }
 
-/// Build a snippet from Datadog stable configuration files, with optional overrides.
+/// Build a snippet from Datadog stable configuration files, with an optional overlay.
 ///
 /// Reads configuration from the Datadog Agent's `application_monitoring.yaml` files
-/// (local and fleet-managed). Caller-supplied `overrides` take precedence over values
-/// read from disk.
-///
-/// `overrides` is a slice of `(name, value)` pairs where `name` is a `DD_RUM_*` key
-/// accepted by [`Configuration::from_lookup`]. Names not recognised by `from_lookup`
-/// are silently ignored (no setter is called for them).
+/// (local and fleet-managed) using the `DD_RUM_*` key set. If `overlay` is
+/// provided, its typed fields and `other` entries are merged on top of the
+/// disk-sourced configuration via [`Configuration::overlay`].
 ///
 /// The `language` parameter identifies the current process's language (e.g. `"browser-sdk"`)
 /// and is used for rule-based process matching in the configuration files.
@@ -44,22 +41,23 @@ pub fn snippet_from_entries(entries: &BTreeMap<String, String>) -> Result<Vec<u8
 pub fn snippet_from_stable_config(
     language: &str,
     debug_logs: bool,
-    overrides: &[(&str, &str)],
+    overlay: Option<ConfigurationOverlay>,
 ) -> Result<Vec<u8>, Error> {
     let configs =
         crate::platform::read_stable_configs(language, debug_logs).map_err(Error::StableConfig)?;
 
-    snippet_from_lookup(|key| {
-        for &(name, value) in overrides {
-            if name == key {
-                return Some(value);
-            }
-        }
+    let mut config = Configuration::from_lookup(|key| {
         configs
             .iter()
             .find(|c| c.name == key)
             .map(|c| c.value.as_str())
-    })
+    })?;
+
+    if let Some(o) = overlay {
+        config.overlay(o);
+    }
+
+    generate_snippet(&config)
 }
 
 #[cfg(test)]

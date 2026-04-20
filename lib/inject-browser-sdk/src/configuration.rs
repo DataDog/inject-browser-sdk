@@ -124,6 +124,86 @@ impl Serialize for RumConfiguration {
     }
 }
 
+/// Partial [`Configuration`] used to overlay values on top of an existing one.
+///
+/// Same JSON shape as [`Configuration`], but every field is optional: unset
+/// fields leave the corresponding value on the target unchanged.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(Debug, PartialEq))]
+#[allow(missing_docs)]
+pub struct ConfigurationOverlay {
+    pub major_version: Option<u32>,
+    #[serde(default)]
+    pub rum: RumConfiguration,
+}
+
+impl RumConfiguration {
+    /// Merge `overlay` into `self`: overlay `Some(_)` fields win; unknown keys
+    /// in `overlay.other` are inserted into `self.other`, replacing any entry
+    /// with the same name.
+    pub fn merge(&mut self, overlay: RumConfiguration) {
+        let RumConfiguration {
+            application_id,
+            client_token,
+            site,
+            service,
+            env,
+            version,
+            track_user_interactions,
+            track_resources,
+            track_long_tasks,
+            default_privacy_level,
+            session_sample_rate,
+            session_replay_sample_rate,
+            remote_configuration_id,
+            other,
+        } = overlay;
+        if application_id.is_some() {
+            self.application_id = application_id;
+        }
+        if client_token.is_some() {
+            self.client_token = client_token;
+        }
+        if site.is_some() {
+            self.site = site;
+        }
+        if service.is_some() {
+            self.service = service;
+        }
+        if env.is_some() {
+            self.env = env;
+        }
+        if version.is_some() {
+            self.version = version;
+        }
+        if track_user_interactions.is_some() {
+            self.track_user_interactions = track_user_interactions;
+        }
+        if track_resources.is_some() {
+            self.track_resources = track_resources;
+        }
+        if track_long_tasks.is_some() {
+            self.track_long_tasks = track_long_tasks;
+        }
+        if default_privacy_level.is_some() {
+            self.default_privacy_level = default_privacy_level;
+        }
+        if session_sample_rate.is_some() {
+            self.session_sample_rate = session_sample_rate;
+        }
+        if session_replay_sample_rate.is_some() {
+            self.session_replay_sample_rate = session_replay_sample_rate;
+        }
+        if remote_configuration_id.is_some() {
+            self.remote_configuration_id = remote_configuration_id;
+        }
+        for (k, v) in other {
+            self.other.insert(k, v);
+        }
+    }
+}
+
 const SITE_PATTERNS: [&str; 4] = ["datadog", "ddog", "datad0g", "dd0g"];
 const MAJOR_VERSIONS: [u32; 2] = [5, 6];
 
@@ -208,6 +288,20 @@ impl Configuration {
             }
         }
         Ok(cfg)
+    }
+
+    /// Overlay another [`Configuration`] on top of this one.
+    ///
+    /// Typed fields present (`Some(_)`) on `overlay.rum` replace the corresponding
+    /// fields on `self.rum`; fields that are `None` on `overlay.rum` are left
+    /// untouched. Entries in `overlay.rum.other` are merged key-by-key into
+    /// `self.rum.other`, with overlay values winning on conflicts. If
+    /// `overlay.major_version` is `Some`, it replaces `self.major_version`.
+    pub fn overlay(&mut self, overlay: ConfigurationOverlay) {
+        if let Some(v) = overlay.major_version {
+            self.major_version = v;
+        }
+        self.rum.merge(overlay.rum);
     }
 
     /// Validate the resolved configuration.
@@ -555,5 +649,71 @@ mod test {
         let config = Configuration::from_lookup(lookup_from_map(&map)).unwrap();
         let err = config.validate().unwrap_err();
         assert_eq!(err.code(), 5);
+    }
+
+    #[test]
+    fn overlay_replaces_set_fields_and_preserves_others() {
+        let mut config = Configuration {
+            major_version: 5,
+            rum: RumConfiguration {
+                application_id: Some(String::from("app-base")),
+                client_token: Some(String::from("tok-base")),
+                service: Some(String::from("svc-base")),
+                ..Default::default()
+            },
+        };
+        let overlay: ConfigurationOverlay = serde_json::from_slice(
+            br#"{"majorVersion":6,"rum":{"service":"svc-overlay","site":"datadoghq.eu"}}"#,
+        )
+        .unwrap();
+        config.overlay(overlay);
+
+        assert_eq!(config.major_version, 6);
+        assert_eq!(config.rum.application_id.as_deref(), Some("app-base"));
+        assert_eq!(config.rum.client_token.as_deref(), Some("tok-base"));
+        assert_eq!(config.rum.service.as_deref(), Some("svc-overlay"));
+        assert_eq!(config.rum.site.as_deref(), Some("datadoghq.eu"));
+    }
+
+    #[test]
+    fn overlay_merges_other_map() {
+        let mut config = Configuration {
+            major_version: 5,
+            rum: RumConfiguration {
+                application_id: Some(String::from("app")),
+                client_token: Some(String::from("tok")),
+                other: BTreeMap::from([
+                    (Box::from("keep"), Value::from("old")),
+                    (Box::from("shared"), Value::from("base")),
+                ]),
+                ..Default::default()
+            },
+        };
+        let overlay: ConfigurationOverlay =
+            serde_json::from_slice(br#"{"rum":{"shared":"overlay","added":true}}"#).unwrap();
+        config.overlay(overlay);
+
+        assert_eq!(config.major_version, 5);
+        assert_eq!(config.rum.other.get("keep"), Some(&Value::from("old")));
+        assert_eq!(
+            config.rum.other.get("shared"),
+            Some(&Value::from("overlay"))
+        );
+        assert_eq!(config.rum.other.get("added"), Some(&Value::from(true)));
+    }
+
+    #[test]
+    fn overlay_empty_is_noop() {
+        let mut config = Configuration {
+            major_version: 5,
+            rum: RumConfiguration {
+                application_id: Some(String::from("app")),
+                ..Default::default()
+            },
+        };
+        let overlay: ConfigurationOverlay = serde_json::from_slice(br#"{}"#).unwrap();
+        config.overlay(overlay);
+        assert_eq!(config.major_version, 5);
+        assert_eq!(config.rum.application_id.as_deref(), Some("app"));
     }
 }

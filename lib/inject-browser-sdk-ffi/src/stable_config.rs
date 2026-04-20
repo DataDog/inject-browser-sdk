@@ -11,9 +11,6 @@ use inject_browser_sdk::{error::Error, snippet_from_stable_config, Configuration
 
 use crate::snippet::{Snippet, SnippetInternal};
 
-/// Validate a `*const c_char`: checks for null, reads the C string, and validates UTF-8.
-/// Returns the string slice on success, or `Error::StableConfig` on failure.
-///
 /// # Safety
 /// If non-null, `ptr` must point to a valid NUL-terminated C string.
 unsafe fn cstr_to_str<'a>(ptr: *const c_char, field: &str) -> Result<&'a str, Error> {
@@ -29,18 +26,22 @@ unsafe fn cstr_to_str<'a>(ptr: *const c_char, field: &str) -> Result<&'a str, Er
 ///
 /// Reads configuration from the Datadog Agent's `application_monitoring.yaml` files
 /// (local and fleet-managed). If `json_overlay` is non-null, it is parsed as a JSON
-/// object with the same shape as [`snippet_create_from_json`] — except every field
-/// is optional — and layered on top of the disk-sourced configuration.
+/// object with the same shape as [`crate::snippet_create_from_json`] — except every
+/// field is optional — and layered on top of the disk-sourced configuration.
 ///
 /// The `language` parameter identifies the current process's language (e.g. `"browser-sdk"`)
 /// and is used for rule-based process matching in the configuration files.
 ///
-/// When `debug_logs` is `true`, diagnostic messages are written to stderr.
+/// When `debug_logs` is `true`, diagnostic messages are written to stderr on Unix.
+/// On Windows `debug_logs` is a no-op until a no_std stderr sink is wired up
+/// (tracked as DataDog/libdatadog#73).
 ///
 /// # Error handling
 ///
 /// Always returns a valid `Snippet` pointer. Check `error_code` for failures.
-/// A malformed `json_overlay` surfaces as error code `1` (JSON error).
+/// See [`Snippet`] for the full error-code table; `1` covers malformed
+/// `json_overlay`, `6` covers stable-config I/O/parse failures and null/invalid
+/// FFI inputs.
 ///
 /// # Memory ownership
 ///

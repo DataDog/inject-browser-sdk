@@ -359,7 +359,6 @@ dependencies = [
  "rustix-dlmalloc",
  "serde",
  "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -368,7 +367,6 @@ version = "1.2.1-dev"
 dependencies = [
  "inject-browser-sdk",
  "libfuzzer-sys",
- "serde_json",
 ]
 
 [[package]]
@@ -847,7 +845,6 @@ name = "test_inject"
 version = "1.2.1-dev"
 dependencies = [
  "inject-browser-sdk",
- "serde_json",
 ]
 
 [[package]]

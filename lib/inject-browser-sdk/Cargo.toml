@@ -14,7 +14,8 @@ stable-config = ["dep:rustix", "dep:libdd-library-config"]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 rustix = { version = "1.0", default-features = false, features = ["fs", "stdio"], optional = true }
-# From branch: pawel/no-std-library-config
+# TODO: pins `pawel/no-std-library-config` on DataDog/libdatadog + a personal
+# `yaml_serde` fork (see Cargo.lock). Switch to upstream revs before merging.
 libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", default-features = false, optional = true }
 
 # On Windows: enable std for libdd-library-config when stable-config is active

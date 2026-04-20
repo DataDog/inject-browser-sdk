@@ -8,19 +8,17 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::configuration::{Configuration, ConfigurationOverlay};
+use crate::configuration::Configuration;
+#[cfg(feature = "stable-config")]
+use crate::configuration::ConfigurationOverlay;
 use crate::error::Error;
 use crate::generate_snippet;
 
-/// Build a [`crate::Configuration`] from a lookup function and generate the snippet bytes.
-///
-/// The `lookup` closure takes a `DD_RUM_*` key name and returns the value if present.
+/// `lookup` is called with `DD_RUM_*` keys; missing keys become field absences.
 pub fn snippet_from_lookup<'a>(lookup: impl Fn(&str) -> Option<&'a str>) -> Result<Vec<u8>, Error> {
     Configuration::from_lookup(lookup).and_then(|config| generate_snippet(&config))
 }
 
-/// Build a [`crate::Configuration`] from a map of `DD_RUM_*` key-value pairs and generate the snippet bytes.
-///
 /// Convenience wrapper around [`snippet_from_lookup`].
 pub fn snippet_from_entries(entries: &BTreeMap<String, String>) -> Result<Vec<u8>, Error> {
     snippet_from_lookup(|key| entries.get(key).map(|v| v.as_str()))

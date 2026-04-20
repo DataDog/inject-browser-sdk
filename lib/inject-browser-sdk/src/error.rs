@@ -12,7 +12,7 @@ pub enum Error {
     Json(String),
     UnsupportedMajorVersion(u32),
     UnsupportedSite(String),
-    OutOfRangeRate(String, f32),
+    OutOfRangeRate(String, f64),
     EmptyMandatoryConf(String),
     StableConfig(String),
 }

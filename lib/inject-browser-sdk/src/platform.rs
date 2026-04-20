@@ -14,13 +14,10 @@ use libdd_library_config::{
     ConfigRead, ConfigReadError, Configurator, LibraryConfig, ProcessInfo, MAX_CONFIG_FILE_SIZE,
 };
 
-// --- Unix platform ---
-
 #[cfg(not(windows))]
 mod inner {
     use super::*;
 
-    /// [`ConfigRead`] implementation using `rustix` for no_std file I/O.
     pub struct PlatformConfigRead;
 
     impl ConfigRead for PlatformConfigRead {
@@ -36,15 +33,10 @@ mod inner {
                 Err(e) => return Err(ConfigReadError::Io(e)),
             };
 
-            let file_size = fstat(&fd)
-                .map(|s| {
-                    if s.st_size < 0 {
-                        0usize
-                    } else {
-                        s.st_size as usize
-                    }
-                })
-                .map_err(ConfigReadError::Io)?;
+            let file_size = fstat(&fd).map_err(ConfigReadError::Io).and_then(|s| {
+                usize::try_from(s.st_size)
+                    .map_err(|_| ConfigReadError::Io(rustix::io::Errno::INVAL))
+            })?;
 
             if file_size > MAX_CONFIG_FILE_SIZE {
                 return Err(ConfigReadError::TooLarge);
@@ -65,13 +57,10 @@ mod inner {
         }
     }
 
-    /// Build a [`ProcessInfo`] with empty `args` / `envp`.
-    ///
-    /// Reading `/proc/self/cmdline` and `/proc/self/environ` from an injected
-    /// library context isn't safe — argv/envp may be mutated by the host process
-    /// and the values are attacker-influenceable. Until we have an injection-safe
-    /// way to surface them (e.g. caller passes them in), leave these empty so
-    /// rule-based process matching falls back to `language`-only.
+    /// On Linux, `/proc/self/cmdline` and `/proc/self/environ` can be mutated by
+    /// the host process and are attacker-influenceable from an injected-library
+    /// context. Leave `args`/`envp` empty so rule-based process matching falls
+    /// back to `language`-only until an injection-safe channel is available.
     /// TODO(INPLAT-1110): supply args/envp via an injection-safe mechanism.
     pub fn detect_process_info(language: &str) -> ProcessInfo {
         ProcessInfo {
@@ -81,31 +70,33 @@ mod inner {
         }
     }
 
-    #[allow(unused_unsafe)] // stderr() is unsafe without std, safe with std
+    #[allow(unused_unsafe)]
     pub fn write_stderr(msg: &str) {
-        // SAFETY: stderr is always valid; we only write diagnostic messages.
+        // SAFETY: rustix::stdio::stderr() requires fd 2 has not been closed;
+        // this crate never closes stderr.
         let _ = rustix::io::write(unsafe { rustix::stdio::stderr() }, msg.as_bytes());
     }
 }
-
-// --- Windows platform ---
 
 #[cfg(windows)]
 mod inner {
     use super::*;
 
-    /// On Windows, use the std-based [`StdConfigRead`] (see issue #73 for no_std windows-sys reader).
+    // Tracked upstream: DataDog/libdatadog#73 (no_std windows-sys reader).
     pub use libdd_library_config::StdConfigRead as PlatformConfigRead;
 
-    /// Build a [`ProcessInfo`] using std on Windows.
+    /// On Windows (IIS hosting), argv/envp aren't mutable by other entities in
+    /// the host process model, so reading them via `std::env` is safe. This is
+    /// intentionally different from the Unix branch, where /proc/self/{cmdline,
+    /// environ} can't be trusted from an injected library.
     pub fn detect_process_info(language: &str) -> ProcessInfo {
         ProcessInfo::detect_global(String::from(language))
     }
 
-    pub fn write_stderr(_msg: &str) {
-        // On Windows with std, eprintln would work but we're in no_std context for the crate.
-        // Debug logs are best-effort; skip on Windows for now.
-    }
+    /// No-op on Windows — no stderr sink is linked in the no_std path.
+    /// `debug_logs=true` produces no output until a no_std windows-sys sink is
+    /// added (tracked upstream as DataDog/libdatadog#73).
+    pub fn write_stderr(_msg: &str) {}
 }
 
 pub use inner::{detect_process_info, write_stderr, PlatformConfigRead};
@@ -114,19 +105,27 @@ pub use inner::{detect_process_info, write_stderr, PlatformConfigRead};
 /// files, preserving the full [`LibraryConfig`] metadata.
 ///
 /// When `debug_logs` is `true`, diagnostic messages from the configurator are written to stderr.
+/// On Windows, `debug_logs` is a no-op (see [`write_stderr`]).
 pub fn read_stable_configs(language: &str, debug_logs: bool) -> Result<Vec<LibraryConfig>, String> {
+    read_stable_configs_with_reader(&PlatformConfigRead, language, debug_logs)
+}
+
+/// Variant of [`read_stable_configs`] that accepts a caller-supplied reader.
+/// Intended for tests that need to exercise populated YAML input without
+/// touching the real filesystem.
+pub fn read_stable_configs_with_reader<R: ConfigRead>(
+    reader: &R,
+    language: &str,
+    debug_logs: bool,
+) -> Result<Vec<LibraryConfig>, String> {
     let process_info = detect_process_info(language);
     let configurator = Configurator::new(debug_logs);
 
     let local_path = Configurator::LOCAL_STABLE_CONFIGURATION_PATH;
     let fleet_path = Configurator::FLEET_STABLE_CONFIGURATION_PATH;
 
-    let logged_result = configurator.get_config_from_reader(
-        &PlatformConfigRead,
-        local_path,
-        fleet_path,
-        &process_info,
-    );
+    let logged_result =
+        configurator.get_config_from_reader(reader, local_path, fleet_path, &process_info);
 
     if debug_logs {
         for msg in logged_result.logs() {
@@ -135,4 +134,27 @@ pub fn read_stable_configs(language: &str, debug_logs: bool) -> Result<Vec<Libra
     }
 
     logged_result.data().map_err(|err| format!("{}", err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    struct NotFoundReader;
+
+    impl ConfigRead for NotFoundReader {
+        type IoError = core::convert::Infallible;
+
+        fn read(&self, _path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
+            Err(ConfigReadError::NotFound)
+        }
+    }
+
+    #[test]
+    fn missing_files_return_empty_configs() {
+        let configs = read_stable_configs_with_reader(&NotFoundReader, "browser-sdk", false)
+            .expect("reader NotFound should not surface as error");
+        assert_eq!(configs.len(), 0);
+    }
 }

@@ -253,7 +253,7 @@ impl Configuration {
 fn validate_rate(label: &str, value: Option<f64>) -> Result<(), Error> {
     if let Some(rate) = value {
         if !(0.0..=100.0).contains(&rate) {
-            return Err(Error::OutOfRangeRate(String::from(label), rate as f32));
+            return Err(Error::OutOfRangeRate(String::from(label), rate));
         }
     }
     Ok(())
@@ -369,7 +369,7 @@ mod test {
                         ..Default::default()
                     },
                 },
-                expected: Error::OutOfRangeRate(String::from("session sample rate"), 105.),
+                expected: Error::OutOfRangeRate(String::from("session sample rate"), 105.0),
             },
             TestCase {
                 input: Configuration {
@@ -381,7 +381,7 @@ mod test {
                         ..Default::default()
                     },
                 },
-                expected: Error::OutOfRangeRate(String::from("session replay sample rate"), 2469.),
+                expected: Error::OutOfRangeRate(String::from("session replay sample rate"), 2469.0),
             },
             TestCase {
                 input: Configuration {

@@ -78,9 +78,15 @@ impl SnippetInternal {
                 inner: Ok(content),
             },
             Err(error) => {
+                // Error messages can embed user-controlled strings (e.g. raw bytes
+                // from libdd-library-config). Scrub NUL bytes so CString::new
+                // cannot fail; fall back to a static message if it still does,
+                // because panicking here brings down the host web server.
                 let error_string = error.to_string().replace('\0', "\\0");
-                let error_message =
-                    CString::new(error_string).expect("replacement removed all NUL bytes");
+                let error_message = CString::new(error_string).unwrap_or_else(|_| {
+                    CString::new("internal error: error message contained unrepresentable bytes")
+                        .expect("static message has no NUL bytes")
+                });
                 Self {
                     error_message: error_message.as_ptr(),
                     error_code: error.code(),

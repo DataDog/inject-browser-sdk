@@ -6,23 +6,22 @@ version.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["stable-config"]
 std = ["serde/std", "serde_json/std"]
-stable-config = ["dep:rustix", "dep:libdd-library-config"]
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
-rustix = { version = "1.0", default-features = false, features = ["fs", "stdio"], optional = true }
+rustix = { version = "1.0", default-features = false, features = ["fs", "stdio"] }
 # Stopgap: pins `pawel/no-std-library-config` on DataDog/libdatadog which
 # transitively pulls a personal `yaml_serde` fork (see Cargo.lock). A later PR
 # will land the no_std changes upstream and repoint this dep.
-libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", default-features = false, optional = true }
+libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", default-features = false }
 
-# On Windows: enable std for libdd-library-config when stable-config is active.
-# TODO: same personal-fork pin as above; repoint to upstream in a later PR.
+# On Windows: libdd-library-config needs `std` because its StdConfigRead reader
+# uses std::fs. TODO: same personal-fork pin as above; repoint to upstream in a
+# later PR.
 [target.'cfg(windows)'.dependencies]
-libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", features = ["std"], optional = true }
+libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", features = ["std"] }
 
 [dev-dependencies]
 pretty_assertions = { version = "1.4.0", features = ["unstable"] }

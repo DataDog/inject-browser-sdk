@@ -41,7 +41,8 @@ use inject_browser_sdk::{error::Error, generate_snippet, Configuration};
 /// | Rate out of range              | `4`          | `"Validation error: The provided {key} is invalid. ..."` |
 /// | Missing required field         | `5`          | `"Validation error: Mandatory field '{key}' is empty."` |
 /// | Stable config error            | `6`          | `"Stable config error: ..."` |
-/// | FFI input error                | `7`          | `"FFI error: ..."` (NULL pointer, non-UTF-8 input) |
+/// | NULL pointer passed to FFI     | `7`          | `"FFI error: {field} is NULL"` |
+/// | Non-UTF-8 input passed to FFI  | `8`          | `"FFI error: {field} is not valid UTF-8"` |
 ///
 ///
 /// [1]: https://docs.datadoghq.com/real_user_monitoring/browser/#cdn-async
@@ -176,7 +177,7 @@ impl SnippetInternal {
 #[no_mangle]
 pub unsafe extern "C" fn snippet_create_from_json(json: *const c_char) -> *mut Snippet {
     if json.is_null() {
-        return SnippetInternal::new(Err(Error::Ffi(String::from("json parameter is NULL"))))
+        return SnippetInternal::new(Err(Error::FfiNullPointer(String::from("json"))))
             .into_public_ptr();
     }
     let json_bytes = CStr::from_ptr(json).to_bytes();

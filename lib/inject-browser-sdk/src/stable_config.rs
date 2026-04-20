@@ -8,9 +8,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::configuration::Configuration;
-#[cfg(feature = "stable-config")]
-use crate::configuration::ConfigurationOverlay;
+use crate::configuration::{Configuration, ConfigurationOverlay};
 use crate::error::Error;
 use crate::generate_snippet;
 
@@ -35,7 +33,6 @@ pub fn snippet_from_entries(entries: &BTreeMap<String, String>) -> Result<Vec<u8
 /// and is used for rule-based process matching in the configuration files.
 ///
 /// When `debug_logs` is `true`, diagnostic messages are written to stderr.
-#[cfg(feature = "stable-config")]
 pub fn snippet_from_stable_config(
     language: &str,
     debug_logs: bool,

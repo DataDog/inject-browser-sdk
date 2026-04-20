@@ -73,12 +73,14 @@ pub struct RumConfiguration {
 /// - **Explicit `null`** on a typed field: treated the same as missing —
 ///   target preserved, *not* cleared. This follows serde's default
 ///   `Option<T>` handling.
-/// - **Unknown keys**: inside `rum`, accumulated into [`RumConfiguration::other`]
-///   via `#[serde(flatten)]`. At the top level (outside `rum`), there is no
-///   `deny_unknown_fields`, so a typo like `"rumm"` is silently dropped.
-///   Callers should validate overlay inputs before passing them through.
+/// - **Unknown keys at the top level** (outside `rum`): rejected with a
+///   deserialization error, so typos like `"rumm"` surface instead of being
+///   silently dropped.
+/// - **Unknown keys inside `rum`**: accumulated into
+///   [`RumConfiguration::other`] via `#[serde(flatten)]` so future
+///   Browser-SDK additions flow through without an injector release.
 #[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 #[allow(missing_docs)]
 pub struct ConfigurationOverlay {
@@ -301,6 +303,7 @@ pub(crate) fn parse_f64(raw: &str, key: &str) -> Result<f64, Error> {
 mod test {
     use super::*;
     use alloc::collections::BTreeMap;
+    use alloc::string::ToString;
     use alloc::vec;
     use pretty_assertions::assert_eq;
 
@@ -671,20 +674,25 @@ mod test {
     }
 
     #[test]
-    fn overlay_unknown_top_level_key_is_silently_ignored() {
-        // No deny_unknown_fields at the top level — a typo like "rumm" is
-        // dropped without error. Pinning this behavior so a future change
-        // that tightens validation becomes a visible test failure.
-        let mut config = Configuration {
-            major_version: 5,
-            rum: RumConfiguration {
-                application_id: Some(String::from("app-base")),
-                ..Default::default()
-            },
-        };
-        let overlay: ConfigurationOverlay =
-            serde_json::from_slice(br#"{"rumm":{"applicationId":"typo"}}"#).unwrap();
-        config.overlay(overlay);
-        assert_eq!(config.rum.application_id.as_deref(), Some("app-base"));
+    fn overlay_unknown_top_level_key_is_rejected() {
+        // `deny_unknown_fields` at the top level turns typos like "rumm" into
+        // a parse error instead of silently dropping them.
+        let err =
+            serde_json::from_slice::<ConfigurationOverlay>(br#"{"rumm":{"applicationId":"typo"}}"#)
+                .expect_err("unknown top-level key must be rejected");
+        assert!(
+            err.to_string().contains("rumm"),
+            "error should name the unknown key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn overlay_unknown_rum_key_is_captured_in_other() {
+        // Unknown keys inside `rum` still flow into `other` via
+        // #[serde(flatten)] so future Browser-SDK additions don't require an
+        // injector release.
+        let overlay: ConfigurationOverlay = serde_json::from_slice(br#"{"rum":{"newKnob":"x"}}"#)
+            .expect("unknown rum key must be accepted");
+        assert_eq!(overlay.rum.other.get("newKnob"), Some(&Value::from("x")));
     }
 }

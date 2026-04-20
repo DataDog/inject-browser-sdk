@@ -5,8 +5,6 @@
 // Copyright 2024-Present Datadog, Inc.
 
 //! Platform-specific helpers for reading stable configuration files.
-//!
-//! Gated behind the `stable-config` feature (enabled by default).
 
 use alloc::{format, string::String, vec, vec::Vec};
 
@@ -182,6 +180,36 @@ mod tests {
         }
     }
 
+    /// Serves a DD_RUM_* rule for language=browser-sdk as the local config
+    /// and returns NotFound for the fleet config. Used to verify that a
+    /// realistic YAML document flows end-to-end through the configurator
+    /// (guards against upstream YAML-schema drift that NotFound/Malformed
+    /// readers would not catch).
+    struct PopulatedReader;
+
+    impl ConfigRead for PopulatedReader {
+        type IoError = core::convert::Infallible;
+
+        fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
+            if path == Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
+                Ok(br#"
+rules:
+- selectors:
+  - origin: language
+    matches: ["browser-sdk"]
+    operator: equals
+  configuration:
+    DD_RUM_APPLICATION_ID: app-populated
+    DD_RUM_CLIENT_TOKEN: tok-populated
+    DD_RUM_SITE: datadoghq.com
+"#
+                .to_vec())
+            } else {
+                Err(ConfigReadError::NotFound)
+            }
+        }
+    }
+
     #[test]
     fn missing_files_return_empty_configs() {
         let configs = read_stable_configs_with_reader(&NotFoundReader, "browser-sdk", false)
@@ -197,6 +225,30 @@ mod tests {
         let err = read_stable_configs_with_reader(&MalformedReader, "browser-sdk", false)
             .expect_err("malformed YAML must surface as error");
         assert!(!err.is_empty(), "error message should not be empty");
+    }
+
+    #[test]
+    fn populated_yaml_with_matching_rule_yields_dd_rum_fields() {
+        let configs = read_stable_configs_with_reader(&PopulatedReader, "browser-sdk", false)
+            .expect("populated reader must succeed");
+        let lookup = |key: &str| {
+            configs
+                .iter()
+                .find(|c| c.name == key)
+                .map(|c| c.value.as_str())
+        };
+        assert_eq!(lookup("DD_RUM_APPLICATION_ID"), Some("app-populated"));
+        assert_eq!(lookup("DD_RUM_CLIENT_TOKEN"), Some("tok-populated"));
+        assert_eq!(lookup("DD_RUM_SITE"), Some("datadoghq.com"));
+    }
+
+    #[test]
+    fn populated_yaml_skips_non_matching_language() {
+        // Rule selects language=browser-sdk; passing a different language
+        // must yield zero entries rather than the matching rule's values.
+        let configs = read_stable_configs_with_reader(&PopulatedReader, "not-browser-sdk", false)
+            .expect("populated reader must succeed");
+        assert_eq!(configs.len(), 0);
     }
 
     #[cfg(not(windows))]
@@ -255,10 +307,9 @@ mod tests {
         #[test]
         fn read_oversize_rejects() {
             // Create a file one byte bigger than the configurator's gate.
-            // We don't want to actually allocate MAX_CONFIG_FILE_SIZE+1
-            // bytes on disk in all CI environments, so we write it via
-            // seek + single-byte write to make the file "sparse" where
-            // possible.
+            // set_len zero-extends the file, producing a sparse file where
+            // the filesystem supports it — fstat st_size exceeds
+            // MAX_CONFIG_FILE_SIZE without materializing that many bytes.
             let path = tmp_path("oversize.yaml");
             let mut f = fs::OpenOptions::new()
                 .create(true)
@@ -266,8 +317,6 @@ mod tests {
                 .truncate(true)
                 .open(&path)
                 .unwrap();
-            // Seek past the max and write one byte — produces a file whose
-            // fstat st_size > MAX_CONFIG_FILE_SIZE.
             f.set_len((MAX_CONFIG_FILE_SIZE as u64) + 1).unwrap();
             f.flush().unwrap();
             drop(f);
@@ -279,6 +328,47 @@ mod tests {
                 "expected TooLarge, got {:?}",
                 result.as_ref().err().map(core::mem::discriminant),
             );
+        }
+    }
+
+    #[cfg(windows)]
+    mod platform_read_windows {
+        use super::PlatformConfigRead;
+        use alloc::format;
+        use libdd_library_config::{ConfigRead, ConfigReadError};
+        use pretty_assertions::assert_eq;
+        use std::fs;
+        use std::path::PathBuf;
+
+        fn tmp_path(name: &str) -> PathBuf {
+            let mut p = std::env::temp_dir();
+            p.push(format!(
+                "inject-browser-sdk-test-{}-{}",
+                std::process::id(),
+                name
+            ));
+            p
+        }
+
+        #[test]
+        fn read_ok_returns_file_contents() {
+            // Smoke test that PlatformConfigRead (aliased to StdConfigRead on
+            // Windows) actually wires up to std::fs — guards against the
+            // Windows inner module silently diverging from Unix.
+            let path = tmp_path("win_read_ok.yaml");
+            fs::write(&path, b"application_id: hello").unwrap();
+            let result = PlatformConfigRead.read(path.to_str().unwrap()).unwrap();
+            let _ = fs::remove_file(&path);
+            assert_eq!(result, b"application_id: hello");
+        }
+
+        #[test]
+        fn read_missing_path_maps_to_not_found() {
+            let path = tmp_path("win_missing");
+            let err = PlatformConfigRead
+                .read(path.to_str().unwrap())
+                .expect_err("missing path must be NotFound");
+            assert!(matches!(err, ConfigReadError::NotFound));
         }
     }
 }

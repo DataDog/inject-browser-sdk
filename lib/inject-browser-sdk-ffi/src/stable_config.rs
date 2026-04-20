@@ -4,7 +4,10 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-use alloc::{format, string::String};
+use alloc::{
+    format,
+    string::{String, ToString},
+};
 use core::ffi::{c_char, CStr};
 
 use inject_browser_sdk::{error::Error, snippet_from_stable_config, ConfigurationOverlay};
@@ -15,7 +18,7 @@ use crate::snippet::{Snippet, SnippetInternal};
 /// `CStr`'s lifetime so callers cannot accidentally extend it.
 fn cstr_to_str<'a>(cstr: &'a CStr, field: &str) -> Result<&'a str, Error> {
     cstr.to_str()
-        .map_err(|_| Error::Ffi(format!("{field} is not valid UTF-8")))
+        .map_err(|_| Error::FfiInvalidUtf8(field.to_string()))
 }
 
 /// Create a snippet from Datadog stable configuration files, with an optional JSON overlay.
@@ -32,13 +35,29 @@ fn cstr_to_str<'a>(cstr: &'a CStr, field: &str) -> Result<&'a str, Error> {
 /// On Windows `debug_logs` is a no-op until a no_std stderr sink is wired up
 /// (tracked as DataDog/libdatadog#73).
 ///
+/// # Overlay semantics
+///
+/// - **Missing keys**: leave the disk value untouched.
+/// - **Present typed keys** (e.g. `"applicationId":"abc"`): replace the disk
+///   value.
+/// - **Explicit `null`** on a typed key (e.g. `"applicationId":null`): leaves
+///   the disk value untouched — it is *not* a way to clear a field. To
+///   override with an empty value, omit the key; to override with a real
+///   value, pass the real value.
+/// - **Unknown keys at the top level** (outside `rum`): rejected with
+///   `error_code = 1`.
+/// - **Unknown keys inside `rum`**: passed through to the Browser SDK
+///   configuration object, so new SDK options work without an injector
+///   release.
+///
 /// # Error handling
 ///
 /// Always returns a valid `Snippet` pointer. Check `error_code` for failures.
 /// See [`Snippet`] for the full error-code table; relevant codes here:
 /// - `1` malformed `json_overlay`.
 /// - `6` stable-config I/O or YAML parse failures.
-/// - `7` FFI input errors (NULL pointer, non-UTF-8 `language`).
+/// - `7` NULL pointer for `language`.
+/// - `8` non-UTF-8 bytes in `language`.
 ///
 /// # Memory ownership
 ///
@@ -72,7 +91,7 @@ pub unsafe extern "C" fn snippet_create_from_stable_config(
     json_overlay: *const c_char,
 ) -> *mut Snippet {
     if language.is_null() {
-        return SnippetInternal::new(Err(Error::Ffi(String::from("language parameter is NULL"))))
+        return SnippetInternal::new(Err(Error::FfiNullPointer(String::from("language"))))
             .into_public_ptr();
     }
 
@@ -141,13 +160,13 @@ mod tests {
 
     #[test]
     fn invalid_utf8_language() {
-        // 0xFF is not valid UTF-8; must surface as FFI input error (7), not
-        // as a stable-config error (6).
+        // 0xFF is not valid UTF-8; must surface as FFI non-UTF-8 error (8),
+        // distinct from NULL-pointer (7) and stable-config (6).
         let snippet =
             unsafe { snippet_create_from_stable_config(cstr_ptr(&[0xFFu8, 0u8]), false, null()) };
         assert_ne!(snippet, null_mut());
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
-        assert_eq!(s.error_code, 7);
+        assert_eq!(s.error_code, 8);
         unsafe { snippet_cleanup(snippet) };
     }
 

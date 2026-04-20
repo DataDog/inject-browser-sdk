@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(test, derive(Debug))]
 #[allow(missing_docs)]
 pub struct Configuration {
@@ -680,6 +680,20 @@ mod test {
         let err =
             serde_json::from_slice::<ConfigurationOverlay>(br#"{"rumm":{"applicationId":"typo"}}"#)
                 .expect_err("unknown top-level key must be rejected");
+        assert!(
+            err.to_string().contains("rumm"),
+            "error should name the unknown key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn configuration_unknown_top_level_key_is_rejected() {
+        // Symmetric with ConfigurationOverlay: typos like "rumm" must not be
+        // silently accepted on the primary JSON path either.
+        let err = serde_json::from_slice::<Configuration>(
+            br#"{"majorVersion":5,"rum":{"applicationId":"a","clientToken":"b"},"rumm":{}}"#,
+        )
+        .expect_err("unknown top-level key must be rejected");
         assert!(
             err.to_string().contains("rumm"),
             "error should name the unknown key, got: {err}"

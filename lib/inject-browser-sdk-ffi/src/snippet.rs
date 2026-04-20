@@ -19,8 +19,8 @@ use core::{
 
 use inject_browser_sdk::{error::Error, generate_snippet, Configuration};
 
-/// A Browser SDK snippet. Use `snippet_create_from_json` or
-/// `snippet_create_from_stable_config` to create a new one.
+/// A Browser SDK snippet. Use [`snippet_create_from_json`] or
+/// [`crate::snippet_create_from_stable_config`] to create a new one.
 ///
 /// In practice, a Browser SDK snippet looks like a HTML &lt;script&gt; tag containing what is
 /// needed to load and initialize the SDK. See [public documentation][1].

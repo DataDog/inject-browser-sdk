@@ -82,8 +82,10 @@ fn cstr_to_str<'a>(cstr: &'a CStr, field: &str) -> Result<&'a str, Error> {
 ///
 /// # Safety
 ///
-/// - `language` must be a valid, non-null, NUL-terminated C string.
-/// - If `json_overlay` is non-null, it must point to a valid NUL-terminated C string.
+/// - If `language` is non-null, it must point to a valid NUL-terminated C
+///   string. NULL is tolerated and returns error code 7.
+/// - If `json_overlay` is non-null, it must point to a valid NUL-terminated
+///   C string.
 #[no_mangle]
 pub unsafe extern "C" fn snippet_create_from_stable_config(
     language: *const c_char,
@@ -155,6 +157,18 @@ mod tests {
         assert_ne!(snippet, null_mut());
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
         assert_eq!(s.error_code, 7);
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn empty_language() {
+        // Empty language passes NULL+UTF-8 guards but matches no rule
+        // selectors. Must surface as the descriptive "no stable-config
+        // entries found" (code 6), not as a lower-level failure.
+        let snippet = unsafe { snippet_create_from_stable_config(cstr_ptr(b"\0"), false, null()) };
+        assert_ne!(snippet, null_mut());
+        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_eq!(s.error_code, 6);
         unsafe { snippet_cleanup(snippet) };
     }
 

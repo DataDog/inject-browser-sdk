@@ -68,10 +68,11 @@ mod inner {
         }
     }
 
-    #[allow(unused_unsafe)]
     pub fn write_stderr(msg: &str) {
-        // SAFETY: rustix::stdio::stderr() requires fd 2 has not been closed;
-        // this crate never closes stderr.
+        // SAFETY: rustix::stdio::stderr() requires fd 2 to remain open and
+        // not be dynamically reused for another purpose. This crate never
+        // closes stderr; host processes (IIS module, native injector) are
+        // not expected to either.
         let stderr = unsafe { rustix::stdio::stderr() };
         let bytes = msg.as_bytes();
         let mut written = 0;
@@ -140,16 +141,27 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
     // Buffer logs before consuming `logged_result` — `data()` takes self.
     let logs: Vec<String> = logged_result.logs().iter().map(String::from).collect();
     let data = logged_result.data();
-    // Always surface configurator diagnostics when the result is an error —
-    // dropping them when debug_logs=false means the user only sees the final
-    // terminal message with no indication of which file/rule failed.
-    if debug_logs || data.is_err() {
+    // Upstream reclassifies some failures (e.g. TooLarge) into
+    // `Ok(StableConfig::default())` while pushing a diagnostic into logs.
+    // Emit when the outcome is an error OR an empty-configs Ok, so the caller
+    // sees *why* nothing was loaded instead of a bare "no entries found".
+    let outcome_empty = matches!(&data, Ok(v) if v.is_empty());
+    if debug_logs || data.is_err() || outcome_empty {
         for msg in &logs {
             write_stderr(&format!("[inject-browser-sdk] {}\n", msg));
         }
     }
 
-    data.map_err(|err| format!("{}", err))
+    data.map_err(|err| {
+        // Fold captured diagnostics into the error string so callers that
+        // never see stderr (notably Windows, where write_stderr is a no-op)
+        // still get the full context.
+        if logs.is_empty() {
+            format!("{err}")
+        } else {
+            format!("{err}\n{}", logs.join("\n"))
+        }
+    })
 }
 
 #[cfg(test)]
@@ -240,6 +252,64 @@ rules:
         assert_eq!(lookup("DD_RUM_APPLICATION_ID"), Some("app-populated"));
         assert_eq!(lookup("DD_RUM_CLIENT_TOKEN"), Some("tok-populated"));
         assert_eq!(lookup("DD_RUM_SITE"), Some("datadoghq.com"));
+    }
+
+    /// Serves a DD_RUM_SITE value on the local config file and a *different*
+    /// one on the fleet-managed file. Used to verify which source wins when
+    /// the same key is defined in both places.
+    struct BothSourcesReader;
+
+    impl ConfigRead for BothSourcesReader {
+        type IoError = core::convert::Infallible;
+
+        fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
+            if path == Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
+                Ok(br#"
+rules:
+- selectors:
+  - origin: language
+    matches: ["browser-sdk"]
+    operator: equals
+  configuration:
+    DD_RUM_APPLICATION_ID: app-local
+    DD_RUM_CLIENT_TOKEN: tok-local
+    DD_RUM_SITE: datadoghq.com
+"#
+                .to_vec())
+            } else if path == Configurator::FLEET_STABLE_CONFIGURATION_PATH {
+                Ok(br#"
+rules:
+- selectors:
+  - origin: language
+    matches: ["browser-sdk"]
+    operator: equals
+  configuration:
+    DD_RUM_APPLICATION_ID: app-fleet
+    DD_RUM_CLIENT_TOKEN: tok-fleet
+    DD_RUM_SITE: datadoghq.eu
+"#
+                .to_vec())
+            } else {
+                Err(ConfigReadError::NotFound)
+            }
+        }
+    }
+
+    #[test]
+    fn fleet_overrides_local_when_both_present() {
+        // Upstream libdd-library-config semantics: fleet-managed config
+        // overrides local. Guards against that contract silently flipping.
+        let configs = read_stable_configs_with_reader(&BothSourcesReader, "browser-sdk", false)
+            .expect("both-sources reader must succeed");
+        let lookup = |key: &str| {
+            configs
+                .iter()
+                .find(|c| c.name == key)
+                .map(|c| c.value.as_str())
+        };
+        assert_eq!(lookup("DD_RUM_SITE"), Some("datadoghq.eu"));
+        assert_eq!(lookup("DD_RUM_APPLICATION_ID"), Some("app-fleet"));
+        assert_eq!(lookup("DD_RUM_CLIENT_TOKEN"), Some("tok-fleet"));
     }
 
     #[test]

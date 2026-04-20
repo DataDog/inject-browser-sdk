@@ -32,7 +32,9 @@ pub fn snippet_from_entries(entries: &BTreeMap<String, String>) -> Result<Vec<u8
 /// The `language` parameter identifies the current process's language (e.g. `"browser-sdk"`)
 /// and is used for rule-based process matching in the configuration files.
 ///
-/// When `debug_logs` is `true`, diagnostic messages are written to stderr.
+/// When `debug_logs` is `true`, diagnostic messages are written to stderr on
+/// Unix. On Windows stderr is a no-op (see [`crate::platform::write_stderr`]);
+/// diagnostics are folded into the returned error message so they survive.
 pub fn snippet_from_stable_config(
     language: &str,
     debug_logs: bool,
@@ -72,6 +74,7 @@ pub fn snippet_from_stable_config(
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use serde_json::Value;
 
     fn entries(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -80,19 +83,34 @@ mod tests {
             .collect()
     }
 
+    /// Extract the JSON object passed to `DD_RUM.init(...)` so tests can
+    /// assert on structured fields instead of raw-byte windows (which match
+    /// by accident inside the CDN URL, e.g. "us1" appears in `/us1/v5/`).
+    fn extract_init_json(bytes: &[u8]) -> Value {
+        let text = core::str::from_utf8(bytes).expect("snippet is UTF-8");
+        let start_marker = "DD_RUM.init(";
+        let start = text
+            .find(start_marker)
+            .expect("snippet must contain DD_RUM.init(")
+            + start_marker.len();
+        let end = text[start..]
+            .find(");")
+            .expect("DD_RUM.init(...) must be terminated")
+            + start;
+        serde_json::from_str(&text[start..end]).expect("init arg must be JSON")
+    }
+
     #[test]
     fn snippet_from_entries_minimal() {
         let map = entries(&[
             ("DD_RUM_APPLICATION_ID", "app-1"),
             ("DD_RUM_CLIENT_TOKEN", "tok-1"),
         ]);
-        let result = snippet_from_entries(&map);
-        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
-        let bytes = result.unwrap();
-        assert!(bytes
-            .windows(b"applicationId".len())
-            .any(|w| w == b"applicationId"));
-        assert!(bytes.windows(b"app-1".len()).any(|w| w == b"app-1"));
+        let bytes = snippet_from_entries(&map).expect("minimal entries must succeed");
+        let init = extract_init_json(&bytes);
+        assert_eq!(init["applicationId"], Value::from("app-1"));
+        assert_eq!(init["clientToken"], Value::from("tok-1"));
+        assert_eq!(init.get("site"), None, "site should be unset by default");
     }
 
     #[test]
@@ -114,25 +132,45 @@ mod tests {
     }
 
     #[test]
+    fn snippet_from_lookup_negative_rate() {
+        // -5.0 is outside 0..=100 and must be rejected at validate-time (code 4).
+        let map = entries(&[
+            ("DD_RUM_APPLICATION_ID", "app-1"),
+            ("DD_RUM_CLIENT_TOKEN", "tok-1"),
+            ("DD_RUM_SESSION_SAMPLE_RATE", "-5.0"),
+        ]);
+        let err = snippet_from_lookup(|key| map.get(key).map(|v| v.as_str())).unwrap_err();
+        assert_eq!(err.code(), 4);
+    }
+
+    #[test]
     fn snippet_from_entries_ignores_non_dd_rum_keys() {
         // Only DD_RUM_* keys are consulted; Datadog-wide keys like DD_SITE
-        // are ignored. The snippet should use the default site (us1), not
-        // the DD_SITE value.
+        // are ignored. The embedded init config must have no `site` key and
+        // thus default to the "us1" CDN region at runtime.
         let map = entries(&[
             ("DD_RUM_APPLICATION_ID", "app-1"),
             ("DD_RUM_CLIENT_TOKEN", "tok-1"),
             ("DD_SITE", "datadoghq.eu"),
         ]);
         let bytes = snippet_from_entries(&map).unwrap();
-        assert!(
-            !bytes
-                .windows(b"datadoghq.eu".len())
-                .any(|w| w == b"datadoghq.eu"),
-            "DD_SITE must not leak into the snippet"
-        );
-        assert!(
-            bytes.windows(b"us1".len()).any(|w| w == b"us1"),
-            "expected default site us1"
-        );
+        let init = extract_init_json(&bytes);
+        assert_eq!(init.get("site"), None, "DD_SITE must not leak into init");
+    }
+
+    #[test]
+    fn snippet_from_entries_dd_rum_site_wins_when_both_are_set() {
+        // DD_RUM_SITE must win over DD_SITE. Guards against a future refactor
+        // that adds DD_SITE as a fallback silently breaking the documented
+        // precedence contract.
+        let map = entries(&[
+            ("DD_RUM_APPLICATION_ID", "app-1"),
+            ("DD_RUM_CLIENT_TOKEN", "tok-1"),
+            ("DD_SITE", "datadoghq.eu"),
+            ("DD_RUM_SITE", "datadoghq.com"),
+        ]);
+        let bytes = snippet_from_entries(&map).unwrap();
+        let init = extract_init_json(&bytes);
+        assert_eq!(init["site"], Value::from("datadoghq.com"));
     }
 }

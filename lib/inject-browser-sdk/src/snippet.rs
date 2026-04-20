@@ -8,21 +8,16 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::{configuration::validate_configuration, configuration::Configuration, error::Error};
+use crate::{configuration::Configuration, error::Error};
 
 /// Generates the Datadog RUM SDK JavaScript snippet based on the provided configuration.
 ///
 /// This function creates a JavaScript snippet that can be injected into your web application
 /// to enable RUM. The snippet is generated using the provided `configuration`.
 pub fn generate_snippet(configuration: &Configuration) -> Result<Vec<u8>, Error> {
-    validate_configuration(configuration)?;
+    configuration.validate()?;
 
-    let site = configuration
-        .rum
-        .fields
-        .get("site")
-        .and_then(|v| v.as_str())
-        .unwrap_or("datadoghq.com");
+    let site = configuration.rum.site.as_deref().unwrap_or("datadoghq.com");
     let url = format_cdn_url(configuration.major_version, site)?;
 
     let mut output = Vec::new();
@@ -94,6 +89,8 @@ fn format_cdn_url(major_version: u32, site: &str) -> Result<String, Error> {
 mod tests {
     use super::*;
     use crate::configuration::RumConfiguration;
+    use alloc::boxed::Box;
+    use alloc::collections::BTreeMap;
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
@@ -116,10 +113,11 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
-                    rum: RumConfiguration::from_pairs(&[
-                        ("applicationId", json!("bar")),
-                        ("clientToken", json!("foo")),
-                    ]),
+                    rum: RumConfiguration {
+                        application_id: Some(String::from("bar")),
+                        client_token: Some(String::from("foo")),
+                        ..Default::default()
+                    },
                 })
                 .unwrap()
             )
@@ -147,14 +145,15 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
-                    rum: RumConfiguration::from_pairs(&[
-                        ("applicationId", json!("bar")),
-                        ("clientToken", json!("foo")),
-                        ("site", json!("datadoghq.com")),
-                        ("defaultPrivacyLevel", json!("mask")),
-                        ("trackResources", json!(true)),
-                        ("sessionSampleRate", json!(42.42)),
-                    ]),
+                    rum: RumConfiguration {
+                        application_id: Some(String::from("bar")),
+                        client_token: Some(String::from("foo")),
+                        site: Some(String::from("datadoghq.com")),
+                        default_privacy_level: Some(String::from("mask")),
+                        track_resources: Some(true),
+                        session_sample_rate: Some(42.42),
+                        ..Default::default()
+                    },
                 })
                 .unwrap()
             )
@@ -184,11 +183,12 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
-                    rum: RumConfiguration::from_pairs(&[
-                        ("applicationId", json!("☺ € é")),
-                        ("clientToken", json!("foo")),
-                        ("site", json!("datadoghq.com")),
-                    ]),
+                    rum: RumConfiguration {
+                        application_id: Some(String::from("☺ € é")),
+                        client_token: Some(String::from("foo")),
+                        site: Some(String::from("datadoghq.com")),
+                        ..Default::default()
+                    },
                 })
                 .unwrap()
             )
@@ -216,13 +216,16 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
-                    rum: RumConfiguration::from_pairs(&[
-                        ("applicationId", json!("foo")),
-                        ("clientToken", json!("bar")),
-                        ("site", json!("datadoghq.com")),
-                        ("newopt", json!("value")),
-                        ("newopt2", json!(true)),
-                    ]),
+                    rum: RumConfiguration {
+                        application_id: Some(String::from("foo")),
+                        client_token: Some(String::from("bar")),
+                        site: Some(String::from("datadoghq.com")),
+                        other: BTreeMap::from([
+                            (Box::from("newopt"), json!("value")),
+                            (Box::from("newopt2"), json!(true)),
+                        ]),
+                        ..Default::default()
+                    },
                 })
                 .unwrap()
             )

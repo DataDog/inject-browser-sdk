@@ -11,7 +11,6 @@ extern crate std;
 //
 // Copyright 2024-Present Datadog, Inc.
 
-pub mod config_option;
 mod configuration;
 pub mod error;
 mod injection_point_locator;

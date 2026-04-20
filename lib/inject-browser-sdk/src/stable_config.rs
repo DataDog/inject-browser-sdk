@@ -8,19 +8,18 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::config_option::build_configuration;
+use crate::configuration::Configuration;
 use crate::error::Error;
 use crate::generate_snippet;
 
 /// Build a [`crate::Configuration`] from a lookup function and generate the snippet bytes.
 ///
-/// The `lookup` closure takes a DD_* key name and returns the value if present.
-/// RUM-specific keys (e.g. `DD_RUM_SITE`) take precedence over generic keys (e.g. `DD_SITE`).
+/// The `lookup` closure takes a `DD_RUM_*` key name and returns the value if present.
 pub fn snippet_from_lookup<'a>(lookup: impl Fn(&str) -> Option<&'a str>) -> Result<Vec<u8>, Error> {
-    build_configuration(lookup).and_then(|config| generate_snippet(&config))
+    Configuration::from_lookup(lookup).and_then(|config| generate_snippet(&config))
 }
 
-/// Build a [`crate::Configuration`] from a map of `DD_*` key-value pairs and generate the snippet bytes.
+/// Build a [`crate::Configuration`] from a map of `DD_RUM_*` key-value pairs and generate the snippet bytes.
 ///
 /// Convenience wrapper around [`snippet_from_lookup`].
 pub fn snippet_from_entries(entries: &BTreeMap<String, String>) -> Result<Vec<u8>, Error> {
@@ -33,6 +32,10 @@ pub fn snippet_from_entries(entries: &BTreeMap<String, String>) -> Result<Vec<u8
 /// (local and fleet-managed). Caller-supplied `overrides` take precedence over values
 /// read from disk.
 ///
+/// `overrides` is a slice of `(name, value)` pairs where `name` is a `DD_RUM_*` key
+/// accepted by [`Configuration::from_lookup`]. Names not recognised by `from_lookup`
+/// are silently ignored (no setter is called for them).
+///
 /// The `language` parameter identifies the current process's language (e.g. `"browser-sdk"`)
 /// and is used for rule-based process matching in the configuration files.
 ///
@@ -41,19 +44,17 @@ pub fn snippet_from_entries(entries: &BTreeMap<String, String>) -> Result<Vec<u8
 pub fn snippet_from_stable_config(
     language: &str,
     debug_logs: bool,
-    overrides: &[(&crate::config_option::ConfigOption, &str)],
+    overrides: &[(&str, &str)],
 ) -> Result<Vec<u8>, Error> {
     let configs =
         crate::platform::read_stable_configs(language, debug_logs).map_err(Error::StableConfig)?;
 
     snippet_from_lookup(|key| {
-        // Check overrides first
-        for &(opt, value) in overrides {
-            if opt.key() == key {
+        for &(name, value) in overrides {
+            if name == key {
                 return Some(value);
             }
         }
-        // Then check stable config entries
         configs
             .iter()
             .find(|c| c.name == key)

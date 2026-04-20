@@ -7,7 +7,7 @@
 use alloc::{format, string::String};
 use core::ffi::{c_char, CStr};
 
-use inject_browser_sdk::{config_option::ConfigOption, error::Error, snippet_from_stable_config};
+use inject_browser_sdk::{error::Error, snippet_from_stable_config};
 
 use crate::snippet::{Snippet, SnippetInternal};
 
@@ -25,19 +25,13 @@ unsafe fn cstr_to_str<'a>(ptr: *const c_char, field: &str) -> Result<&'a str, Er
         .map_err(|_| Error::StableConfig(format!("{field} is not valid UTF-8")))
 }
 
-/// A typed configuration override: a [`ConfigOption`] variant paired with a C string value.
+/// A configuration override: a `DD_RUM_*` key name paired with a C string value.
 ///
 /// Used with [`snippet_create_from_stable_config`] to supply or override values
 /// on top of what the Agent's stable configuration files provide.
-///
-/// `config_option` carries a [`ConfigOption`] discriminant as `u8`. Using the raw
-/// integer (rather than the enum type) keeps invalid values out of UB territory:
-/// the FFI layer validates via [`ConfigOption::from_u8`] before use. C callers
-/// keep writing `.config_option = ConfigOption_Service` — enum constants are
-/// integer-typed in C and convert freely to `uint8_t`.
 #[repr(C)]
 pub struct ConfigOverride {
-    pub config_option: u8,
+    pub name: *const c_char,
     pub value: *const c_char,
 }
 
@@ -72,12 +66,13 @@ pub struct ConfigOverride {
 /// // Use stable config as-is:
 /// Snippet* s = snippet_create_from_stable_config("browser-sdk", false, NULL, 0);
 ///
-/// // Override the service name:
+/// // Override the application id:
 /// ConfigOverride overrides[] = {
-///     { .config_option = ConfigOption_Service, .value = "my-custom-service" },
+///     { .name = "DD_RUM_APPLICATION_ID", .value = "abc" },
+///     { .name = "DD_RUM_SITE",           .value = "datadoghq.com" },
 /// };
 /// Snippet* s = snippet_create_from_stable_config(
-///     "browser-sdk", false, overrides, 1);
+///     "browser-sdk", false, overrides, 2);
 ///
 /// snippet_cleanup(s);
 /// ```
@@ -86,7 +81,8 @@ pub struct ConfigOverride {
 ///
 /// - `language` must be a valid, non-null, NUL-terminated C string.
 /// - If `override_count > 0`, `overrides` must point to a valid array of at least
-///   `override_count` [`ConfigOverride`] entries, each with a valid NUL-terminated `value`.
+///   `override_count` [`ConfigOverride`] entries, each with valid NUL-terminated
+///   `name` and `value`.
 /// - When `override_count == 0`, `overrides` is ignored and may be `NULL` or dangling.
 #[no_mangle]
 pub unsafe extern "C" fn snippet_create_from_stable_config(
@@ -109,29 +105,31 @@ pub unsafe extern "C" fn snippet_create_from_stable_config(
         Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
     };
 
-    let overrides_refs: alloc::vec::Vec<(&ConfigOption, &str)> = override_vec
+    let overrides_refs: alloc::vec::Vec<(&str, &str)> = override_vec
         .iter()
-        .map(|(opt, val)| (opt, val.as_str()))
+        .map(|(name, val)| (name.as_str(), val.as_str()))
         .collect();
 
     let result = snippet_from_stable_config(language_str, debug_logs, &overrides_refs);
     SnippetInternal::new(result).into_public_ptr()
 }
 
-/// Parse a C array of [`ConfigOverride`] into a `Vec` of (ConfigOption, value) pairs.
+/// Parse a C array of [`ConfigOverride`] into a `Vec` of (name, value) string pairs.
+///
+/// Rejects overrides whose `name` is not a known `DD_RUM_*` key accepted by
+/// [`inject_browser_sdk::Configuration::from_lookup`], so typos surface at
+/// ingestion rather than being silently ignored.
 ///
 /// # Safety
 ///
 /// - If `count > 0`, `entries` must point to a valid, readable array of at
 ///   least `count` [`ConfigOverride`] elements.
-/// - Each `ConfigOverride::value` must be a valid NUL-terminated C string,
-///   or null (which returns an error rather than UB).
-/// - `ConfigOverride::config_option` is validated via [`ConfigOption::from_u8`];
-///   invalid discriminants return an error rather than UB.
+/// - Each `ConfigOverride::name` and `ConfigOverride::value` must be a valid
+///   NUL-terminated C string, or null (which returns an error rather than UB).
 unsafe fn parse_overrides(
     entries: *const ConfigOverride,
     count: u32,
-) -> Result<alloc::vec::Vec<(ConfigOption, String)>, Error> {
+) -> Result<alloc::vec::Vec<(String, String)>, Error> {
     if entries.is_null() && count > 0 {
         return Err(Error::StableConfig(String::from(
             "overrides pointer is NULL but count is non-zero",
@@ -144,17 +142,40 @@ unsafe fn parse_overrides(
     };
     let mut result = alloc::vec::Vec::with_capacity(slice.len());
     for entry in slice {
-        let opt = ConfigOption::from_u8(entry.config_option).ok_or_else(|| {
-            Error::StableConfig(format!(
-                "Invalid ConfigOption discriminant: {}",
-                entry.config_option
-            ))
-        })?;
-        let key = opt.key();
-        let value = cstr_to_str(entry.value, &format!("Value for override '{key}'"))?;
-        result.push((opt, String::from(value)));
+        let name = cstr_to_str(entry.name, "Override name")?;
+        if !is_known_override_name(name) {
+            return Err(Error::StableConfig(format!(
+                "Unknown override name: '{name}'"
+            )));
+        }
+        let value = cstr_to_str(entry.value, &format!("Value for override '{name}'"))?;
+        result.push((String::from(name), String::from(value)));
     }
     Ok(result)
+}
+
+/// Returns true if `name` is a `DD_RUM_*` key accepted by [`Configuration::from_lookup`].
+fn is_known_override_name(name: &str) -> bool {
+    // Source of truth: DD_FIELDS in lib/inject-browser-sdk/src/configuration.rs.
+    // Listed explicitly here so we fail closed if from_lookup ever accepts a new key
+    // we haven't decided to expose through the FFI.
+    matches!(
+        name,
+        "DD_RUM_APPLICATION_ID"
+            | "DD_RUM_CLIENT_TOKEN"
+            | "DD_RUM_SITE"
+            | "DD_RUM_SERVICE"
+            | "DD_RUM_ENVIRONMENT"
+            | "DD_RUM_VERSION"
+            | "DD_RUM_TRACK_USER_INTERACTIONS"
+            | "DD_RUM_TRACK_RESOURCES"
+            | "DD_RUM_TRACK_LONG_TASKS"
+            | "DD_RUM_DEFAULT_PRIVACY_LEVEL"
+            | "DD_RUM_SESSION_SAMPLE_RATE"
+            | "DD_RUM_SESSION_REPLAY_SAMPLE_RATE"
+            | "DD_RUM_MAJOR_VERSION"
+            | "DD_RUM_REMOTE_CONFIGURATION_ID"
+    )
 }
 
 #[cfg(test)]
@@ -199,11 +220,11 @@ mod tests {
 
         let overrides = [
             ConfigOverride {
-                config_option: ConfigOption::ApplicationId as u8,
+                name: cstr_ptr(b"DD_RUM_APPLICATION_ID\0"),
                 value: app_val.as_ptr(),
             },
             ConfigOverride {
-                config_option: ConfigOption::ClientToken as u8,
+                name: cstr_ptr(b"DD_RUM_CLIENT_TOKEN\0"),
                 value: tok_val.as_ptr(),
             },
         ];
@@ -243,7 +264,7 @@ mod tests {
     #[test]
     fn null_override_value() {
         let entry = ConfigOverride {
-            config_option: ConfigOption::Service as u8,
+            name: cstr_ptr(b"DD_RUM_SERVICE\0"),
             value: null(),
         };
         let snippet = unsafe {
@@ -256,10 +277,10 @@ mod tests {
     }
 
     #[test]
-    fn invalid_config_option_discriminant() {
+    fn unknown_override_name() {
         let val = CString::new("ignored").unwrap();
         let entry = ConfigOverride {
-            config_option: 99,
+            name: cstr_ptr(b"DD_RUM_BOGUS\0"),
             value: val.as_ptr(),
         };
         let snippet = unsafe {
@@ -274,9 +295,25 @@ mod tests {
                 .into_owned()
         };
         assert!(
-            msg.contains("Invalid ConfigOption discriminant: 99"),
+            msg.contains("Unknown override name: 'DD_RUM_BOGUS'"),
             "unexpected error message: {msg}"
         );
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn null_override_name() {
+        let val = CString::new("ignored").unwrap();
+        let entry = ConfigOverride {
+            name: null(),
+            value: val.as_ptr(),
+        };
+        let snippet = unsafe {
+            snippet_create_from_stable_config(cstr_ptr(b"browser-sdk\0"), false, &entry, 1)
+        };
+        assert_ne!(snippet, null_mut());
+        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_eq!(s.error_code, 6);
         unsafe { snippet_cleanup(snippet) };
     }
 }

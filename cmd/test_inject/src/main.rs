@@ -5,7 +5,6 @@ use inject_browser_sdk::{
     injector::{Injector, Result as InjectorResult},
     Configuration, RumConfiguration,
 };
-use serde_json::json;
 
 fn main() {
     let Some(input_file_path) = env::args().nth(1) else {
@@ -24,12 +23,9 @@ fn main() {
     let configuration = Configuration {
         major_version: 6,
         rum: RumConfiguration {
-            fields: [
-                (Box::from("applicationId"), json!("xxx")),
-                (Box::from("clientToken"), json!("xxx")),
-            ]
-            .into_iter()
-            .collect(),
+            application_id: Some("xxx".into()),
+            client_token: Some("xxx".into()),
+            ..Default::default()
         },
     };
 

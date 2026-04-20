@@ -65,27 +65,20 @@ mod inner {
         }
     }
 
-    /// Build a [`ProcessInfo`] by reading `/proc/self/environ` and `/proc/self/cmdline`.
+    /// Build a [`ProcessInfo`] with empty `args` / `envp`.
+    ///
+    /// Reading `/proc/self/cmdline` and `/proc/self/environ` from an injected
+    /// library context isn't safe — argv/envp may be mutated by the host process
+    /// and the values are attacker-influenceable. Until we have an injection-safe
+    /// way to surface them (e.g. caller passes them in), leave these empty so
+    /// rule-based process matching falls back to `language`-only.
+    /// TODO(INPLAT-1110): supply args/envp via an injection-safe mechanism.
     pub fn detect_process_info(language: &str) -> ProcessInfo {
-        let envp = read_nul_separated("/proc/self/environ").unwrap_or_default();
-        let args = read_nul_separated("/proc/self/cmdline").unwrap_or_default();
         ProcessInfo {
-            args,
-            envp,
+            args: Vec::new(),
+            envp: Vec::new(),
             language: language.as_bytes().to_vec(),
         }
-    }
-
-    fn read_nul_separated(path: &str) -> Option<Vec<Vec<u8>>> {
-        let reader = PlatformConfigRead;
-        let bytes = reader.read(path).ok()?;
-        Some(
-            bytes
-                .split(|&b| b == 0)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_vec())
-                .collect(),
-        )
     }
 
     #[allow(unused_unsafe)] // stderr() is unsafe without std, safe with std

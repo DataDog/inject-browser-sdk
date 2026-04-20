@@ -66,6 +66,17 @@ pub struct RumConfiguration {
 ///
 /// Same JSON shape as [`Configuration`], but every field is optional: unset
 /// fields leave the corresponding value on the target unchanged.
+///
+/// # Semantics
+///
+/// - **Missing keys**: no change on the target.
+/// - **Explicit `null`** on a typed field: treated the same as missing —
+///   target preserved, *not* cleared. This follows serde's default
+///   `Option<T>` handling.
+/// - **Unknown keys**: inside `rum`, accumulated into [`RumConfiguration::other`]
+///   via `#[serde(flatten)]`. At the top level (outside `rum`), there is no
+///   `deny_unknown_fields`, so a typo like `"rumm"` is silently dropped.
+///   Callers should validate overlay inputs before passing them through.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(test, derive(Debug, PartialEq))]
@@ -500,6 +511,9 @@ mod test {
 
     #[test]
     fn configuration_from_lookup_privacy_passthrough() {
+        // privacy level is passed through as an opaque string; the Browser SDK
+        // is the source of truth for valid values. We deliberately do not
+        // validate here.
         let map = BTreeMap::from([
             (String::from("DD_RUM_APPLICATION_ID"), String::from("app-1")),
             (String::from("DD_RUM_CLIENT_TOKEN"), String::from("tok-1")),
@@ -635,5 +649,42 @@ mod test {
         config.overlay(overlay);
         assert_eq!(config.major_version, 5);
         assert_eq!(config.rum.application_id.as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn overlay_explicit_null_preserves_target() {
+        // serde's Option<T> treats `null` as None, and overlay_field only
+        // writes when src.is_some(). So `{"rum":{"applicationId":null}}`
+        // leaves the base value intact rather than clearing it.
+        let mut config = Configuration {
+            major_version: 5,
+            rum: RumConfiguration {
+                application_id: Some(String::from("app-base")),
+                client_token: Some(String::from("tok-base")),
+                ..Default::default()
+            },
+        };
+        let overlay: ConfigurationOverlay =
+            serde_json::from_slice(br#"{"rum":{"applicationId":null}}"#).unwrap();
+        config.overlay(overlay);
+        assert_eq!(config.rum.application_id.as_deref(), Some("app-base"));
+    }
+
+    #[test]
+    fn overlay_unknown_top_level_key_is_silently_ignored() {
+        // No deny_unknown_fields at the top level — a typo like "rumm" is
+        // dropped without error. Pinning this behavior so a future change
+        // that tightens validation becomes a visible test failure.
+        let mut config = Configuration {
+            major_version: 5,
+            rum: RumConfiguration {
+                application_id: Some(String::from("app-base")),
+                ..Default::default()
+            },
+        };
+        let overlay: ConfigurationOverlay =
+            serde_json::from_slice(br#"{"rumm":{"applicationId":"typo"}}"#).unwrap();
+        config.overlay(overlay);
+        assert_eq!(config.rum.application_id.as_deref(), Some("app-base"));
     }
 }

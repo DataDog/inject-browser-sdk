@@ -44,6 +44,19 @@ pub fn snippet_from_stable_config(
     let configs =
         crate::platform::read_stable_configs(language, debug_logs).map_err(Error::StableConfig)?;
 
+    // Distinguish "no config source at all" from "config source present but
+    // missing required fields". Without this, the caller gets code 5
+    // ("mandatory field 'applicationId' is empty") and spends time
+    // troubleshooting file contents when the real issue is that no files
+    // matched or existed.
+    if configs.is_empty() && overlay.is_none() {
+        return Err(Error::StableConfig(String::from(
+            "no stable-config entries found; \
+             expected DD_RUM_* keys in application_monitoring.yaml \
+             (local or fleet-managed) or an overlay",
+        )));
+    }
+
     let mut config = Configuration::from_lookup(|key| {
         configs
             .iter()
@@ -104,19 +117,25 @@ mod tests {
     }
 
     #[test]
-    fn snippet_from_entries_precedence() {
+    fn snippet_from_entries_ignores_non_dd_rum_keys() {
+        // Only DD_RUM_* keys are consulted; Datadog-wide keys like DD_SITE
+        // are ignored. The snippet should use the default site (us1), not
+        // the DD_SITE value.
         let map = entries(&[
             ("DD_RUM_APPLICATION_ID", "app-1"),
             ("DD_RUM_CLIENT_TOKEN", "tok-1"),
-            ("DD_RUM_SITE", "datadoghq.com"),
             ("DD_SITE", "datadoghq.eu"),
         ]);
         let bytes = snippet_from_entries(&map).unwrap();
-        assert!(bytes
-            .windows(b"datadoghq.com".len())
-            .any(|w| w == b"datadoghq.com"));
-        assert!(!bytes
-            .windows(b"datadoghq.eu".len())
-            .any(|w| w == b"datadoghq.eu"));
+        assert!(
+            !bytes
+                .windows(b"datadoghq.eu".len())
+                .any(|w| w == b"datadoghq.eu"),
+            "DD_SITE must not leak into the snippet"
+        );
+        assert!(
+            bytes.windows(b"us1".len()).any(|w| w == b"us1"),
+            "expected default site us1"
+        );
     }
 }

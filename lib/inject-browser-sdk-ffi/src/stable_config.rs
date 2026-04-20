@@ -11,15 +11,11 @@ use inject_browser_sdk::{error::Error, snippet_from_stable_config, Configuration
 
 use crate::snippet::{Snippet, SnippetInternal};
 
-/// # Safety
-/// If non-null, `ptr` must point to a valid NUL-terminated C string.
-unsafe fn cstr_to_str<'a>(ptr: *const c_char, field: &str) -> Result<&'a str, Error> {
-    if ptr.is_null() {
-        return Err(Error::StableConfig(format!("{field} pointer is NULL")));
-    }
-    CStr::from_ptr(ptr)
-        .to_str()
-        .map_err(|_| Error::StableConfig(format!("{field} is not valid UTF-8")))
+/// UTF-8 validates a borrowed `CStr`. The returned `&str` is tied to the
+/// `CStr`'s lifetime so callers cannot accidentally extend it.
+fn cstr_to_str<'a>(cstr: &'a CStr, field: &str) -> Result<&'a str, Error> {
+    cstr.to_str()
+        .map_err(|_| Error::Ffi(format!("{field} is not valid UTF-8")))
 }
 
 /// Create a snippet from Datadog stable configuration files, with an optional JSON overlay.
@@ -39,9 +35,10 @@ unsafe fn cstr_to_str<'a>(ptr: *const c_char, field: &str) -> Result<&'a str, Er
 /// # Error handling
 ///
 /// Always returns a valid `Snippet` pointer. Check `error_code` for failures.
-/// See [`Snippet`] for the full error-code table; `1` covers malformed
-/// `json_overlay`, `6` covers stable-config I/O/parse failures and null/invalid
-/// FFI inputs.
+/// See [`Snippet`] for the full error-code table; relevant codes here:
+/// - `1` malformed `json_overlay`.
+/// - `6` stable-config I/O or YAML parse failures.
+/// - `7` FFI input errors (NULL pointer, non-UTF-8 `language`).
 ///
 /// # Memory ownership
 ///
@@ -52,14 +49,16 @@ unsafe fn cstr_to_str<'a>(ptr: *const c_char, field: &str) -> Result<&'a str, Er
 ///
 /// ```c
 /// // Use stable config as-is:
-/// Snippet* s = snippet_create_from_stable_config("browser-sdk", false, NULL);
+/// Snippet* s1 = snippet_create_from_stable_config("browser-sdk", false, NULL);
+/// // ... use s1
+/// snippet_cleanup(s1);
 ///
 /// // Overlay a JSON blob:
 /// const char* overlay =
 ///     "{\"rum\":{\"applicationId\":\"abc\",\"site\":\"datadoghq.com\"}}";
-/// Snippet* s = snippet_create_from_stable_config("browser-sdk", false, overlay);
-///
-/// snippet_cleanup(s);
+/// Snippet* s2 = snippet_create_from_stable_config("browser-sdk", false, overlay);
+/// // ... use s2
+/// snippet_cleanup(s2);
 /// ```
 ///
 /// # Safety
@@ -73,10 +72,12 @@ pub unsafe extern "C" fn snippet_create_from_stable_config(
     json_overlay: *const c_char,
 ) -> *mut Snippet {
     if language.is_null() {
-        return SnippetInternal::stable_config_err("language parameter is NULL");
+        return SnippetInternal::new(Err(Error::Ffi(String::from("language parameter is NULL"))))
+            .into_public_ptr();
     }
 
-    let language_str = match cstr_to_str(language, "language") {
+    let language_cstr = CStr::from_ptr(language);
+    let language_str = match cstr_to_str(language_cstr, "language") {
         Ok(s) => s,
         Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
     };
@@ -110,14 +111,21 @@ mod tests {
 
     #[test]
     fn no_files_no_overlay() {
+        // With no config files and no overlay, the error is now the
+        // descriptive "no stable-config entries found" (code 6) — not the
+        // misleading "mandatory field applicationId empty" (code 5) we used
+        // to surface.
         let snippet =
             unsafe { snippet_create_from_stable_config(cstr_ptr(b"browser-sdk\0"), false, null()) };
         assert_ne!(snippet, null_mut());
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_eq!(s.error_code, 6);
+        let msg = unsafe { CStr::from_ptr(s.error_message) }
+            .to_string_lossy()
+            .into_owned();
         assert!(
-            matches!(s.error_code, 5 | 6),
-            "expected error code 5 or 6, got {}",
-            s.error_code
+            msg.contains("no stable-config entries found"),
+            "unexpected message: {msg}"
         );
         unsafe { snippet_cleanup(snippet) };
     }
@@ -127,7 +135,19 @@ mod tests {
         let snippet = unsafe { snippet_create_from_stable_config(null(), false, null()) };
         assert_ne!(snippet, null_mut());
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
-        assert_eq!(s.error_code, 6);
+        assert_eq!(s.error_code, 7);
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn invalid_utf8_language() {
+        // 0xFF is not valid UTF-8; must surface as FFI input error (7), not
+        // as a stable-config error (6).
+        let snippet =
+            unsafe { snippet_create_from_stable_config(cstr_ptr(&[0xFFu8, 0u8]), false, null()) };
+        assert_ne!(snippet, null_mut());
+        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_eq!(s.error_code, 7);
         unsafe { snippet_cleanup(snippet) };
     }
 

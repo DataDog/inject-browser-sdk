@@ -15,6 +15,10 @@ pub enum Error {
     OutOfRangeRate(String, f64),
     EmptyMandatoryConf(String),
     StableConfig(String),
+    /// FFI input error: NULL pointer or non-UTF-8 data supplied by the caller.
+    /// Distinct from [`Error::StableConfig`] (on-disk / YAML issues) and from
+    /// [`Error::Json`] (malformed JSON payload).
+    Ffi(String),
 }
 
 impl Error {
@@ -26,6 +30,7 @@ impl Error {
             Error::OutOfRangeRate(_, _) => 4,
             Error::EmptyMandatoryConf(_) => 5,
             Error::StableConfig(_) => 6,
+            Error::Ffi(_) => 7,
         }
     }
 }
@@ -47,6 +52,7 @@ impl fmt::Display for Error {
                 write!(f, "Validation error: Mandatory field '{key}' is empty.")
             }
             Error::StableConfig(cause) => write!(f, "Stable config error: {cause}"),
+            Error::Ffi(cause) => write!(f, "FFI error: {cause}"),
         }
     }
 }

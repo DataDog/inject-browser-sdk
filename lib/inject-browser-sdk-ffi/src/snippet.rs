@@ -41,6 +41,7 @@ use inject_browser_sdk::{error::Error, generate_snippet, Configuration};
 /// | Rate out of range              | `4`          | `"Validation error: The provided {key} is invalid. ..."` |
 /// | Missing required field         | `5`          | `"Validation error: Mandatory field '{key}' is empty."` |
 /// | Stable config error            | `6`          | `"Stable config error: ..."` |
+/// | FFI input error                | `7`          | `"FFI error: ..."` (NULL pointer, non-UTF-8 input) |
 ///
 ///
 /// [1]: https://docs.datadoghq.com/real_user_monitoring/browser/#cdn-async
@@ -95,10 +96,6 @@ impl SnippetInternal {
                 }
             }
         }
-    }
-
-    pub(crate) fn stable_config_err(msg: &str) -> *mut Snippet {
-        Self::new(Err(Error::StableConfig(String::from(msg)))).into_public_ptr()
     }
 
     pub(crate) fn into_public_ptr(self) -> *mut Snippet {
@@ -179,7 +176,7 @@ impl SnippetInternal {
 #[no_mangle]
 pub unsafe extern "C" fn snippet_create_from_json(json: *const c_char) -> *mut Snippet {
     if json.is_null() {
-        return SnippetInternal::new(Err(Error::Json(String::from("json parameter is NULL"))))
+        return SnippetInternal::new(Err(Error::Ffi(String::from("json parameter is NULL"))))
             .into_public_ptr();
     }
     let json_bytes = CStr::from_ptr(json).to_bytes();
@@ -273,8 +270,22 @@ mod tests {
         let snippet = unsafe { snippet_create_from_json(null()) };
         assert_ne!(snippet, null_mut());
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
-        assert_eq!(s.error_code, 1);
+        assert_eq!(s.error_code, 7);
         unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn error_message_nul_bytes_are_scrubbed() {
+        use inject_browser_sdk::error::Error;
+        // User-controlled bytes inside an error message must not cause
+        // CString::new to fail. Regression guard for the NUL-scrub path in
+        // SnippetInternal::new — panicking here takes down the host server.
+        let s = SnippetInternal::new(Err(Error::StableConfig(String::from("before\0after"))));
+        assert_eq!(s.error_code, 6);
+        let msg_bytes = unsafe { CStr::from_ptr(s.error_message).to_bytes() };
+        let msg = core::str::from_utf8(msg_bytes).unwrap();
+        assert!(!msg.contains('\0'), "NUL must be scrubbed before CString");
+        assert!(msg.contains("before\\0after"), "got: {msg}");
     }
 
     #[test]

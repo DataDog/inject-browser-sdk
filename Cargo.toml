@@ -12,6 +12,17 @@ edition = "2021"
 version = "1.2.1-dev"
 rust-version = "1.91.0"
 
+[workspace.dependencies]
+# Stopgap: pins `pawel/no-std-library-config` on DataDog/libdatadog which
+# transitively pulls a personal `yaml_serde` fork (see Cargo.lock).
+#
+# KNOWN RISK: this points at a personal feature branch. Although the rev is
+# pinned, a force-push on that branch would make the commit unreachable and
+# break reproducible builds downstream. This is acknowledged and accepted as a
+# short-term stopgap; a follow-up PR will land the no_std changes upstream on
+# DataDog/libdatadog main and repoint this dependency to the upstream rev.
+libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", default-features = false }
+
 [workspace.lints.clippy]
 implicit_return = "deny"
 needless_return = "allow"

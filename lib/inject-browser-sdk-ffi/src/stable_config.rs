@@ -4,7 +4,7 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-use alloc::format;
+use alloc::{format, string::String};
 use core::ffi::{c_char, CStr};
 
 use inject_browser_sdk::{error::Error, snippet_from_stable_config, ConfigurationOverlay};

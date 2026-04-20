@@ -117,7 +117,15 @@ pub use inner::{detect_process_info, write_stderr, PlatformConfigRead};
 ///
 /// When `debug_logs` is `true`, diagnostic messages from the configurator are written to stderr.
 /// On Windows, `debug_logs` is a no-op (see [`write_stderr`]).
-pub fn read_stable_configs(language: &str, debug_logs: bool) -> Result<Vec<LibraryConfig>, String> {
+///
+/// Returns a `(configs, logs)` tuple on success so callers can surface
+/// diagnostics even on the `Ok(empty)` path — upstream reclassifies some
+/// failures (e.g. `TooLarge`) into `Ok(StableConfig::default())` while pushing
+/// the reason into logs.
+pub fn read_stable_configs(
+    language: &str,
+    debug_logs: bool,
+) -> Result<(Vec<LibraryConfig>, Vec<String>), String> {
     read_stable_configs_with_reader(&PlatformConfigRead, language, debug_logs)
 }
 
@@ -128,7 +136,7 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
     reader: &R,
     language: &str,
     debug_logs: bool,
-) -> Result<Vec<LibraryConfig>, String> {
+) -> Result<(Vec<LibraryConfig>, Vec<String>), String> {
     let process_info = detect_process_info(language);
     let configurator = Configurator::new(debug_logs);
 
@@ -141,10 +149,6 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
     // Buffer logs before consuming `logged_result` — `data()` takes self.
     let logs: Vec<String> = logged_result.logs().iter().map(String::from).collect();
     let data = logged_result.data();
-    // Upstream reclassifies some failures (e.g. TooLarge) into
-    // `Ok(StableConfig::default())` while pushing a diagnostic into logs.
-    // Emit when the outcome is an error OR an empty-configs Ok, so the caller
-    // sees *why* nothing was loaded instead of a bare "no entries found".
     let outcome_empty = matches!(&data, Ok(v) if v.is_empty());
     if debug_logs || data.is_err() || outcome_empty {
         for msg in &logs {
@@ -152,20 +156,23 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
         }
     }
 
-    data.map_err(|err| {
-        // Fold captured diagnostics into the error string so callers that
-        // never see stderr (notably Windows, where write_stderr is a no-op)
-        // still get the full context.
-        if logs.is_empty() {
-            format!("{err}")
-        } else {
-            format!("{err}\n{}", logs.join("\n"))
+    match data {
+        Ok(configs) => Ok((configs, logs)),
+        Err(err) => {
+            // Fold captured diagnostics into the error string so callers that
+            // never see stderr (notably Windows, where write_stderr is a
+            // no-op) still get the full context.
+            if logs.is_empty() {
+                Err(format!("{err}"))
+            } else {
+                Err(format!("{err}\n{}", logs.join("\n")))
+            }
         }
-    })
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
@@ -197,7 +204,7 @@ mod tests {
     /// realistic YAML document flows end-to-end through the configurator
     /// (guards against upstream YAML-schema drift that NotFound/Malformed
     /// readers would not catch).
-    struct PopulatedReader;
+    pub(crate) struct PopulatedReader;
 
     impl ConfigRead for PopulatedReader {
         type IoError = core::convert::Infallible;
@@ -224,8 +231,9 @@ rules:
 
     #[test]
     fn missing_files_return_empty_configs() {
-        let configs = read_stable_configs_with_reader(&NotFoundReader, "browser-sdk", false)
-            .expect("reader NotFound should not surface as error");
+        let (configs, _logs) =
+            read_stable_configs_with_reader(&NotFoundReader, "browser-sdk", false)
+                .expect("reader NotFound should not surface as error");
         assert_eq!(configs.len(), 0);
     }
 
@@ -241,8 +249,9 @@ rules:
 
     #[test]
     fn populated_yaml_with_matching_rule_yields_dd_rum_fields() {
-        let configs = read_stable_configs_with_reader(&PopulatedReader, "browser-sdk", false)
-            .expect("populated reader must succeed");
+        let (configs, _logs) =
+            read_stable_configs_with_reader(&PopulatedReader, "browser-sdk", false)
+                .expect("populated reader must succeed");
         let lookup = |key: &str| {
             configs
                 .iter()
@@ -299,8 +308,9 @@ rules:
     fn fleet_overrides_local_when_both_present() {
         // Upstream libdd-library-config semantics: fleet-managed config
         // overrides local. Guards against that contract silently flipping.
-        let configs = read_stable_configs_with_reader(&BothSourcesReader, "browser-sdk", false)
-            .expect("both-sources reader must succeed");
+        let (configs, _logs) =
+            read_stable_configs_with_reader(&BothSourcesReader, "browser-sdk", false)
+                .expect("both-sources reader must succeed");
         let lookup = |key: &str| {
             configs
                 .iter()
@@ -316,8 +326,9 @@ rules:
     fn populated_yaml_skips_non_matching_language() {
         // Rule selects language=browser-sdk; passing a different language
         // must yield zero entries rather than the matching rule's values.
-        let configs = read_stable_configs_with_reader(&PopulatedReader, "not-browser-sdk", false)
-            .expect("populated reader must succeed");
+        let (configs, _logs) =
+            read_stable_configs_with_reader(&PopulatedReader, "not-browser-sdk", false)
+                .expect("populated reader must succeed");
         assert_eq!(configs.len(), 0);
     }
 

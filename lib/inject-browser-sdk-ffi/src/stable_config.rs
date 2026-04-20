@@ -4,13 +4,10 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-use alloc::{
-    format,
-    string::{String, ToString},
-};
+use alloc::string::{String, ToString};
 use core::ffi::{c_char, CStr};
 
-use inject_browser_sdk::{error::Error, snippet_from_stable_config, ConfigurationOverlay};
+use inject_browser_sdk::{error::Error, parse_configuration_overlay, snippet_from_stable_config};
 
 use crate::snippet::{Snippet, SnippetInternal};
 
@@ -32,8 +29,9 @@ fn cstr_to_str<'a>(cstr: &'a CStr, field: &str) -> Result<&'a str, Error> {
 /// and is used for rule-based process matching in the configuration files.
 ///
 /// When `debug_logs` is `true`, diagnostic messages are written to stderr on Unix.
-/// On Windows `debug_logs` is a no-op until a no_std stderr sink is wired up
-/// (tracked as DataDog/libdatadog#73).
+/// On Windows `debug_logs` produces no stderr output (tracked as
+/// DataDog/libdatadog#73); diagnostic messages are always folded into the
+/// `Snippet`'s error message so Windows callers can still see them.
 ///
 /// # Overlay semantics
 ///
@@ -42,22 +40,21 @@ fn cstr_to_str<'a>(cstr: &'a CStr, field: &str) -> Result<&'a str, Error> {
 ///   value.
 /// - **Explicit `null`** on a typed key (e.g. `"applicationId":null`): leaves
 ///   the disk value untouched — it is *not* a way to clear a field. To
-///   override with an empty value, omit the key; to override with a real
-///   value, pass the real value.
+///   replace a disk value, pass the new value; omitting the key preserves
+///   the disk value.
 /// - **Unknown keys at the top level** (outside `rum`): rejected with
-///   `error_code = 1`.
-/// - **Unknown keys inside `rum`**: passed through to the Browser SDK
-///   configuration object, so new SDK options work without an injector
-///   release.
+///   `error_code = 9`.
+/// - **Unknown keys inside `rum`**: rejected with `error_code = 9` so typos
+///   like `applicatoinId` surface instead of being silently dropped.
 ///
 /// # Error handling
 ///
 /// Always returns a valid `Snippet` pointer. Check `error_code` for failures.
-/// See [`Snippet`] for the full error-code table; relevant codes here:
-/// - `1` malformed `json_overlay`.
-/// - `6` stable-config I/O or YAML parse failures.
-/// - `7` NULL pointer for `language`.
-/// - `8` non-UTF-8 bytes in `language`.
+/// See [`Snippet`] for the full error-code table. The codes most relevant to
+/// this call are `1` (malformed `json_overlay`), `6` (stable-config I/O or
+/// YAML parse failures), `7` (NULL `language`), `8` (non-UTF-8 `language`),
+/// and `9` (unknown field in `json_overlay`). Overlay values that fail
+/// validation also produce codes `2`–`5`.
 ///
 /// # Memory ownership
 ///
@@ -106,13 +103,9 @@ pub unsafe extern "C" fn snippet_create_from_stable_config(
     let overlay = if json_overlay.is_null() {
         None
     } else {
-        match serde_json::from_slice::<ConfigurationOverlay>(
-            CStr::from_ptr(json_overlay).to_bytes(),
-        ) {
+        match parse_configuration_overlay(CStr::from_ptr(json_overlay).to_bytes()) {
             Ok(o) => Some(o),
-            Err(e) => {
-                return SnippetInternal::new(Err(Error::Json(format!("{e}")))).into_public_ptr();
-            }
+            Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
         }
     };
 

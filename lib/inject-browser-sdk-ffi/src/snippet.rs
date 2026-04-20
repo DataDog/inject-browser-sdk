@@ -8,7 +8,6 @@
 use alloc::{
     boxed::Box,
     ffi::CString,
-    format,
     string::{String, ToString},
     vec::Vec,
 };
@@ -17,7 +16,7 @@ use core::{
     ptr::null,
 };
 
-use inject_browser_sdk::{error::Error, generate_snippet, Configuration};
+use inject_browser_sdk::{error::Error, generate_snippet, parse_configuration};
 
 /// A Browser SDK snippet. Use [`snippet_create_from_json`] or
 /// [`crate::snippet_create_from_stable_config`] to create a new one.
@@ -43,6 +42,7 @@ use inject_browser_sdk::{error::Error, generate_snippet, Configuration};
 /// | Stable config error            | `6`          | `"Stable config error: ..."` |
 /// | NULL pointer passed to FFI     | `7`          | `"FFI error: {field} is NULL"` |
 /// | Non-UTF-8 input passed to FFI  | `8`          | `"FFI error: {field} is not valid UTF-8"` |
+/// | Unknown JSON field             | `9`          | `"Validation error: Unknown field '{path}'."` |
 ///
 ///
 /// [1]: https://docs.datadoghq.com/real_user_monitoring/browser/#cdn-async
@@ -182,9 +182,8 @@ pub unsafe extern "C" fn snippet_create_from_json(json: *const c_char) -> *mut S
     }
     let json_bytes = CStr::from_ptr(json).to_bytes();
 
-    let result = serde_json::from_slice::<Configuration>(json_bytes)
-        .map_err(|err| Error::Json(format!("{}", err)))
-        .and_then(|configuration| generate_snippet(&configuration));
+    let result =
+        parse_configuration(json_bytes).and_then(|configuration| generate_snippet(&configuration));
 
     SnippetInternal::new(result).into_public_ptr()
 }
@@ -246,13 +245,12 @@ mod tests {
             (2, "Validation error: The major version '1' is not supported. Supported RUM SDK versions: [5, 6]".to_owned())
         );
 
-        // Missing "rum"
+        // Missing "rum". parse_configuration runs a two-pass walk that first
+        // decodes to a serde_json::Value (no position info) and then calls
+        // from_value, so the error message no longer carries the byte offset.
         assert_eq!(
             get_error(unsafe { snippet_create_from_json(cstr_ptr(b"{\"majorVersion\":5}\0")) }),
-            (
-                1,
-                "JSON error: missing field `rum` at line 1 column 18".to_owned()
-            )
+            (1, "JSON error: missing field `rum`".to_owned())
         );
     }
 

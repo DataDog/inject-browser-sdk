@@ -143,6 +143,75 @@ impl RumConfiguration {
 const SITE_PATTERNS: [&str; 4] = ["datadog", "ddog", "datad0g", "dd0g"];
 const MAJOR_VERSIONS: [u32; 2] = [5, 6];
 
+/// Top-level JSON keys accepted by both [`Configuration`] and [`ConfigurationOverlay`].
+/// Kept in sync with the struct fields — drift is guarded by a test below.
+pub const KNOWN_CONFIG_FIELDS: &[&str] = &["majorVersion", "rum"];
+
+/// Keys accepted under the `rum` object, in camelCase to match the serde
+/// rename applied to [`RumConfiguration`]. Drift is guarded by a test below.
+pub const KNOWN_RUM_FIELDS: &[&str] = &[
+    "applicationId",
+    "clientToken",
+    "site",
+    "service",
+    "env",
+    "version",
+    "trackUserInteractions",
+    "trackResources",
+    "trackLongTasks",
+    "defaultPrivacyLevel",
+    "sessionSampleRate",
+    "sessionReplaySampleRate",
+    "remoteConfigurationId",
+];
+
+/// Walks the top-level object and the `rum` sub-object, returning the first
+/// key that isn't in the allowlists. Used by [`parse_configuration`] and
+/// [`parse_configuration_overlay`] to surface typos like `applicatoinId` as
+/// a distinct error code instead of a generic serde parse message.
+fn find_unknown_field(value: &Value, top: &[&str], rum: &[&str]) -> Option<String> {
+    let obj = value.as_object()?;
+    for (key, val) in obj {
+        if !top.contains(&key.as_str()) {
+            return Some(key.clone());
+        }
+        if key == "rum" {
+            if let Some(rum_obj) = val.as_object() {
+                for rum_key in rum_obj.keys() {
+                    if !rum.contains(&rum_key.as_str()) {
+                        return Some(format!("rum.{rum_key}"));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse a [`Configuration`] from JSON with unknown-field detection.
+///
+/// A typo like `applicatoinId` returns [`Error::InvalidField`] (code 9) with
+/// the offending path, instead of a generic [`Error::Json`] (code 1) whose
+/// message embeds a raw serde byte offset. Malformed JSON still produces
+/// [`Error::Json`].
+pub fn parse_configuration(json: &[u8]) -> Result<Configuration, Error> {
+    let value: Value = serde_json::from_slice(json).map_err(|e| Error::Json(format!("{e}")))?;
+    if let Some(path) = find_unknown_field(&value, KNOWN_CONFIG_FIELDS, KNOWN_RUM_FIELDS) {
+        return Err(Error::InvalidField(path));
+    }
+    serde_json::from_value::<Configuration>(value).map_err(|e| Error::Json(format!("{e}")))
+}
+
+/// Parse a [`ConfigurationOverlay`] from JSON with unknown-field detection.
+/// See [`parse_configuration`] for the rationale.
+pub fn parse_configuration_overlay(json: &[u8]) -> Result<ConfigurationOverlay, Error> {
+    let value: Value = serde_json::from_slice(json).map_err(|e| Error::Json(format!("{e}")))?;
+    if let Some(path) = find_unknown_field(&value, KNOWN_CONFIG_FIELDS, KNOWN_RUM_FIELDS) {
+        return Err(Error::InvalidField(path));
+    }
+    serde_json::from_value::<ConfigurationOverlay>(value).map_err(|e| Error::Json(format!("{e}")))
+}
+
 type Setter = fn(&mut Configuration, &str) -> Result<(), Error>;
 
 const DD_FIELDS: &[(&str, Setter)] = &[
@@ -708,5 +777,70 @@ mod test {
         let overlay: ConfigurationOverlay = serde_json::from_slice(br#"{"rum":{"newKnob":"x"}}"#)
             .expect("unknown rum key must be accepted");
         assert_eq!(overlay.rum.other.get("newKnob"), Some(&Value::from("x")));
+    }
+
+    #[test]
+    fn known_field_arrays_match_struct_field_counts() {
+        // Drift guard: if a field is added to Configuration/RumConfiguration
+        // but the corresponding KNOWN_* array isn't updated, the two-pass
+        // parser would reject the new field as unknown. Update both the
+        // array and this expected count together.
+        assert_eq!(KNOWN_CONFIG_FIELDS.len(), 2);
+        assert_eq!(KNOWN_RUM_FIELDS.len(), 13);
+    }
+
+    #[test]
+    fn parse_configuration_rejects_typo_at_top_level() {
+        let err = parse_configuration(
+            br#"{"majorVersion":5,"rum":{"applicationId":"a","clientToken":"b"},"applicatoinId":"c"}"#,
+        )
+        .expect_err("typo at top level must fail");
+        assert_eq!(err.code(), 9);
+        match err {
+            Error::InvalidField(path) => assert_eq!(path, "applicatoinId"),
+            other => panic!("expected InvalidField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_configuration_rejects_typo_inside_rum() {
+        let err = parse_configuration(
+            br#"{"majorVersion":5,"rum":{"applicaitonId":"a","clientToken":"b"}}"#,
+        )
+        .expect_err("typo inside rum must fail");
+        assert_eq!(err.code(), 9);
+        match err {
+            Error::InvalidField(path) => assert_eq!(path, "rum.applicaitonId"),
+            other => panic!("expected InvalidField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_configuration_surfaces_malformed_json_as_json_error() {
+        let err = parse_configuration(br#"{"majorVersion":5,"rum":{"#)
+            .expect_err("unclosed brace must fail");
+        assert_eq!(err.code(), 1);
+    }
+
+    #[test]
+    fn parse_configuration_accepts_valid_config() {
+        let config = parse_configuration(
+            br#"{"majorVersion":5,"rum":{"applicationId":"a","clientToken":"b"}}"#,
+        )
+        .expect("valid config must parse");
+        assert_eq!(config.major_version, 5);
+        assert_eq!(config.rum.application_id.as_deref(), Some("a"));
+        assert_eq!(config.rum.client_token.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn parse_configuration_overlay_rejects_typo_inside_rum() {
+        let err = parse_configuration_overlay(br#"{"rum":{"applicaitonId":"x"}}"#)
+            .expect_err("typo inside overlay rum must fail");
+        assert_eq!(err.code(), 9);
+        match err {
+            Error::InvalidField(path) => assert_eq!(path, "rum.applicaitonId"),
+            other => panic!("expected InvalidField, got {other:?}"),
+        }
     }
 }

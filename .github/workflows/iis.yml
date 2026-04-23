@@ -76,8 +76,5 @@ jobs:
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path injector_IIS\injector_IIS_installer\bin\x64\Debug\en-us
           Copy-Item build_out\injector_IIS_installer.msi injector_IIS\injector_IIS_installer\bin\x64\Debug\en-us\
-      - name: Switch Docker to Windows containers
-        run: |
-          & "$env:ProgramFiles\Docker\Docker\DockerCli.exe" -SwitchWindowsEngine
       - name: Run End-to-End Tests
         run: docker run -e WEBSERVER-FLAVOR=iis -v ${pwd}:C:\inject-browser-sdk datadog/docker-library:rum-auto-instrumentation-windows-iis-latest powershell -Command "C:\inject-browser-sdk\injector_IIS\scripts\SetupIntegrationTestEnvironment.ps1; pytest C:\inject-browser-sdk\tests\integration_tests\scenario -v"

@@ -2,6 +2,8 @@ module github.com/DataDog/inject-browser-sdk/installer/configurator
 
 go 1.24.5
 
+toolchain go1.26.2
+
 require (
 	github.com/google/uuid v1.6.0
 	github.com/sirupsen/logrus v1.9.3

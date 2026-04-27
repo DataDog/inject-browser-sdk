@@ -51,31 +51,6 @@ devcontainer_image:
     reports:
       dotenv: build.env
 
-manual_devcontainer_nydusify:
-  stage: build
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule"
-      when: never
-    - when: manual
-      allow_failure: true
-  needs:
-    - job: devcontainer_image
-      artifacts: true
-  image: $NYDUS_DD_IMAGE
-  tags: ["arch:amd64"]
-  script:
-    - |
-      set -euo pipefail
-      if [ -z "${DEVCONTAINER_IMAGE}" ]; then
-        echo "ERROR: DEVCONTAINER_IMAGE is not set"
-        exit 1
-      fi
-      echo "Converting ${DEVCONTAINER_IMAGE} to nydus"
-      nydus-convert "${DEVCONTAINER_IMAGE}"
-      echo "Replacing original tag with nydus-optimized image"
-      crane copy "${DEVCONTAINER_IMAGE}-nydus" "${DEVCONTAINER_IMAGE}"
-      echo "Done. ${DEVCONTAINER_IMAGE} now has nydus layers."
-
 lint:
   stage: test
   extends: .not_scheduled
@@ -84,5 +59,3 @@ lint:
   needs:
     - job: devcontainer_image
       artifacts: true
-  script:
-    - make lint

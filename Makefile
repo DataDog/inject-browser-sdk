@@ -34,3 +34,6 @@ artifacts:
 .PHONY: artifacts-all
 artifacts-all:
 	docker buildx bake artifacts-all
+
+include ci/docker/circleci/circleci.mk
+include .devcontainer/devcontainer.mk

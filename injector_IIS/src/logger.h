@@ -30,7 +30,7 @@ class Logger : public datadog::tracing::Logger {
   std::ostringstream m_stream;
   LogLevel m_logLevel;
 
-public:
+ public:
   Logger(LogLevel initial_level = LogLevel::Info) : m_logLevel(initial_level) {
     m_eventLog = RegisterEventSource(NULL, L"Datadog-RUM-Instrumentation");
   }
@@ -49,24 +49,21 @@ public:
   }
 
   virtual void info(std::string message) {
-    if (!should_log(LogLevel::Info))
-      return;
+    if (!should_log(LogLevel::Info)) return;
 
     report_event(std::move(message), EVENTLOG_INFORMATION_TYPE,
                  INJECTOR_CATEGORY, MSG_GENERIC_INFO);
   }
 
   virtual void debug(std::string message) {
-    if (!should_log(LogLevel::Debug))
-      return;
+    if (!should_log(LogLevel::Debug)) return;
 
     report_event(std::move(message), EVENTLOG_INFORMATION_TYPE,
                  INJECTOR_CATEGORY, MSG_GENERIC_DEBUG);
   }
 
   virtual void error(std::string message) {
-    if (!should_log(LogLevel::Error))
-      return;
+    if (!should_log(LogLevel::Error)) return;
 
     report_event(std::move(message), EVENTLOG_ERROR_TYPE, INJECTOR_CATEGORY,
                  MSG_GENERIC_ERROR);
@@ -74,27 +71,25 @@ public:
 
   void report_event(std::string message, WORD type, WORD category,
                     DWORD id) const {
-    if (m_eventLog == nullptr)
-      return;
+    if (m_eventLog == nullptr) return;
 
     LPCSTR szNotification = message.c_str();
-    ReportEventA(m_eventLog,      // hEventLog
-                 type,            // wType
-                 category,        // wCategory
-                 id,              // dwEventID
-                 NULL,            // lpUserSid
-                 1,               // wNumStrings
-                 0,               // dwDataSize
-                 &szNotification, // lpStrings
-                 NULL);           // lpRawData
+    ReportEventA(m_eventLog,       // hEventLog
+                 type,             // wType
+                 category,         // wCategory
+                 id,               // dwEventID
+                 NULL,             // lpUserSid
+                 1,                // wNumStrings
+                 0,                // dwDataSize
+                 &szNotification,  // lpStrings
+                 NULL);            // lpRawData
   }
 
   // Note(@dmehala): Don't print the tracer startup configuration.
-  void log_startup(const LogFunc &) override {}
+  void log_startup(const LogFunc&) override {}
 
-  void log_error(const LogFunc &f) override {
-    if (!should_log(LogLevel::Error))
-      return;
+  void log_error(const LogFunc& f) override {
+    if (!should_log(LogLevel::Error)) return;
 
     m_stream.clear();
     m_stream.str("");
@@ -104,9 +99,8 @@ public:
                  MSG_GENERIC_ERROR);
   }
 
-  void log_error(const datadog::tracing::Error &error) override {
-    if (!should_log(LogLevel::Error))
-      return;
+  void log_error(const datadog::tracing::Error& error) override {
+    if (!should_log(LogLevel::Error)) return;
 
     report_event(std::format("[dd-trace-cpp error code {}] {}",
                              static_cast<int>(error.code), error.message),
@@ -114,11 +108,10 @@ public:
   }
 
   void log_error(datadog::tracing::StringView sv) override {
-    if (!should_log(LogLevel::Error))
-      return;
+    if (!should_log(LogLevel::Error)) return;
 
     report_event(std::string(sv), EVENTLOG_ERROR_TYPE, TRACER_CATEGORY,
                  MSG_GENERIC_ERROR);
   }
 };
-} // namespace datadog::rum
+}  // namespace datadog::rum

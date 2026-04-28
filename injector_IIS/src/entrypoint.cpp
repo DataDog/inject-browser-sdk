@@ -12,10 +12,9 @@
 #include "version.h"
 #include <cassert>
 
-__declspec(dllexport) HRESULT
-    __stdcall RegisterModule(DWORD server_version,
-                             IHttpModuleRegistrationInfo *module_info,
-                             IHttpServer *server) {
+__declspec(dllexport) HRESULT __stdcall RegisterModule(
+    DWORD server_version, IHttpModuleRegistrationInfo* module_info,
+    IHttpServer* server) {
   assert(server != nullptr);
   assert(module_info != nullptr);
 

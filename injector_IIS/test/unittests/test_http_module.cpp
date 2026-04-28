@@ -11,7 +11,7 @@
 
 using namespace datadog::rum;
 
-using ::testing::_;
+using ::testing::_;  // NOLINT(bugprone-reserved-identifier) gtest idiom
 using ::testing::DoAll;
 using ::testing::Invoke;
 using ::testing::Matcher;
@@ -29,13 +29,13 @@ class HttpModuleTest : public testing::Test,
 class SilentLogger : public datadog::rum::Logger {
  public:
   SilentLogger() = default;
-  void info(std::string) override{};
-  void debug(std::string) override{};
-  void error(std::string) override{};
+  void info(const std::string&) override {};
+  void debug(const std::string&) override {};
+  void error(const std::string&) override {};
 };
 
 TEST_P(HttpModuleTest, ShouldAttemptInjection_ContentType) {
-  HttpModule module;
+  HttpModule const module;
   SilentLogger logger;
   MockHttpResponse httpResponse;
   ModuleContext moduleContext;
@@ -48,6 +48,7 @@ TEST_P(HttpModuleTest, ShouldAttemptInjection_ContentType) {
           Invoke([content_type](_In_ PCSTR, _Out_ USHORT* headerValueLen) {
             *headerValueLen = (USHORT)content_type.size();
           }),
+          // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
           Return(content_type.data())));
 
   EXPECT_EQ(expected,
@@ -65,7 +66,7 @@ INSTANTIATE_TEST_SUITE_P(CheckContentType, HttpModuleTest,
                          testing::ValuesIn(kContentTypes));
 
 TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsFalseFor2xxAnd3xx) {
-  HttpModule module;
+  HttpModule const module;
   SilentLogger logger;
   MockHttpResponse httpResponse;
   ModuleContext moduleContext;
@@ -88,12 +89,13 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsFalseFor2xxAnd3xx) {
     for (USHORT code = current_case.min; code <= current_case.max; code++) {
       EXPECT_CALL(httpResponse,
                   GetHeader(Matcher<PCSTR>(StrEq("Content-Type")), _))
-          .WillOnce(DoAll(Invoke([contentTypeHeaderValue](
-                                     _In_ PCSTR, _Out_ USHORT* headerValueLen) {
-                            *headerValueLen =
-                                (USHORT)contentTypeHeaderValue.size();
-                          }),
-                          Return(contentTypeHeaderValue.data())));
+          .WillOnce(
+              DoAll(Invoke([contentTypeHeaderValue](
+                               _In_ PCSTR, _Out_ USHORT* headerValueLen) {
+                      *headerValueLen = (USHORT)contentTypeHeaderValue.size();
+                    }),
+                    // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
+                    Return(contentTypeHeaderValue.data())));
 
       EXPECT_CALL(httpResponse, GetStatus(_, _, _, _, _, _, _, _, _))
           .WillOnce(DoAll(
@@ -110,7 +112,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsFalseFor2xxAnd3xx) {
 }
 
 TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidStatusCode) {
-  HttpModule module;
+  HttpModule const module;
   SilentLogger logger;
   MockHttpResponse httpResponse;
   ModuleContext moduleContext;
@@ -134,12 +136,13 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidStatusCode) {
     for (USHORT code = current_case.min; code <= current_case.max; code++) {
       EXPECT_CALL(httpResponse,
                   GetHeader(Matcher<PCSTR>(StrEq("Content-Type")), _))
-          .WillOnce(DoAll(Invoke([contentTypeHeaderValue](
-                                     _In_ PCSTR, _Out_ USHORT* headerValueLen) {
-                            *headerValueLen =
-                                (USHORT)contentTypeHeaderValue.size();
-                          }),
-                          Return(contentTypeHeaderValue.data())));
+          .WillOnce(
+              DoAll(Invoke([contentTypeHeaderValue](
+                               _In_ PCSTR, _Out_ USHORT* headerValueLen) {
+                      *headerValueLen = (USHORT)contentTypeHeaderValue.size();
+                    }),
+                    // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
+                    Return(contentTypeHeaderValue.data())));
 
       EXPECT_CALL(httpResponse,
                   GetHeader(Matcher<PCSTR>(StrEq("Content-Encoding")), _))
@@ -173,7 +176,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidStatusCode) {
 
 TEST(HttpModuleTest,
      ShouldAttemptInjection_ReturnsFalseWhenCustomHeaderPresent) {
-  HttpModule module;
+  HttpModule const module;
   SilentLogger logger;
   MockHttpResponse httpResponse;
   ModuleContext moduleContext;
@@ -184,7 +187,7 @@ TEST(HttpModuleTest,
 
   const char* customHeader = "x-datadog-rum-injected";
   const char* customHeaderValue = "1";
-  USHORT code = 200;
+  USHORT const code = 200;
 
   EXPECT_CALL(httpResponse,
               GetHeader(Matcher<PCSTR>(StrEq(contentTypeHeader)), _))
@@ -222,7 +225,7 @@ TEST(HttpModuleTest,
 }
 
 TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidHeaders) {
-  HttpModule module;
+  HttpModule const module;
   SilentLogger logger;
   MockHttpResponse httpResponse;
   ModuleContext moduleContext;
@@ -233,7 +236,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidHeaders) {
 
   const char* customHeader = "x-datadog-rum-injected";
   const char* customHeaderValue = "";
-  USHORT code = 200;
+  USHORT const code = 200;
 
   EXPECT_CALL(httpResponse, GetStatus(_, _, _, _, _, _, _, _, _))
       .WillOnce(DoAll(
@@ -271,7 +274,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidHeaders) {
 }
 
 TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsFalseForCompressedContent) {
-  HttpModule module;
+  HttpModule const module;
   SilentLogger logger;
   MockHttpResponse httpResponse;
   ModuleContext moduleContext;
@@ -280,7 +283,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsFalseForCompressedContent) {
   const char* contentTypeHeader = "Content-Type";
   const char* contentTypeHeaderValue = "text/html";
   const char* contentEncodingValue = "gzip";
-  USHORT code = 200;
+  USHORT const code = 200;
 
   EXPECT_CALL(httpResponse,
               GetHeader(Matcher<PCSTR>(StrEq(contentTypeHeader)), _))

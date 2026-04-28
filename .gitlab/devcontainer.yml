@@ -98,3 +98,14 @@ format:
       artifacts: true
   script:
     - make format-check
+
+tidy:
+  stage: test
+  extends: .not_scheduled
+  image: $DEVCONTAINER_IMAGE
+  tags: ["arch:amd64"]
+  needs:
+    - job: devcontainer_image
+      artifacts: true
+  script:
+    - make tidy

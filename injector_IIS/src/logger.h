@@ -32,13 +32,16 @@ class Logger : public datadog::tracing::Logger {
 
  public:
   Logger(LogLevel initial_level = LogLevel::Info) : m_logLevel(initial_level) {
-    m_eventLog = RegisterEventSource(NULL, L"Datadog-RUM-Instrumentation");
+    m_eventLog = RegisterEventSourceW(nullptr, L"Datadog-RUM-Instrumentation");
+    if (m_eventLog == nullptr) {
+      OutputDebugStringW(L"Datadog RUM: Failed to register event source — logging disabled");
+    }
   }
 
-  virtual ~Logger() {
-    if (m_eventLog != NULL) {
+  ~Logger() override {
+    if (m_eventLog != nullptr) {
       DeregisterEventSource(m_eventLog);
-      m_eventLog = NULL;
+      m_eventLog = nullptr;
     }
   }
 
@@ -48,39 +51,45 @@ class Logger : public datadog::tracing::Logger {
     return static_cast<int>(level) <= static_cast<int>(m_logLevel);
   }
 
-  virtual void info(std::string message) {
+  virtual void info(const std::string& message) {
     if (!should_log(LogLevel::Info)) return;
 
-    report_event(std::move(message), EVENTLOG_INFORMATION_TYPE, INJECTOR_CATEGORY,
-                 MSG_GENERIC_INFO);
+    report_event(message, EVENTLOG_INFORMATION_TYPE, INJECTOR_CATEGORY, MSG_GENERIC_INFO);
   }
 
-  virtual void debug(std::string message) {
+  virtual void debug(const std::string& message) {
     if (!should_log(LogLevel::Debug)) return;
 
-    report_event(std::move(message), EVENTLOG_INFORMATION_TYPE, INJECTOR_CATEGORY,
-                 MSG_GENERIC_DEBUG);
+    report_event(message, EVENTLOG_INFORMATION_TYPE, INJECTOR_CATEGORY, MSG_GENERIC_DEBUG);
   }
 
-  virtual void error(std::string message) {
+  virtual void error(const std::string& message) {
     if (!should_log(LogLevel::Error)) return;
 
-    report_event(std::move(message), EVENTLOG_ERROR_TYPE, INJECTOR_CATEGORY, MSG_GENERIC_ERROR);
+    report_event(message, EVENTLOG_ERROR_TYPE, INJECTOR_CATEGORY, MSG_GENERIC_ERROR);
   }
 
-  void report_event(std::string message, WORD type, WORD category, DWORD id) const {
+  void report_event(const std::string& message, WORD type, WORD category, DWORD id) const {
     if (m_eventLog == nullptr) return;
 
-    LPCSTR szNotification = message.c_str();
-    ReportEventA(m_eventLog,       // hEventLog
-                 type,             // wType
-                 category,         // wCategory
-                 id,               // dwEventID
-                 NULL,             // lpUserSid
-                 1,                // wNumStrings
-                 0,                // dwDataSize
-                 &szNotification,  // lpStrings
-                 NULL);            // lpRawData
+    const int wide_len = MultiByteToWideChar(CP_UTF8, 0, message.c_str(),
+                                             static_cast<int>(message.size()), nullptr, 0);
+    if (wide_len <= 0) {
+      LPCWSTR fallback = L"[UTF-8 conversion failed]";
+      ReportEventW(m_eventLog, type, category, id, nullptr, 1, 0, &fallback, nullptr);
+      return;
+    }
+
+    std::wstring wide(wide_len, L'\0');
+    if (MultiByteToWideChar(CP_UTF8, 0, message.c_str(), static_cast<int>(message.size()),
+                            wide.data(), wide_len) == 0) {
+      LPCWSTR fallback = L"[UTF-8 conversion failed]";
+      ReportEventW(m_eventLog, type, category, id, nullptr, 1, 0, &fallback, nullptr);
+      return;
+    }
+
+    LPCWSTR szNotification = wide.c_str();
+    ReportEventW(m_eventLog, type, category, id, nullptr, 1, 0, &szNotification, nullptr);
   }
 
   // Note(@dmehala): Don't print the tracer startup configuration.

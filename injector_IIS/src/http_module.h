@@ -14,29 +14,29 @@
 namespace datadog::rum {
 
 class HttpModule : public CHttpModule {
-public:
+ public:
   static const DWORD NotificationsMask = RQ_SEND_RESPONSE | RQ_BEGIN_REQUEST;
 
-  REQUEST_NOTIFICATION_STATUS OnBeginRequest(IN IHttpContext *pHttpContext,
-                                             IN IHttpEventProvider *pProvider);
+  REQUEST_NOTIFICATION_STATUS OnBeginRequest(IN IHttpContext* pHttpContext,
+                                             IN IHttpEventProvider* pProvider);
 
   REQUEST_NOTIFICATION_STATUS
-  OnSendResponse(IN IHttpContext *pHttpContext,
-                 IN ISendResponseProvider *pProvider);
+  OnSendResponse(IN IHttpContext* pHttpContext,
+                 IN ISendResponseProvider* pProvider);
 
-  bool ShouldAttemptInjection(IHttpResponse &pHttpResponse,
-                              const ModuleContext &ctx) const;
+  bool ShouldAttemptInjection(IHttpResponse& pHttpResponse,
+                              const ModuleContext& ctx) const;
 
-  REQUEST_NOTIFICATION_STATUS PerformInjection(IHttpContext &pHttpContext,
-                                               IHttpResponse &pHttpResponse,
-                                               ModuleContext &ctx);
+  REQUEST_NOTIFICATION_STATUS PerformInjection(IHttpContext& pHttpContext,
+                                               IHttpResponse& pHttpResponse,
+                                               ModuleContext& ctx);
 };
 
 class HttpModuleFactory : public IHttpModuleFactory {
-public:
+ public:
   ~HttpModuleFactory() = default;
 
-  HRESULT GetHttpModule(OUT CHttpModule **ppModule, IN IModuleAllocator *) {
+  HRESULT GetHttpModule(OUT CHttpModule** ppModule, IN IModuleAllocator*) {
     auto http_module = new HttpModule;
     if (http_module == nullptr) {
       return ERROR_NOT_ENOUGH_MEMORY;
@@ -49,4 +49,4 @@ public:
   inline void Terminate() { delete this; }
 };
 
-} // namespace datadog::rum
+}  // namespace datadog::rum

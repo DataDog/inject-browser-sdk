@@ -18,8 +18,7 @@ TEST(TestRegisterModule,
   MockModule module;
   MockServer server;
 
-  EXPECT_CALL(server, GetAdminManager())
-      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(nullptr));
 
   EXPECT_CALL(module, SetGlobalNotifications(_, GL_APPLICATION_START |
                                                     GL_CONFIGURATION_CHANGE |
@@ -39,10 +38,9 @@ TEST(TestRegisterModule, TestRegistersValidHTTPModuleFactory) {
   MockModule module;
   MockServer server;
 
-  EXPECT_CALL(server, GetAdminManager())
-      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(nullptr));
 
-  IHttpModuleFactory *resultFactory = NULL;
+  IHttpModuleFactory* resultFactory = NULL;
   ON_CALL(module, SetRequestNotifications)
       .WillByDefault(DoAll(SaveArg<0>(&resultFactory), Return(S_OK)));
 
@@ -55,7 +53,7 @@ TEST(TestRegisterModule, TestRegistersValidHTTPModuleFactory) {
   EXPECT_EQ(result, S_OK);
   ASSERT_NE(resultFactory, nullptr);
 
-  CHttpModule *resultFactoryOutput = NULL;
+  CHttpModule* resultFactoryOutput = NULL;
   result = resultFactory->GetHttpModule(&resultFactoryOutput, NULL);
 
   EXPECT_EQ(result, S_OK);

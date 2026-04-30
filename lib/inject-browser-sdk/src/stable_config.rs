@@ -4,7 +4,6 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -15,16 +14,6 @@ use libdd_library_config::LibraryConfig;
 use crate::configuration::{Configuration, ConfigurationOverlay};
 use crate::error::Error;
 use crate::generate_snippet;
-
-/// `lookup` is called with `DD_RUM_*` keys; missing keys become field absences.
-pub fn snippet_from_lookup<'a>(lookup: impl Fn(&str) -> Option<&'a str>) -> Result<Vec<u8>, Error> {
-    Configuration::from_lookup(lookup).and_then(|config| generate_snippet(&config))
-}
-
-/// Convenience wrapper around [`snippet_from_lookup`].
-pub fn snippet_from_entries(entries: &BTreeMap<String, String>) -> Result<Vec<u8>, Error> {
-    snippet_from_lookup(|key| entries.get(key).map(|v| v.as_str()))
-}
 
 /// Build a snippet from Datadog stable configuration files, with an optional overlay.
 ///
@@ -111,13 +100,6 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::Value;
 
-    fn entries(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (String::from(*k), String::from(*v)))
-            .collect()
-    }
-
     /// Extract the JSON object passed to `DD_RUM.init(...)` so tests can
     /// assert on structured fields instead of raw-byte windows (which match
     /// by accident inside the CDN URL, e.g. "us1" appears in `/us1/v5/`).
@@ -133,80 +115,6 @@ mod tests {
             .expect("DD_RUM.init(...) must be terminated")
             + start;
         serde_json::from_str(&text[start..end]).expect("init arg must be JSON")
-    }
-
-    #[test]
-    fn snippet_from_entries_minimal() {
-        let map = entries(&[
-            ("DD_RUM_APPLICATION_ID", "app-1"),
-            ("DD_RUM_CLIENT_TOKEN", "tok-1"),
-        ]);
-        let bytes = snippet_from_entries(&map).expect("minimal entries must succeed");
-        let init = extract_init_json(&bytes);
-        assert_eq!(init["applicationId"], Value::from("app-1"));
-        assert_eq!(init["clientToken"], Value::from("tok-1"));
-        assert_eq!(init.get("site"), None, "site should be unset by default");
-    }
-
-    #[test]
-    fn snippet_from_entries_missing_required() {
-        let map: BTreeMap<String, String> = BTreeMap::new();
-        let err = snippet_from_entries(&map).unwrap_err();
-        assert_eq!(err.code(), 5);
-    }
-
-    #[test]
-    fn snippet_from_lookup_invalid_rate() {
-        let map = entries(&[
-            ("DD_RUM_APPLICATION_ID", "app-1"),
-            ("DD_RUM_CLIENT_TOKEN", "tok-1"),
-            ("DD_RUM_SESSION_SAMPLE_RATE", "150.0"),
-        ]);
-        let err = snippet_from_lookup(|key| map.get(key).map(|v| v.as_str())).unwrap_err();
-        assert_eq!(err.code(), 4);
-    }
-
-    #[test]
-    fn snippet_from_lookup_negative_rate() {
-        // -5.0 is outside 0..=100 and must be rejected at validate-time (code 4).
-        let map = entries(&[
-            ("DD_RUM_APPLICATION_ID", "app-1"),
-            ("DD_RUM_CLIENT_TOKEN", "tok-1"),
-            ("DD_RUM_SESSION_SAMPLE_RATE", "-5.0"),
-        ]);
-        let err = snippet_from_lookup(|key| map.get(key).map(|v| v.as_str())).unwrap_err();
-        assert_eq!(err.code(), 4);
-    }
-
-    #[test]
-    fn snippet_from_entries_ignores_non_dd_rum_keys() {
-        // Only DD_RUM_* keys are consulted; Datadog-wide keys like DD_SITE
-        // are ignored. The embedded init config must have no `site` key and
-        // thus default to the "us1" CDN region at runtime.
-        let map = entries(&[
-            ("DD_RUM_APPLICATION_ID", "app-1"),
-            ("DD_RUM_CLIENT_TOKEN", "tok-1"),
-            ("DD_SITE", "datadoghq.eu"),
-        ]);
-        let bytes = snippet_from_entries(&map).unwrap();
-        let init = extract_init_json(&bytes);
-        assert_eq!(init.get("site"), None, "DD_SITE must not leak into init");
-    }
-
-    #[test]
-    fn snippet_from_entries_dd_rum_site_wins_when_both_are_set() {
-        // DD_RUM_SITE must win over DD_SITE. Guards against a future refactor
-        // that adds DD_SITE as a fallback silently breaking the documented
-        // precedence contract.
-        let map = entries(&[
-            ("DD_RUM_APPLICATION_ID", "app-1"),
-            ("DD_RUM_CLIENT_TOKEN", "tok-1"),
-            ("DD_SITE", "datadoghq.eu"),
-            ("DD_RUM_SITE", "datadoghq.com"),
-        ]);
-        let bytes = snippet_from_entries(&map).unwrap();
-        let init = extract_init_json(&bytes);
-        assert_eq!(init["site"], Value::from("datadoghq.com"));
     }
 
     #[test]

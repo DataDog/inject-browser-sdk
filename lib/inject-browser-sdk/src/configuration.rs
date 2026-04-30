@@ -598,6 +598,20 @@ mod test {
     }
 
     #[test]
+    fn configuration_from_lookup_ignores_non_dd_rum_keys() {
+        // Only DD_RUM_* keys are consulted; Datadog-wide keys like DD_SITE
+        // are ignored. Guards against a future refactor that adds DD_SITE
+        // as a silent fallback and breaks the documented precedence contract.
+        let map = BTreeMap::from([
+            (String::from("DD_RUM_APPLICATION_ID"), String::from("app-1")),
+            (String::from("DD_RUM_CLIENT_TOKEN"), String::from("tok-1")),
+            (String::from("DD_SITE"), String::from("datadoghq.eu")),
+        ]);
+        let config = Configuration::from_lookup(lookup_from_map(&map)).unwrap();
+        assert_eq!(config.rum.site, None, "DD_SITE must not leak into rum.site");
+    }
+
+    #[test]
     fn configuration_from_lookup_empty_application_id() {
         let map = BTreeMap::from([
             (String::from("DD_RUM_APPLICATION_ID"), String::from("")),

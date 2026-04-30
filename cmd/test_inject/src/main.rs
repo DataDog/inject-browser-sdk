@@ -8,7 +8,7 @@ use inject_browser_sdk::{
 
 fn main() {
     let Some(input_file_path) = env::args().nth(1) else {
-        println!("Usage: {} <input_file>", env::args().nth(0).unwrap());
+        println!("Usage: {} <input_file>", env::args().next().unwrap());
         process::exit(1);
     };
 
@@ -23,8 +23,8 @@ fn main() {
     let configuration = Configuration {
         major_version: 6,
         rum: RumConfiguration {
-            application_id: Box::from("xxx"),
-            client_token: Box::from("xxx"),
+            application_id: Some("xxx".into()),
+            client_token: Some("xxx".into()),
             ..Default::default()
         },
     };

@@ -24,12 +24,12 @@
 //! This library has two mains concepts:
 //!
 //! * [`Snippet`], created by [`snippet_create_from_json`] by providing a configuration
-//! formatted as JSON. `Snippet` are generally created once at the start of the process. Multiple
-//! instances can be created if multiple configuration are being used.
+//!   formatted as JSON. `Snippet` are generally created once at the start of the process. Multiple
+//!   instances can be created if multiple configuration are being used.
 //!
 //! * [`Injector`], created by [`injector_create`] by providing a `Snippet` instance. One
-//! [Injector] instance is usually created for each HTTP response where we want to inject the
-//! snippet.
+//!   [Injector] instance is usually created for each HTTP response where we want to inject the
+//!   snippet.
 //!
 //! A typical usage of this library consists in the following steps:
 //!
@@ -117,6 +117,15 @@ mod no_std_support {
 
 mod injector;
 mod snippet;
+mod stable_config;
 
 pub use injector::*;
 pub use snippet::*;
+pub use stable_config::*;
+
+#[cfg(test)]
+pub(crate) mod test_utils {
+    pub fn cstr_ptr(bytes: &[u8]) -> *const i8 {
+        bytes.as_ptr() as *const i8
+    }
+}

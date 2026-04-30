@@ -101,15 +101,15 @@ function Uninstall-Datadog-RUMConfiguration {
     
                 $options = Get-WebConfiguration -PSPath $psPath -Filter "$sectionPath/option" -ErrorAction SilentlyContinue
                 foreach ($option in $options) {
-                    Clear-WebConfiguration -PSPath $psPath -Filter "$sectionPath/option[@name='$($option.name)']" -ErrorAction SilentlyContinue
+                    Clear-WebConfiguration -PSPath $psPath -Filter "$sectionPath/option[@name='$($option.name)']" -ErrorAction Stop
                 }
-                Clear-WebConfiguration -PSPath $psPath -Filter $sectionPath -ErrorAction SilentlyContinue
-    
+                Clear-WebConfiguration -PSPath $psPath -Filter $sectionPath -ErrorAction Stop
+
                 Stop-WebCommitDelay -Commit $True
                 Write-Host "Successfully removed Datadog RUM configuration from '$SiteName$AppPath'"
             }
             catch {
-                Stop-WebCommitDelay
+                Stop-WebCommitDelay -Commit $False
                 Write-Warning "Failed to remove Datadog RUM configuration from '$SiteName$AppPath': $_"
             }
         }
@@ -131,11 +131,56 @@ function Uninstall-Datadog-RUMConfiguration {
         }
     }
 
-    $sectionPath = "system.webServer/datadogRum"
+    function Remove-DatadogRumFromLocations {
+        param (
+            [string]$SiteName
+        )
 
-    $sites = Get-ChildItem IIS:\Sites
-    
+        $sectionPath = "system.webServer/datadogRum"
+        $psPath = "MACHINE/WEBROOT/APPHOST/$SiteName"
+
+        try {
+            $locations = Get-WebConfigurationLocation -Name $SiteName -ErrorAction Stop
+        }
+        catch {
+            Write-Warning "Unable to enumerate location configurations for site '$SiteName': $_"
+            return
+        }
+        foreach ($location in $locations) {
+            $locationPath = $location.Name
+            if (-not $locationPath) { continue }
+
+            $rumConfig = Get-WebConfiguration -Filter $sectionPath -PSPath $psPath -Location $locationPath -ErrorAction SilentlyContinue
+            if (-not $rumConfig) { continue }
+
+            try {
+                Start-WebCommitDelay
+
+                $options = Get-WebConfiguration -PSPath $psPath -Location $locationPath -Filter "$sectionPath/option" -ErrorAction SilentlyContinue
+                foreach ($option in $options) {
+                    Clear-WebConfiguration -PSPath $psPath -Location $locationPath -Filter "$sectionPath/option[@name='$($option.name)']" -ErrorAction Stop
+                }
+                Clear-WebConfiguration -PSPath $psPath -Location $locationPath -Filter $sectionPath -ErrorAction Stop
+
+                Stop-WebCommitDelay -Commit $True
+                Write-Host "Successfully removed Datadog RUM configuration from '$SiteName' location '$locationPath'"
+            }
+            catch {
+                Stop-WebCommitDelay -Commit $False
+                Write-Warning "Failed to remove Datadog RUM configuration from '$SiteName' location '$locationPath': $_"
+            }
+        }
+    }
+
+    try {
+        $sites = Get-ChildItem IIS:\Sites -ErrorAction Stop
+    } catch {
+        Write-Error "Unable to enumerate IIS sites: $_"
+        return
+    }
+
     foreach ($site in $sites) {
         Remove-DatadogRumFromApp -SiteName $site.Name -AppPath ""
+        Remove-DatadogRumFromLocations -SiteName $site.Name
     }
 }

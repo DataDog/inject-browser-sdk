@@ -15,7 +15,10 @@ mod configuration;
 pub mod error;
 mod injection_point_locator;
 pub mod injector;
+pub mod platform;
 mod snippet;
+mod stable_config;
 
 pub use configuration::*;
 pub use snippet::*;
+pub use stable_config::*;

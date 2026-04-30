@@ -12,8 +12,14 @@ pub enum Error {
     Json(String),
     UnsupportedMajorVersion(u32),
     UnsupportedSite(String),
-    OutOfRangeRate(String, f32),
+    OutOfRangeRate(String, f64),
     EmptyMandatoryConf(String),
+    StableConfig(String),
+    /// Caller supplied a NULL pointer for a required FFI argument.
+    FfiNullPointer(String),
+    /// Caller supplied a non-UTF-8 byte sequence for an FFI argument that
+    /// required a UTF-8 string.
+    FfiInvalidUtf8(String),
 }
 
 impl Error {
@@ -24,6 +30,9 @@ impl Error {
             Error::UnsupportedSite(_) => 3,
             Error::OutOfRangeRate(_, _) => 4,
             Error::EmptyMandatoryConf(_) => 5,
+            Error::StableConfig(_) => 6,
+            Error::FfiNullPointer(_) => 7,
+            Error::FfiInvalidUtf8(_) => 8,
         }
     }
 }
@@ -44,6 +53,9 @@ impl fmt::Display for Error {
             Error::EmptyMandatoryConf(key) => {
                 write!(f, "Validation error: Mandatory field '{key}' is empty.")
             }
+            Error::StableConfig(cause) => write!(f, "Stable config error: {cause}"),
+            Error::FfiNullPointer(field) => write!(f, "FFI error: {field} is NULL"),
+            Error::FfiInvalidUtf8(field) => write!(f, "FFI error: {field} is not valid UTF-8"),
         }
     }
 }

@@ -8,14 +8,14 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::{configuration::validate_configuration, configuration::Configuration, error::Error};
+use crate::{configuration::Configuration, error::Error};
 
 /// Generates the Datadog RUM SDK JavaScript snippet based on the provided configuration.
 ///
 /// This function creates a JavaScript snippet that can be injected into your web application
 /// to enable RUM. The snippet is generated using the provided `configuration`.
 pub fn generate_snippet(configuration: &Configuration) -> Result<Vec<u8>, Error> {
-    validate_configuration(configuration)?;
+    configuration.validate()?;
 
     let site = configuration.rum.site.as_deref().unwrap_or("datadoghq.com");
     let url = format_cdn_url(configuration.major_version, site)?;
@@ -40,8 +40,11 @@ window.DD_RUM.onReady(function() {
   window.DD_RUM.init("#,
     );
 
-    let json_string =
-        serde_json::to_string(&configuration.rum).map_err(|e| Error::Json(e.to_string()))?;
+    let mut rum_value =
+        serde_json::to_value(&configuration.rum).map_err(|e| Error::Json(e.to_string()))?;
+    // Deterministic key ordering, independent of serde_json's `preserve_order` feature.
+    rum_value.sort_all_objects();
+    let json_string = serde_json::to_string(&rum_value).map_err(|e| Error::Json(e.to_string()))?;
     for ch in json_string.chars() {
         if ch.is_ascii() {
             let mut buf = [0; 4];
@@ -88,7 +91,7 @@ fn format_cdn_url(major_version: u32, site: &str) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{configuration::PrivacyLevel, configuration::RumConfiguration};
+    use crate::configuration::RumConfiguration;
     use alloc::boxed::Box;
     use alloc::collections::BTreeMap;
     use pretty_assertions::assert_eq;
@@ -114,10 +117,10 @@ window.DD_RUM.onReady(function() {
                 &generate_snippet(&Configuration {
                     major_version: 5,
                     rum: RumConfiguration {
-                        client_token: Box::from("foo"),
-                        application_id: Box::from("bar"),
+                        application_id: Some(String::from("bar")),
+                        client_token: Some(String::from("foo")),
                         ..Default::default()
-                    }
+                    },
                 })
                 .unwrap()
             )
@@ -136,7 +139,7 @@ window.DD_RUM.onReady(function() {
   n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
 })(window,document,'script','https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js','DD_RUM')
 window.DD_RUM.onReady(function() {
-  window.DD_RUM.init({"applicationId":"bar","clientToken":"foo","site":"datadoghq.com","trackResources":true,"defaultPrivacyLevel":"mask","sessionSampleRate":42.42});
+  window.DD_RUM.init({"applicationId":"bar","clientToken":"foo","defaultPrivacyLevel":"mask","sessionSampleRate":42.42,"site":"datadoghq.com","trackResources":true});
 });
 </script>
 "#;
@@ -146,14 +149,14 @@ window.DD_RUM.onReady(function() {
                 &generate_snippet(&Configuration {
                     major_version: 5,
                     rum: RumConfiguration {
-                        client_token: Box::from("foo"),
-                        application_id: Box::from("bar"),
-                        site: Some(Box::from("datadoghq.com")),
-                        default_privacy_level: Some(PrivacyLevel::Mask),
+                        application_id: Some(String::from("bar")),
+                        client_token: Some(String::from("foo")),
+                        site: Some(String::from("datadoghq.com")),
+                        default_privacy_level: Some(String::from("mask")),
                         track_resources: Some(true),
                         session_sample_rate: Some(42.42),
                         ..Default::default()
-                    }
+                    },
                 })
                 .unwrap()
             )
@@ -184,11 +187,11 @@ window.DD_RUM.onReady(function() {
                 &generate_snippet(&Configuration {
                     major_version: 5,
                     rum: RumConfiguration {
-                        client_token: Box::from("foo"),
-                        application_id: Box::from("☺ € é"),
-                        site: Some(Box::from("datadoghq.com")),
+                        application_id: Some(String::from("☺ € é")),
+                        client_token: Some(String::from("foo")),
+                        site: Some(String::from("datadoghq.com")),
                         ..Default::default()
-                    }
+                    },
                 })
                 .unwrap()
             )
@@ -207,7 +210,7 @@ window.DD_RUM.onReady(function() {
   n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
 })(window,document,'script','https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js','DD_RUM')
 window.DD_RUM.onReady(function() {
-  window.DD_RUM.init({"applicationId":"foo","clientToken":"bar","site":"datadoghq.com","newopt":"value","newopt2":true});
+  window.DD_RUM.init({"applicationId":"foo","clientToken":"bar","newopt":"value","newopt2":true,"site":"datadoghq.com"});
 });
 </script>
 "#;
@@ -217,15 +220,15 @@ window.DD_RUM.onReady(function() {
                 &generate_snippet(&Configuration {
                     major_version: 5,
                     rum: RumConfiguration {
-                        application_id: Box::from("foo"),
-                        client_token: Box::from("bar"),
-                        site: Some(Box::from("datadoghq.com")),
+                        application_id: Some(String::from("foo")),
+                        client_token: Some(String::from("bar")),
+                        site: Some(String::from("datadoghq.com")),
                         other: BTreeMap::from([
                             (Box::from("newopt"), json!("value")),
                             (Box::from("newopt2"), json!(true)),
                         ]),
                         ..Default::default()
-                    }
+                    },
                 })
                 .unwrap()
             )

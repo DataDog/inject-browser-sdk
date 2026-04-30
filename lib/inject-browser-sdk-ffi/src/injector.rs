@@ -26,6 +26,12 @@ pub struct Injector {
 
 /// Create an [`Injector`] injector based on a [`Snippet`].
 ///
+/// Returns `NULL` when `snippet` is `NULL` or when `snippet->error_code != 0`
+/// (the snippet failed to build and has no content to inject). Callers must
+/// null-check the return value and skip injection when it is `NULL`, otherwise
+/// the [`Injector`] would silently pass the response through unmodified and
+/// mask the upstream configuration error.
+///
 /// # Memory ownership
 ///
 /// The `Injector` instance returned by this function is owned by the library and should be freed
@@ -34,7 +40,15 @@ pub struct Injector {
 /// # Example
 ///
 /// ```c
+/// if (snippet == NULL || snippet->error_code != 0) {
+///   // log and skip injection
+///   return;
+/// }
 /// Injector* injector = injector_create(snippet);
+/// if (injector == NULL) {
+///   // log and skip injection
+///   return;
+/// }
 ///
 /// // ... use injector
 ///
@@ -42,25 +56,30 @@ pub struct Injector {
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn injector_create(snippet: *const Snippet) -> *mut Injector {
-    let snippet_content = match { SnippetInternal::borrow_public_ptr(snippet) }.inner {
+    if snippet.is_null() {
+        return core::ptr::null_mut();
+    }
+    let snippet_content = match SnippetInternal::borrow_public_ptr(snippet).inner {
         Ok(ref content) => content.as_slice(),
-        Err(_) => &[],
+        Err(_) => return core::ptr::null_mut(),
     };
 
-    return Box::into_raw(Box::new(Injector {
+    Box::into_raw(Box::new(Injector {
         inner: injector::Injector::new(snippet_content),
         slices_memory_storage: core::array::from_fn(|_| BytesSlice::empty()),
-    }));
+    }))
 }
 
 /// Free the [`Injector`] associated memory.
 ///
 /// # Memory safety
 ///
-/// Do not use the `injector` instance after calling this function.
+/// Do not use the `injector` instance after calling this function. Passing `NULL` is a no-op.
 #[no_mangle]
 pub unsafe extern "C" fn injector_cleanup(injector: *mut Injector) {
-    _ = Box::from_raw(injector);
+    if !injector.is_null() {
+        _ = Box::from_raw(injector);
+    }
 }
 
 /// Write part of an HTML document to the [`Injector`].
@@ -91,12 +110,21 @@ pub unsafe extern "C" fn injector_write(
     chunk: *const u8,
     length: u32,
 ) -> InjectorResult {
+    if injector.is_null() {
+        return InjectorResult::empty();
+    }
     let ffi_injector = &mut *injector;
-    let chunk = slice::from_raw_parts(chunk, length as usize);
-    return InjectorResult::new(
+    // A NULL chunk with length==0 is a legitimate "no more data yet" call;
+    // treat it as an empty slice rather than constructing a dangling slice.
+    let chunk: &[u8] = if chunk.is_null() || length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(chunk, length as usize)
+    };
+    InjectorResult::new(
         ffi_injector.inner.write(chunk),
         &mut ffi_injector.slices_memory_storage,
-    );
+    )
 }
 
 /// Notify the [`Injector`] that the full HTML document has been written.
@@ -123,11 +151,14 @@ pub unsafe extern "C" fn injector_write(
 /// }
 #[no_mangle]
 pub unsafe extern "C" fn injector_end(ffi_injector: *mut Injector) -> InjectorResult {
+    if ffi_injector.is_null() {
+        return InjectorResult::empty();
+    }
     let ffi_injector = &mut *ffi_injector;
-    return InjectorResult::new(
+    InjectorResult::new(
         ffi_injector.inner.end(),
         &mut ffi_injector.slices_memory_storage,
-    );
+    )
 }
 
 /// The result of a call to [`injector_write`] or [`injector_end`]. It represents a list of binary
@@ -168,6 +199,16 @@ impl InjectorResult {
             slices_length: result.length as u32,
             slices: slices_memory_storage as *const _,
             injected: result.injected,
+        }
+    }
+
+    /// Defensive default returned when a NULL injector is passed to
+    /// [`injector_write`] or [`injector_end`]. No slices, nothing injected.
+    fn empty() -> Self {
+        Self {
+            slices_length: 0,
+            slices: null(),
+            injected: false,
         }
     }
 }
@@ -228,5 +269,65 @@ impl<'a> From<injector::BytesSlice<'a>> for BytesSlice {
             length: slice.bytes.len() as u32,
             from_incoming_chunk: slice.from_incoming_chunk,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snippet::{snippet_cleanup, snippet_create_from_json};
+    use crate::test_utils::cstr_ptr;
+    use core::ptr::null_mut;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn injector_create_null_snippet_returns_null() {
+        let injector = unsafe { injector_create(null()) };
+        assert!(injector.is_null());
+    }
+
+    #[test]
+    fn injector_create_failed_snippet_returns_null() {
+        // A snippet that failed to build (error_code != 0) has no content to
+        // inject. Returning NULL forces the host to skip injection instead of
+        // silently producing a pass-through injector.
+        let snippet = unsafe { snippet_create_from_json(cstr_ptr(b"{not json\0")) };
+        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_ne!(s.error_code, 0);
+        let injector = unsafe { injector_create(snippet) };
+        assert!(injector.is_null());
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn injector_write_null_injector_returns_empty() {
+        let chunk = b"<html></html>";
+        let result = unsafe { injector_write(null_mut(), chunk.as_ptr(), chunk.len() as u32) };
+        assert_eq!(result.slices_length, 0);
+        assert!(result.slices.is_null());
+        assert!(!result.injected);
+    }
+
+    #[test]
+    fn injector_end_null_injector_returns_empty() {
+        let result = unsafe { injector_end(null_mut()) };
+        assert_eq!(result.slices_length, 0);
+        assert!(result.slices.is_null());
+        assert!(!result.injected);
+    }
+
+    #[test]
+    fn injector_write_null_chunk_is_treated_as_empty() {
+        let snippet = unsafe {
+            snippet_create_from_json(cstr_ptr(
+                b"{\"majorVersion\":5,\"rum\":{\"applicationId\":\"a\",\"clientToken\":\"t\"}}\0",
+            ))
+        };
+        let injector = unsafe { injector_create(snippet) };
+        assert!(!injector.is_null());
+        let result = unsafe { injector_write(injector, null(), 0) };
+        assert_eq!(result.slices_length, 0);
+        unsafe { injector_cleanup(injector) };
+        unsafe { snippet_cleanup(snippet) };
     }
 }

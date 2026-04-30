@@ -43,17 +43,19 @@ fn cstr_to_str<'a>(cstr: &'a CStr, field: &str) -> Result<&'a str, Error> {
 ///   replace a disk value, pass the new value; omitting the key preserves
 ///   the disk value.
 /// - **Unknown keys at the top level** (outside `rum`): rejected with
-///   `error_code = 9`.
-/// - **Unknown keys inside `rum`**: rejected with `error_code = 9` so typos
-///   like `applicatoinId` surface instead of being silently dropped.
+///   `error_code = 1` (typos like `"rumm"` surface as JSON parse errors).
+/// - **Unknown keys inside `rum`**: passed through into the generated
+///   `DD_RUM.init({...})` JSON for forward-compat with new Browser SDK
+///   init options. The trade-off is that typos inside `rum` are not caught
+///   here and reach the Browser SDK as-is.
 ///
 /// # Error handling
 ///
 /// Always returns a valid `Snippet` pointer. Check `error_code` for failures.
 /// See [`Snippet`] for the full error-code table. The codes most relevant to
-/// this call are `1` (malformed `json_overlay`), `6` (stable-config I/O or
-/// YAML parse failures), `7` (NULL `language`), `8` (non-UTF-8 `language`),
-/// and `9` (unknown field in `json_overlay`). Overlay values that fail
+/// this call are `1` (malformed `json_overlay`, including unknown top-level
+/// keys), `6` (stable-config I/O or YAML parse failures), `7` (NULL
+/// `language`), and `8` (non-UTF-8 `language`). Overlay values that fail
 /// validation also produce codes `2`–`5`.
 ///
 /// # Memory ownership

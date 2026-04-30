@@ -24,12 +24,10 @@ pub struct Configuration {
 /// Configuration settings for Real User Monitoring (RUM).
 ///
 /// Known fields are strongly typed. [`RumConfiguration::other`] is a
-/// `#[serde(flatten)]` catch-all that captures unknown keys when this struct
-/// is deserialized directly, and flattens them back into the init JSON on
-/// serialization. Note that the public [`parse_configuration`] helper walks
-/// the input first and rejects unknown `rum.*` keys with
-/// [`Error::InvalidField`] (code 9) for typo safety — unknown keys only
-/// reach `other` when callers bypass the helper.
+/// `#[serde(flatten)]` catch-all: unknown keys inside `rum` are captured
+/// into it on deserialization and flattened back into the generated
+/// `DD_RUM.init({...})` JSON on serialization, so new Browser SDK init
+/// options pass through without a code change here.
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(test, derive(Debug, PartialEq))]
@@ -79,13 +77,12 @@ pub struct RumConfiguration {
 ///   `Option<T>` handling.
 /// - **Unknown keys at the top level** (outside `rum`): rejected with a
 ///   deserialization error, so typos like `"rumm"` surface instead of being
-///   silently dropped.
-/// - **Unknown keys inside `rum`**: at the struct level `#[serde(flatten)]`
-///   captures them into [`RumConfiguration::other`], but the public
-///   [`parse_configuration_overlay`] helper walks the input first and
-///   rejects any unknown `rum.*` key with [`Error::InvalidField`] (code 9)
-///   for typo safety. Direct `serde_json::from_slice::<ConfigurationOverlay>`
-///   is the only path that preserves the `other` catch-all behavior.
+///   silently dropped. There is no `other` catch-all at this level.
+/// - **Unknown keys inside `rum`**: captured into
+///   [`RumConfiguration::other`] and merged into the target's `other` on
+///   overlay. This is the forward-compat path for new Browser SDK init
+///   options; the trade-off is that typos inside `rum` are silently passed
+///   through rather than rejected.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(test, derive(Debug, PartialEq))]
@@ -150,73 +147,20 @@ impl RumConfiguration {
 const SITE_PATTERNS: [&str; 4] = ["datadog", "ddog", "datad0g", "dd0g"];
 const MAJOR_VERSIONS: [u32; 2] = [5, 6];
 
-/// Top-level JSON keys accepted by both [`Configuration`] and [`ConfigurationOverlay`].
-/// Kept in sync with the struct fields — drift is guarded by a test below.
-pub const KNOWN_CONFIG_FIELDS: &[&str] = &["majorVersion", "rum"];
-
-/// Keys accepted under the `rum` object, in camelCase to match the serde
-/// rename applied to [`RumConfiguration`]. Drift is guarded by a test below.
-pub const KNOWN_RUM_FIELDS: &[&str] = &[
-    "applicationId",
-    "clientToken",
-    "site",
-    "service",
-    "env",
-    "version",
-    "trackUserInteractions",
-    "trackResources",
-    "trackLongTasks",
-    "defaultPrivacyLevel",
-    "sessionSampleRate",
-    "sessionReplaySampleRate",
-    "remoteConfigurationId",
-];
-
-/// Walks the top-level object and the `rum` sub-object, returning the first
-/// key that isn't in the allowlists. Used by [`parse_configuration`] and
-/// [`parse_configuration_overlay`] to surface typos like `applicatoinId` as
-/// a distinct error code instead of a generic serde parse message.
-fn find_unknown_field(value: &Value, top: &[&str], rum: &[&str]) -> Option<String> {
-    let obj = value.as_object()?;
-    for (key, val) in obj {
-        if !top.contains(&key.as_str()) {
-            return Some(key.clone());
-        }
-        if key == "rum" {
-            if let Some(rum_obj) = val.as_object() {
-                for rum_key in rum_obj.keys() {
-                    if !rum.contains(&rum_key.as_str()) {
-                        return Some(format!("rum.{rum_key}"));
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Parse a [`Configuration`] from JSON with unknown-field detection.
+/// Parse a [`Configuration`] from JSON.
 ///
-/// A typo like `applicatoinId` returns [`Error::InvalidField`] (code 9) with
-/// the offending path, instead of a generic [`Error::Json`] (code 1) whose
-/// message embeds a raw serde byte offset. Malformed JSON still produces
-/// [`Error::Json`].
+/// Unknown top-level keys (e.g. a typo like `"rumm"`) are rejected by
+/// `deny_unknown_fields` and surface as [`Error::Json`]. Unknown keys
+/// inside `rum` flow into [`RumConfiguration::other`] for forward-compat
+/// with future Browser SDK init options.
 pub fn parse_configuration(json: &[u8]) -> Result<Configuration, Error> {
-    let value: Value = serde_json::from_slice(json).map_err(|e| Error::Json(format!("{e}")))?;
-    if let Some(path) = find_unknown_field(&value, KNOWN_CONFIG_FIELDS, KNOWN_RUM_FIELDS) {
-        return Err(Error::InvalidField(path));
-    }
-    serde_json::from_value::<Configuration>(value).map_err(|e| Error::Json(format!("{e}")))
+    serde_json::from_slice(json).map_err(|e| Error::Json(format!("{e}")))
 }
 
-/// Parse a [`ConfigurationOverlay`] from JSON with unknown-field detection.
-/// See [`parse_configuration`] for the rationale.
+/// Parse a [`ConfigurationOverlay`] from JSON. See [`parse_configuration`]
+/// for the unknown-field semantics.
 pub fn parse_configuration_overlay(json: &[u8]) -> Result<ConfigurationOverlay, Error> {
-    let value: Value = serde_json::from_slice(json).map_err(|e| Error::Json(format!("{e}")))?;
-    if let Some(path) = find_unknown_field(&value, KNOWN_CONFIG_FIELDS, KNOWN_RUM_FIELDS) {
-        return Err(Error::InvalidField(path));
-    }
-    serde_json::from_value::<ConfigurationOverlay>(value).map_err(|e| Error::Json(format!("{e}")))
+    serde_json::from_slice(json).map_err(|e| Error::Json(format!("{e}")))
 }
 
 type Setter = fn(&mut Configuration, &str) -> Result<(), Error>;
@@ -789,39 +733,31 @@ mod test {
     }
 
     #[test]
-    fn known_field_arrays_match_struct_field_counts() {
-        // Drift guard: if a field is added to Configuration/RumConfiguration
-        // but the corresponding KNOWN_* array isn't updated, the two-pass
-        // parser would reject the new field as unknown. Update both the
-        // array and this expected count together.
-        assert_eq!(KNOWN_CONFIG_FIELDS.len(), 2);
-        assert_eq!(KNOWN_RUM_FIELDS.len(), 13);
-    }
-
-    #[test]
     fn parse_configuration_rejects_typo_at_top_level() {
+        // `deny_unknown_fields` on Configuration catches typos like a stray
+        // top-level "applicatoinId". There is no `other` catch-all at this
+        // level, so a silent drop would mask the bug.
         let err = parse_configuration(
             br#"{"majorVersion":5,"rum":{"applicationId":"a","clientToken":"b"},"applicatoinId":"c"}"#,
         )
         .expect_err("typo at top level must fail");
-        assert_eq!(err.code(), 9);
-        match err {
-            Error::InvalidField(path) => assert_eq!(path, "applicatoinId"),
-            other => panic!("expected InvalidField, got {other:?}"),
-        }
+        assert_eq!(err.code(), 1);
+        assert!(
+            err.to_string().contains("applicatoinId"),
+            "error should name the unknown key, got: {err}"
+        );
     }
 
     #[test]
-    fn parse_configuration_rejects_typo_inside_rum() {
-        let err = parse_configuration(
-            br#"{"majorVersion":5,"rum":{"applicaitonId":"a","clientToken":"b"}}"#,
+    fn parse_configuration_passes_unknown_rum_field_through_other() {
+        // Unknown keys inside `rum` are intentionally accepted and routed to
+        // `RumConfiguration::other` so new Browser SDK init options pass
+        // through without a code change here.
+        let config = parse_configuration(
+            br#"{"majorVersion":5,"rum":{"applicationId":"a","clientToken":"b","newKnob":"x"}}"#,
         )
-        .expect_err("typo inside rum must fail");
-        assert_eq!(err.code(), 9);
-        match err {
-            Error::InvalidField(path) => assert_eq!(path, "rum.applicaitonId"),
-            other => panic!("expected InvalidField, got {other:?}"),
-        }
+        .expect("unknown rum keys must flow into `other`");
+        assert_eq!(config.rum.other.get("newKnob"), Some(&Value::from("x")));
     }
 
     #[test]
@@ -843,13 +779,9 @@ mod test {
     }
 
     #[test]
-    fn parse_configuration_overlay_rejects_typo_inside_rum() {
-        let err = parse_configuration_overlay(br#"{"rum":{"applicaitonId":"x"}}"#)
-            .expect_err("typo inside overlay rum must fail");
-        assert_eq!(err.code(), 9);
-        match err {
-            Error::InvalidField(path) => assert_eq!(path, "rum.applicaitonId"),
-            other => panic!("expected InvalidField, got {other:?}"),
-        }
+    fn parse_configuration_overlay_passes_unknown_rum_field_through_other() {
+        let overlay = parse_configuration_overlay(br#"{"rum":{"newKnob":"x"}}"#)
+            .expect("unknown rum keys must flow into `other`");
+        assert_eq!(overlay.rum.other.get("newKnob"), Some(&Value::from("x")));
     }
 }

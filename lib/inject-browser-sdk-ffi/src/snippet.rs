@@ -245,12 +245,13 @@ mod tests {
             (2, "Validation error: The major version '1' is not supported. Supported RUM SDK versions: [5, 6]".to_owned())
         );
 
-        // Missing "rum". parse_configuration runs a two-pass walk that first
-        // decodes to a serde_json::Value (no position info) and then calls
-        // from_value, so the error message no longer carries the byte offset.
+        // Missing "rum".
         assert_eq!(
             get_error(unsafe { snippet_create_from_json(cstr_ptr(b"{\"majorVersion\":5}\0")) }),
-            (1, "JSON error: missing field `rum`".to_owned())
+            (
+                1,
+                "JSON error: missing field `rum` at line 1 column 18".to_owned()
+            )
         );
     }
 

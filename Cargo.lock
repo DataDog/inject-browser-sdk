@@ -415,24 +415,25 @@ checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
 [[package]]
 name = "libdd-library-config"
 version = "1.1.0"
-source = "git+https://github.com/DataDog/libdatadog?rev=ef56bfed#ef56bfed70e19c71173a28450986f2fb5bcbf032"
+source = "git+https://github.com/DataDog/libdatadog?rev=12431c998#12431c998f71fa6ddbf9bc37583e35dd106fc2a2"
 dependencies = [
  "anyhow",
+ "libc",
  "libdd-trace-protobuf",
  "memfd",
  "prost",
  "rand 0.8.5",
  "rmp",
  "rmp-serde",
- "rustix",
  "serde",
+ "thiserror",
  "yaml_serde",
 ]
 
 [[package]]
 name = "libdd-trace-protobuf"
 version = "3.0.1"
-source = "git+https://github.com/DataDog/libdatadog?rev=ef56bfed#ef56bfed70e19c71173a28450986f2fb5bcbf032"
+source = "git+https://github.com/DataDog/libdatadog?rev=12431c998#12431c998f71fa6ddbf9bc37583e35dd106fc2a2"
 dependencies = [
  "prost",
  "serde",
@@ -845,6 +846,26 @@ name = "test_inject"
 version = "1.2.1-dev"
 dependencies = [
  "inject-browser-sdk",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

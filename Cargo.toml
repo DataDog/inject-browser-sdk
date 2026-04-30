@@ -21,7 +21,7 @@ rust-version = "1.91.0"
 # break reproducible builds downstream. This is acknowledged and accepted as a
 # short-term stopgap; a follow-up PR will land the no_std changes upstream on
 # DataDog/libdatadog main and repoint this dependency to the upstream rev.
-libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "ef56bfed", default-features = false }
+libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "12431c998", default-features = false }
 
 [workspace.lints.clippy]
 implicit_return = "deny"

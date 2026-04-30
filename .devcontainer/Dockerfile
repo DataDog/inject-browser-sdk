@@ -22,9 +22,6 @@ RUN set -eux; \
     echo "${rustupSha256} */tmp/rustup" | sha256sum -c -; \
     chmod +x /tmp/rustup
 
-FROM scratch AS rustup
-COPY --from=rustup-download /tmp/rustup /rustup
-
 FROM gbi AS xwin-install
 
 ARG XWIN_VERSION=0.6.5
@@ -82,7 +79,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 WORKDIR /src
 
-COPY --from=rustup / /usr/bin/
+COPY --from=rustup-download /tmp/rustup /usr/bin/rustup
 COPY --from=repo rust-toolchain.toml ./
 
 RUN set -eux; \

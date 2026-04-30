@@ -1,6 +1,10 @@
 COMMIT_SHA ?= $(shell git rev-parse --short HEAD)
 DOCKER_REPO ?= ghcr.io/datadog/inject-browser-sdk
 
+# Pin the devcontainer image name so it doesn't depend on the worktree
+# directory name (the new shared template derives it from $(CURDIR) by default).
+DEV_CONTAINER_IMAGE_NAME := registry.ddbuild.io/ci/inject-browser-sdk/devcontainer
+
 .PHONY: lint
 lint:
 	./scripts/codestyle.sh lint

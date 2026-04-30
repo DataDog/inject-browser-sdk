@@ -1,54 +1,187 @@
-DEV_CONTAINER_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
-DEV_CONTAINER_REPO_ROOT := $(abspath $(DEV_CONTAINER_DIR)/..)
+# DO NOT EDIT. Synced from DataDog/libdatadog-build by the
+# libdatadog-build devcontainer-bundle campaigner — edits here will be
+# overwritten on the next run.
+# Source of truth: https://github.com/DataDog/libdatadog-build/blob/main/repository-tools/devcontainer/devcontainer.mk
+#
+# Inputs (set before `include`):
+#   DEV_CONTAINER_REPO_ROOT          Absolute path to the repo root.
+#   DEV_CONTAINER_IMAGE_NAME         Override image name. Defaults to
+#                                    registry.ddbuild.io/ci/<repo>/devcontainer.
+#   DEV_CONTAINER_REQUIRED_PATHS     Whitespace-separated paths that must exist
+#                                    (e.g. submodule checkouts). Missing ->
+#                                    $(error).
+#   DOCKER_BUILDX_FLAGS              Extra flags appended to the local build.
+#
+# This file is the single source of truth for staging + hashing. The
+# GitLab template (devcontainer.yml) calls into `make` so both paths
+# share the same code.
 
-# When running inside the container, tools are available directly.
-# Check for /.dockerenv (Docker) or KUBERNETES_SERVICE_HOST (Kubernetes CI).
-ifneq ($(or $(wildcard /.dockerenv),$(KUBERNETES_SERVICE_HOST)),)
+DEV_CONTAINER_REPO_ROOT ?= $(CURDIR)
+_DEV_CONTAINER_REPO_NAME := $(notdir $(patsubst %/,%,$(DEV_CONTAINER_REPO_ROOT)))
+DEV_CONTAINER_IMAGE_NAME ?= registry.ddbuild.io/ci/$(_DEV_CONTAINER_REPO_NAME)/devcontainer
 
-DEVCONTAINER_RUN :=
+_DEV_CONTAINER_CONTEXT_FILES := $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/context.files
+_DEV_CONTAINER_CONTEXT_FILTER := $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/context.filter
+_DEV_CONTAINER_DOCKERFILE := $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/Dockerfile
+_DEV_CONTAINER_STAGED := $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.staged
 
-.PHONY: dev-image
-dev-image:
-	@true
-
+# uname -m -> docker --platform / conventional ARCH build-arg.
+_DEV_CONTAINER_UNAME_M := $(shell uname -m)
+ifneq ($(filter $(_DEV_CONTAINER_UNAME_M),arm64 aarch64),)
+  _DEV_CONTAINER_PLATFORM := linux/arm64
+  _DEV_CONTAINER_ARCH := aarch64
 else
-
-DEV_CONTAINER_REGISTRY ?= registry.ddbuild.io
-DEV_CONTAINER_IMAGE_NAME ?= $(DEV_CONTAINER_REGISTRY)/ci/inject-browser-sdk/devcontainer
-DEV_CONTAINER_HASH := $(shell cat $(DEV_CONTAINER_DIR)/Dockerfile $(DEV_CONTAINER_REPO_ROOT)/rust-toolchain.toml | (command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256) | cut -c1-12)
-DEV_CONTAINER_TAG := $(DEV_CONTAINER_HASH)
-DEV_CONTAINER_IMAGE := $(DEV_CONTAINER_IMAGE_NAME):$(DEV_CONTAINER_TAG)
-
-DEVCONTAINER_RUN = docker run --rm \
-	-v $(DEV_CONTAINER_REPO_ROOT):$(DEV_CONTAINER_REPO_ROOT) \
-	-w $(DEV_CONTAINER_REPO_ROOT) \
-	$(DEV_CONTAINER_IMAGE)
-
-# Build the dev container image only if the tag doesn't already exist locally.
-# Removes stale images with different tags first.
-.PHONY: dev-image
-dev-image:
-	@if ! docker image inspect $(DEV_CONTAINER_IMAGE) >/dev/null 2>&1; then \
-		stale=$$(docker images --format '{{.Repository}}:{{.Tag}}' $(DEV_CONTAINER_IMAGE_NAME) 2>/dev/null | grep -v '$(DEV_CONTAINER_TAG)$$'); \
-		if [ -n "$$stale" ]; then \
-			echo "Removing stale dev container image(s): $$stale"; \
-			docker rmi $$stale; \
-		fi; \
-		echo "Building dev container image $(DEV_CONTAINER_IMAGE)..."; \
-		docker buildx build \
-			--build-context repo=$(DEV_CONTAINER_REPO_ROOT) \
-			-t $(DEV_CONTAINER_IMAGE) \
-			$(DEV_CONTAINER_DIR); \
-	fi
-
-.PHONY: dev-image-clean
-dev-image-clean:
-	@stale=$$(docker images --format '{{.Repository}}:{{.Tag}}' $(DEV_CONTAINER_IMAGE_NAME) 2>/dev/null | grep -v '$(DEV_CONTAINER_TAG)$$'); \
-	if [ -n "$$stale" ]; then \
-		echo "Removing stale dev container image(s): $$stale"; \
-		docker rmi $$stale; \
-	else \
-		echo "No stale dev container images found."; \
-	fi
-
+  _DEV_CONTAINER_PLATFORM := linux/amd64
+  _DEV_CONTAINER_ARCH := x86_64
 endif
+
+# Pass --build-arg ARCH only if the Dockerfile actually declares it.
+_DEV_CONTAINER_ARCH_ARG := $(shell grep -q '^ARG ARCH' $(_DEV_CONTAINER_DOCKERFILE) 2>/dev/null && echo --build-arg ARCH=$(_DEV_CONTAINER_ARCH))
+
+# Skip everything inside the container (no nested docker, no pull).
+_DEV_CONTAINER_INSIDE := $(shell [ -f /.dockerenv ] || [ -n "$$KUBERNETES_SERVICE_HOST" ] && echo 1)
+
+# Stage .devcontainer/context.files (+ optional context.filter) into $$ctx.
+# Caller sets $$ctx (and arranges cleanup if needed). Verifies Dockerfile
+# was staged.
+define _dev_container_stage_into_ctx
+if [ ! -f "$(_DEV_CONTAINER_CONTEXT_FILES)" ]; then \
+  echo "ERROR: $(_DEV_CONTAINER_CONTEXT_FILES) not found" >&2; exit 1; \
+fi; \
+if [ -f "$(_DEV_CONTAINER_CONTEXT_FILTER)" ]; then \
+  grep -Ev '^[[:space:]]*(#|$$)' "$(_DEV_CONTAINER_CONTEXT_FILES)" | \
+    rsync -aR --files-from=- --filter="merge $(_DEV_CONTAINER_CONTEXT_FILTER)" "$(DEV_CONTAINER_REPO_ROOT)/" "$$ctx/"; \
+else \
+  grep -Ev '^[[:space:]]*(#|$$)' "$(_DEV_CONTAINER_CONTEXT_FILES)" | \
+    rsync -aR --files-from=- "$(DEV_CONTAINER_REPO_ROOT)/" "$$ctx/"; \
+fi; \
+if [ ! -f "$$ctx/.devcontainer/Dockerfile" ]; then \
+  echo "ERROR: .devcontainer/Dockerfile not staged; check .devcontainer/context.files" >&2; \
+  exit 1; \
+fi
+endef
+
+# Stage into a fresh mktemp dir, cleaned up on shell exit. Sets $$ctx.
+define _dev_container_stage_context
+ctx=$$(mktemp -d); \
+trap 'rm -rf "$$ctx"' EXIT; \
+$(_dev_container_stage_into_ctx)
+endef
+
+# Compute the 12-char tag hash from the staged tree at $$ctx.
+define _dev_container_compute_tag
+tag=$$(cd "$$ctx" && find . -type f | LC_ALL=C sort | \
+  while IFS= read -r f; do printf -- '--- %s ---\n' "$$f"; cat "$$f"; done | \
+  sha256sum | cut -c1-12)
+endef
+
+# Git-worktree support: when .git is a gitdir pointer, make the common dir
+# visible inside the container so `git` calls work.
+_DEV_CONTAINER_GIT_COMMON_DIR := $(shell cd $(DEV_CONTAINER_REPO_ROOT) && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+_DEV_CONTAINER_DEFAULT_GIT_DIR := $(DEV_CONTAINER_REPO_ROOT)/.git
+ifneq ($(_DEV_CONTAINER_GIT_COMMON_DIR),)
+  ifneq ($(_DEV_CONTAINER_GIT_COMMON_DIR),$(_DEV_CONTAINER_DEFAULT_GIT_DIR))
+    _DEV_CONTAINER_WORKTREE_MOUNT := -v $(_DEV_CONTAINER_GIT_COMMON_DIR):$(_DEV_CONTAINER_GIT_COMMON_DIR)
+  endif
+endif
+
+# Precondition check for caller-declared required paths.
+ifneq ($(strip $(DEV_CONTAINER_REQUIRED_PATHS)),)
+  _DEV_CONTAINER_MISSING_PATHS := $(foreach p,$(DEV_CONTAINER_REQUIRED_PATHS),$(if $(wildcard $(DEV_CONTAINER_REPO_ROOT)/$(p)),,$(p)))
+  ifneq ($(strip $(_DEV_CONTAINER_MISSING_PATHS)),)
+    $(error Missing required paths (did you init submodules?): $(_DEV_CONTAINER_MISSING_PATHS))
+  endif
+endif
+
+.PHONY: dev-image dev-shell dev-image-tag \
+        .devcontainer-stage-context .devcontainer-image-hash
+
+# Stage the build context into a stable path under .devcontainer/.staged/.
+# Invoked from VS Code's initializeCommand (so build.context = `.staged`
+# gets the same narrow tree CI and `make dev-image` use) and from
+# devcontainer.yml's CI job. Hash-computing local targets keep using a
+# mktemp dir for parallel safety; this one writes to a stable path
+# because VS Code (and CI's downstream buildx step) need one.
+.devcontainer-stage-context:
+	@rm -rf "$(_DEV_CONTAINER_STAGED)"
+	@mkdir -p "$(_DEV_CONTAINER_STAGED)"
+	@ctx="$(_DEV_CONTAINER_STAGED)"; $(_dev_container_stage_into_ctx)
+
+# Print the 12-char hash of the already-staged .devcontainer/.staged/ tree.
+# Caller must have run `make .devcontainer-stage-context` first. Used by
+# devcontainer.yml so the tag is computed by the same code that the local
+# Makefile uses.
+.devcontainer-image-hash:
+	@ctx="$(_DEV_CONTAINER_STAGED)"; \
+	test -d "$$ctx" || { echo "ERROR: $$ctx not staged; run 'make .devcontainer-stage-context' first" >&2; exit 1; }; \
+	$(_dev_container_compute_tag); \
+	echo "$$tag"
+
+# Print the full image:tag that would be used. Useful for debugging.
+# Works inside or outside a container (no docker required).
+dev-image-tag:
+	@$(_dev_container_stage_context); \
+	$(_dev_container_compute_tag); \
+	echo "$(DEV_CONTAINER_IMAGE_NAME):$$tag"
+
+# Shared mounts for any in-container invocation: the repo root, plus the
+# git common dir when running inside a worktree (so `git` works).
+_DEV_CONTAINER_MOUNTS := \
+  -v $(DEV_CONTAINER_REPO_ROOT):$(DEV_CONTAINER_REPO_ROOT) \
+  $(_DEV_CONTAINER_WORKTREE_MOUNT) \
+  -w $(DEV_CONTAINER_REPO_ROOT)
+
+# Public: prefix for running a scripted command in the devcontainer image.
+# Includes the resolved image ref and `-i` (so stdin pipes work) but no
+# `-t` (so it works under `make` / CI without a TTY). Usage:
+#   foo: dev-image
+#   	$(IN_DEVCONTAINER) cmd args
+# When `make` is invoked from inside a container, IN_DEVCONTAINER is empty,
+# so the command runs in-place — same recipe works inside or outside.
+IN_DEVCONTAINER ?= docker run --rm -i $(_DEV_CONTAINER_MOUNTS) \
+  $$(cat $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref)
+
+ifeq ($(_DEV_CONTAINER_INSIDE),1)
+  IN_DEVCONTAINER :=
+endif
+
+# Targets whose behaviour differs inside vs outside a container.
+# Inside: dev-image is a no-op (already running on it); dev-shell fails
+# loudly because there's no docker daemon.
+ifeq ($(_DEV_CONTAINER_INSIDE),1)
+
+dev-image:
+	@:
+
+dev-shell:
+	@echo "make dev-shell: already inside the devcontainer; run /bin/sh directly" >&2; exit 1
+
+else # _DEV_CONTAINER_INSIDE
+
+# Pull the image if available; otherwise build locally from the staged context.
+dev-image:
+	@$(_dev_container_stage_context); \
+	$(_dev_container_compute_tag); \
+	ref="$(DEV_CONTAINER_IMAGE_NAME):$$tag"; \
+	if docker pull "$$ref" >/dev/null 2>&1; then \
+	  echo "Pulled $$ref"; \
+	else \
+	  echo "Pull miss; building $$ref locally"; \
+	  docker buildx build \
+	    --platform $(_DEV_CONTAINER_PLATFORM) \
+	    --file "$$ctx/.devcontainer/Dockerfile" \
+	    --build-context repo="$$ctx" \
+	    $(_DEV_CONTAINER_ARCH_ARG) \
+	    $(DOCKER_BUILDX_FLAGS) \
+	    --load -t "$$ref" \
+	    "$$ctx"; \
+	fi; \
+	echo "$$ref" > $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref
+
+# Interactive shell in the built image. Mirrors IN_DEVCONTAINER but with
+# `-it` for terminal handling.
+dev-shell: dev-image
+	@ref=$$(cat $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref); \
+	docker run --rm -it $(_DEV_CONTAINER_MOUNTS) "$$ref" /bin/sh
+
+endif # _DEV_CONTAINER_INSIDE

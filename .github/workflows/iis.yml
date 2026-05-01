@@ -43,6 +43,8 @@ jobs:
   test-iis:
     needs: build-iis
     runs-on: windows-2022
+    env:
+      DOCKER_HOST: npipe:////./pipe/docker_engine_windows
     defaults:
       run:
         shell: pwsh

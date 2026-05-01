@@ -15,9 +15,9 @@ import (
   "strings"
   "testing"
 
-  "github.com/DataDog/datadog-agent/test/new-e2e/pkg/e2e"
-  "github.com/DataDog/datadog-agent/test/new-e2e/pkg/environments"
-  awsHostWindows "github.com/DataDog/datadog-agent/test/new-e2e/pkg/environments/aws/host/windows"
+  "github.com/DataDog/datadog-agent/test/e2e-framework/testing/e2e"
+  "github.com/DataDog/datadog-agent/test/e2e-framework/testing/environments"
+  awsHostWindows "github.com/DataDog/datadog-agent/test/e2e-framework/testing/provisioners/aws/host/windows"
   "github.com/DataDog/datadog-agent/test/new-e2e/tests/windows"
   windowsCommon "github.com/DataDog/datadog-agent/test/new-e2e/tests/windows/common"
   commonAgent "github.com/DataDog/datadog-agent/test/new-e2e/tests/windows/common/agent"

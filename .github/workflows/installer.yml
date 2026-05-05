@@ -1,0 +1,108 @@
+name: installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'installer/**'
+      - '.github/workflows/installer.yml'
+  pull_request:
+    paths:
+      - 'installer/**'
+      - '.github/workflows/installer.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Run shellcheck
+        run: find installer/ -type f -executable | xargs shellcheck
+
+  build-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: installer/configurator/go.mod
+      - name: Build configurator (amd64)
+        run: CGO_ENABLED=0 go -C ./installer/configurator build -o proxy-configurator
+      - name: Upload proxy-configurator (amd64)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proxy-configurator-amd64
+          path: installer/configurator/proxy-configurator
+      - name: Upload install-proxy-datadog.sh (amd64)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: install-proxy-datadog-amd64
+          path: installer/install-proxy-datadog.sh
+
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: installer/configurator/go.mod
+      - name: Test configurator
+        run: go test -C ./installer/configurator -v
+      - name: Build configurator (arm64)
+        run: CGO_ENABLED=0 go -C ./installer/configurator build -o proxy-configurator
+      - name: Upload proxy-configurator (arm64)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proxy-configurator-arm64
+          path: installer/configurator/proxy-configurator
+      - name: Upload install-proxy-datadog.sh (arm64)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: install-proxy-datadog-arm64
+          path: installer/install-proxy-datadog.sh
+
+  installer-test:
+    needs: [build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { proxy-kind: nginx, base-dockerfile: nginx.bookworm.Dockerfile }
+          - { proxy-kind: nginx, base-dockerfile: nginx.alpine.Dockerfile }
+          - { proxy-kind: nginx, base-dockerfile: nginx.al2023.Dockerfile }
+          - { proxy-kind: httpd, base-dockerfile: httpd.bookworm.Dockerfile }
+          - { proxy-kind: httpd, base-dockerfile: httpd.alpine.Dockerfile }
+          - { proxy-kind: httpd, base-dockerfile: httpd.al2023.Dockerfile }
+    env:
+      DD_API_KEY: fakekey
+      PROXY_KIND: ${{ matrix.proxy-kind }}
+      PROXY_DOCKERFILE: ${{ matrix.base-dockerfile }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Download proxy-configurator (amd64)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: proxy-configurator-amd64
+          path: installer
+      - name: Make proxy-configurator executable
+        run: chmod +x installer/proxy-configurator
+      - name: Run installer tests
+        run: docker compose -f installer/test/docker-compose.yml up --build --exit-code-from proxy
+
+  installer-download-test:
+    runs-on: ubuntu-latest
+    env:
+      DD_API_KEY: fakekey
+      NGINX_DOCKERFILE: nginx.bookworm.Dockerfile
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Run installer download tests
+        run: docker compose -f installer/test/docker-compose-download.yml up --build --exit-code-from nginx

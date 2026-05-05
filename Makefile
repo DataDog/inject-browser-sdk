@@ -1,4 +1,3 @@
-CIRCLE_CFG ?= .circleci/continue_config.yml
 COMMIT_SHA ?= $(shell git rev-parse --short HEAD)
 DOCKER_REPO ?= ghcr.io/datadog/inject-browser-sdk
 
@@ -13,13 +12,6 @@ format:
 .PHONY: doc
 doc:
 	./scripts/generate-documentation.sh
-
-.PHONY: circleci-config
-circleci-config:
-	@echo "Compiling circleci config"
-	circleci config pack .circleci/src > $(CIRCLE_CFG)
-	@echo "Validating circleci config"
-	circleci config validate $(CIRCLE_CFG)
 
 .PHONY: push-ci-images
 push-ci-images:

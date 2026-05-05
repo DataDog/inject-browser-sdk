@@ -1,0 +1,5 @@
+name: dd
+runtime: go
+description: Generic Pulumi.yaml used by `pulumi plugin install` to pre-fetch the providers needed by the e2e tests in CI.
+config:
+  pulumi:disable-default-providers: ["*"]

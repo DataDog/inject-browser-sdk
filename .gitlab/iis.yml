@@ -1,8 +1,10 @@
 ---
 variables:
   WINDOWS_BUILD_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64:v105206457-cb3f8790
-  # Make sure to update test-infra-definitions version in go.mod as well
-  E2E_RUNNER_IMAGE: registry.ddbuild.io/ci/test-infra-definitions/runner:ef809e329658
+  # Generic Linux build image; the e2e job installs Pulumi + plugins itself
+  # rather than relying on a bespoke test-infra-definitions runner image
+  # (mirrors DataDog/datadog-agent#42832).
+  E2E_LINUX_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/linux:v105206457-cb3f8790
   IIS_AGENT_DEPLOY_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/gitlab_agent_deploy:v105206457-cb3f8790
   ARTIFACTS_DIR: artifacts
 
@@ -143,14 +145,32 @@ injector_IIS_unit_test_linux_wine:
     max: 2
     when:
       - script_failure
-  image: $E2E_RUNNER_IMAGE
+  image: $E2E_LINUX_IMAGE
   variables:
     AWS_SSM_PREFIX: "ci.inject-browser-sdk."
     KEY_PAIR_NAME: "ci.inject-browser-sdk"
     KUBERNETES_MEMORY_REQUEST: 12Gi
     KUBERNETES_MEMORY_LIMIT: 16Gi
     E2E_OUTPUT_DIR: $CI_PROJECT_DIR/e2e-output
+    PULUMI_CONFIG_PASSPHRASE: dummy
+    # Keep pulumi state inside the workspace so GitLab can cache it between
+    # jobs (the bespoke test-infra-definitions runner image used to ship the
+    # plugins pre-baked; we need to download them ourselves now and avoid
+    # GitHub release-API rate limits on every job).
+    PULUMI_HOME: $CI_PROJECT_DIR/.pulumi-home
+  cache:
+    key:
+      files:
+        - injector_IIS/test/e2e_tests/go.mod
+    paths:
+      - .pulumi-home/plugins/
   before_script:
+    # Pre-fetch the Pulumi providers used by the e2e scenarios. Pulumi itself
+    # is provided by the datadog-agent-buildimages/linux image; only the
+    # provider plugins need to be installed per-job. The GitLab cache above
+    # keeps them across jobs once they've been downloaded once for a given
+    # go.mod.
+    - (cd injector_IIS/test/e2e_tests && pulumi --non-interactive plugin install)
     # Read AWS config for agent-qa role from ddbuild's SSM, and then assume agent-qa role
     - mkdir -p ~/.aws
     - aws ssm get-parameter --region us-east-1 --name "${AWS_SSM_PREFIX}agent-qa-profile" --with-decryption --query "Parameter.Value" --out text >> ~/.aws/config

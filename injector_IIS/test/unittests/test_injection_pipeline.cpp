@@ -359,6 +359,7 @@ class MockAdminManager : public IAppHostAdminManager {
 
 class MockModuleContextContainer : public IHttpModuleContextContainer {
   IHttpStoredContext* ctx_ = nullptr;
+  IHttpStoredContext* race_winner_ = nullptr;
   HRESULT set_result_ = S_OK;
 
  public:
@@ -370,10 +371,24 @@ class MockModuleContextContainer : public IHttpModuleContextContainer {
 
   void SetModuleContextResult(HRESULT hr) { set_result_ = hr; }
 
+  // Simulates a race where another thread cached `winner` between the caller's
+  // GetModuleContext (which returned null) and SetModuleContext: the SetModule
+  // call rejects with ERROR_ALREADY_ASSIGNED, and a subsequent GetModule call
+  // returns the winner.
+  void SimulateRaceWith(IHttpStoredContext* winner) {
+    race_winner_ = winner;
+    set_result_ = HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED);
+  }
+
   IHttpStoredContext* GetModuleContext(HTTP_MODULE_ID) override { return ctx_; }
   HRESULT SetModuleContext(IHttpStoredContext* ctx, HTTP_MODULE_ID) override {
     if (set_result_ == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
-      // Simulate race: keep existing ctx, reject the new one.
+      // Simulate race: pretend another thread inserted its context first so
+      // the next GetModuleContext call sees the winner.
+      if (race_winner_ != nullptr) {
+        ctx_ = race_winner_;
+        race_winner_ = nullptr;
+      }
       return set_result_;
     }
     if (FAILED(set_result_)) {
@@ -783,9 +798,11 @@ TEST(InjectionPipeline, SetModuleContextRace) {
   CHttpModule* httpMod = nullptr;
   mod.factory->GetHttpModule(&httpMod, nullptr);
 
-  // Pre-populate the metadata container with its own snippet (simulating
-  // another thread that already cached a context for this path), then make
-  // SetModuleContext return ERROR_ALREADY_ASSIGNED.
+  // Simulate the race the production code is trying to handle: this thread's
+  // GetModuleContext returns null (cache miss), so it builds new_ctx and
+  // calls SetModuleContext, which is rejected with ERROR_ALREADY_ASSIGNED
+  // because another thread inserted winner_ctx first. The second
+  // GetModuleContext then returns winner_ctx.
   MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
   auto* winner_ctx = new ModuleContext;
   auto* app_ctx = static_cast<ModuleContext*>(
@@ -795,9 +812,7 @@ TEST(InjectionPipeline, SetModuleContextRace) {
       R"({"majorVersion":5,"rum":{"applicationId":"test-app-id","clientToken":"test-client-token","service":"test-service","sessionSampleRate":100}})");
   ASSERT_NE(winner_ctx->snippet, nullptr);
   ASSERT_EQ(winner_ctx->snippet->error_code, 0u);
-  metadata.Container().PrePopulate(winner_ctx);
-  metadata.Container().SetModuleContextResult(
-      HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED));
+  metadata.Container().SimulateRaceWith(winner_ctx);
 
   const char* html = "<html><head></head><body>Hello</body></html>";
   MockHttpContext httpCtx;

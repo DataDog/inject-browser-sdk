@@ -316,14 +316,15 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path,
   return {ReadConfStatus::Ok, RumConfig{cfg_version, std::move(rum_sdk_opts)}};
 }
 
-void update_module_context(ModuleContext& ctx, const IHttpServer& server,
-                           PCWSTR config_path, Logger& logger) {
+ReadConfStatus update_module_context(ModuleContext& ctx,
+                                     const IHttpServer& server,
+                                     PCWSTR config_path, Logger& logger) {
   auto result = read_conf(server, config_path, logger);
   if (result.status == ReadConfStatus::Error) {
     // Transient COM error — keep existing config so a subsequent
     // OnGlobalConfigurationChange can retry and self-heal.
     logger.info("Keeping existing config after transient read error");
-    return;
+    return result.status;
   }
   if (result.status == ReadConfStatus::Absent) {
     // Config definitively missing or disabled — clear snippet.
@@ -333,7 +334,7 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server,
     }
     ctx.application_id_tag.clear();
     ctx.remote_config_tag.clear();
-    return;
+    return result.status;
   }
 
   auto& config = *result.config;
@@ -347,7 +348,7 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server,
     }
     ctx.application_id_tag.clear();
     ctx.remote_config_tag.clear();
-    return;
+    return result.status;
   }
   if (snippet->error_code != 0) {
     logger.error(std::format("Failed to create RUM snippet: {}",
@@ -359,7 +360,7 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server,
     }
     ctx.application_id_tag.clear();
     ctx.remote_config_tag.clear();
-    return;
+    return result.status;
   }
 
   logger.info("Configuration validated");
@@ -376,6 +377,7 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server,
 
   auto rcUsed = config.sdk_options.count("remoteConfigurationId") > 0;
   ctx.remote_config_tag = std::format("remote_config_used:{}", rcUsed);
+  return result.status;
 }
 
 }  // namespace datadog::rum

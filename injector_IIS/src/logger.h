@@ -77,21 +77,32 @@ class Logger : public datadog::tracing::Logger {
                     DWORD id) const {
     if (m_eventLog == nullptr) return;
 
-    const int wide_len =
-        MultiByteToWideChar(CP_UTF8, 0, message.c_str(),
+    // Most messages are UTF-8 (RUM/SDK), but some come from
+    // std::system_category().message(...) and other Windows sources, which
+    // are encoded in the active ANSI code page. Try UTF-8 first and fall
+    // back to CP_ACP so a non-UTF-8 byte doesn't blank out the event.
+    UINT code_page = CP_UTF8;
+    int wide_len =
+        MultiByteToWideChar(code_page, MB_ERR_INVALID_CHARS, message.c_str(),
                             static_cast<int>(message.size()), nullptr, 0);
     if (wide_len <= 0) {
-      LPCWSTR fallback = L"[UTF-8 conversion failed]";
+      code_page = CP_ACP;
+      wide_len =
+          MultiByteToWideChar(code_page, 0, message.c_str(),
+                              static_cast<int>(message.size()), nullptr, 0);
+    }
+    if (wide_len <= 0) {
+      LPCWSTR fallback = L"[message conversion failed]";
       ReportEventW(m_eventLog, type, category, id, nullptr, 1, 0, &fallback,
                    nullptr);
       return;
     }
 
     std::wstring wide(wide_len, L'\0');
-    if (MultiByteToWideChar(CP_UTF8, 0, message.c_str(),
+    if (MultiByteToWideChar(code_page, 0, message.c_str(),
                             static_cast<int>(message.size()), wide.data(),
                             wide_len) == 0) {
-      LPCWSTR fallback = L"[UTF-8 conversion failed]";
+      LPCWSTR fallback = L"[message conversion failed]";
       ReportEventW(m_eventLog, type, category, id, nullptr, 1, 0, &fallback,
                    nullptr);
       return;

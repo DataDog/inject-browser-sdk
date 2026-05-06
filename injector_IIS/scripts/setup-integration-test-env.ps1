@@ -87,7 +87,16 @@ function Ensure-Uv {
     Invoke-WebRequest -Uri "https://astral.sh/uv/install.ps1" -OutFile $installScript -UseBasicParsing
     & $installScript
 
-    # Add to PATH for the current process so subsequent commands find it
+    # Persist to the user PATH so subsequent processes (e.g. run-integration-tests.ps1)
+    # find uv even though they are launched from a separate parent shell.
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $userPathEntries = if ($userPath) { $userPath -split ';' | Where-Object { $_ } } else { @() }
+    if ($userPathEntries -notcontains $env:UV_INSTALL_DIR) {
+        $newUserPath = if ($userPath) { "$env:UV_INSTALL_DIR;$userPath" } else { $env:UV_INSTALL_DIR }
+        [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+    }
+
+    # Also add to PATH for the current process so subsequent commands find it.
     $env:PATH = "$env:UV_INSTALL_DIR;$env:PATH"
 
     if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
@@ -336,7 +345,7 @@ if ($MsiPath) {
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
     )
     $existing = Get-ItemProperty $uninstallPaths -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName -like '*Datadog RUM*' } |
+        Where-Object { $_.DisplayName -like 'Datadog RUM *' } |
         Select-Object -First 1
     if ($existing) {
         $productCode = $existing.PSChildName

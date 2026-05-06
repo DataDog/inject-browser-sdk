@@ -44,10 +44,13 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
 
 std::optional<ServerConfig> read_server_conf(const IHttpServer& server, Logger& logger);
 
-// Reads config for the given path and updates ctx.snippet/tags. When config
-// is missing, invalid, or disabled, clears the existing snippet to disable
-// injection.
-void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR config_path,
-                           Logger& logger);
+// Reads config for the given path and updates ctx.snippet/tags according to
+// the read result: Ok refreshes from the new config, Absent (missing or
+// explicitly disabled) clears the existing snippet, and Error preserves the
+// existing snippet/tags so a transient COM failure can self-heal on retry.
+// Returns the underlying read status so callers can avoid caching contexts
+// produced by transient failures.
+ReadConfStatus update_module_context(ModuleContext& ctx, const IHttpServer& server,
+                                     PCWSTR config_path, Logger& logger);
 
 }  // namespace datadog::rum

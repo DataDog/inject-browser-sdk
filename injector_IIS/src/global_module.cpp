@@ -157,9 +157,11 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
       continue;
     }
 
-    // NOTE: update_module_context disables injection when config is missing or
-    // invalid — this is intentional so that removing the datadogRum section
-    // actually stops injection rather than leaving stale config active.
+    // NOTE: update_module_context disables injection when the config is
+    // missing or explicitly disabled — this is intentional so that removing
+    // the datadogRum section actually stops injection rather than leaving
+    // stale config active. Transient COM errors preserve the existing config
+    // so a later config-change event can self-heal.
     if (std::wstring_view(path).starts_with(cfg_path)) {
       update_module_context(*ctx, *server_, path.c_str(), *logger_);
     }

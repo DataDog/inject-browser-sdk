@@ -134,29 +134,36 @@ HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvid
           new_ctx->logger = app_ctx.logger;
           new_ctx->server = app_ctx.server;
 
-          update_module_context(*new_ctx, *app_ctx.server, meta_path, *app_ctx.logger);
+          auto status =
+              update_module_context(*new_ctx, *app_ctx.server, meta_path, *app_ctx.logger);
 
-          // Inherit app-level tags if per-location config didn't set its own.
-          if (new_ctx->application_id_tag.empty())
-            new_ctx->application_id_tag = app_ctx.application_id_tag;
-          if (new_ctx->remote_config_tag.empty())
-            new_ctx->remote_config_tag = app_ctx.remote_config_tag;
+          // Transient read failure: don't cache the empty per-location ctx.
+          // Fall back to app_ctx so the next request can retry the read
+          // instead of being pinned to "RUM disabled" until IIS recycles.
+          if (status != ReadConfStatus::Error) {
+            // Inherit app-level tags if per-location config didn't set its
+            // own.
+            if (new_ctx->application_id_tag.empty())
+              new_ctx->application_id_tag = app_ctx.application_id_tag;
+            if (new_ctx->remote_config_tag.empty())
+              new_ctx->remote_config_tag = app_ctx.remote_config_tag;
 
-          auto hr = meta_container->SetModuleContext(new_ctx.get(), g_module_id);
-          if (SUCCEEDED(hr)) {
-            ctx = new_ctx.release();  // container owns it now
-          } else if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
-            // Another thread won the race — use its cached context.
-            // unique_ptr auto-deletes new_ctx.
-            ctx = static_cast<ModuleContext*>(meta_container->GetModuleContext(g_module_id));
-            if (!ctx) {
-              app_ctx.logger->error("Race condition: cached context disappeared");
+            auto hr = meta_container->SetModuleContext(new_ctx.get(), g_module_id);
+            if (SUCCEEDED(hr)) {
+              ctx = new_ctx.release();  // container owns it now
+            } else if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
+              // Another thread won the race — use its cached context.
+              // unique_ptr auto-deletes new_ctx.
+              ctx = static_cast<ModuleContext*>(meta_container->GetModuleContext(g_module_id));
+              if (!ctx) {
+                app_ctx.logger->error("Race condition: cached context disappeared");
+                return RQ_NOTIFICATION_CONTINUE;
+              }
+            } else {
+              app_ctx.logger->error(std::format("Failed to cache per-location context: {}",
+                                                std::system_category().message(hr)));
               return RQ_NOTIFICATION_CONTINUE;
             }
-          } else {
-            app_ctx.logger->error(std::format("Failed to cache per-location context: {}",
-                                              std::system_category().message(hr)));
-            return RQ_NOTIFICATION_CONTINUE;
           }
         }
       }

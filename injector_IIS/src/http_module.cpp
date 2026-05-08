@@ -192,10 +192,11 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
 
   // IIS does not NUL-terminate the header buffer, so guard the prefix length
   // against the explicit string_view size before calling _strnicmp.
+  static constexpr std::string_view kHtmlPrefix = "text/html";
   const std::string_view content_type = get_header(pHttpResponse, "Content-Type");
-  if (content_type.size() < 9 ||
+  if (content_type.size() < kHtmlPrefix.size() ||
       _strnicmp(content_type.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
-                "text/html", 9) != 0) {
+                kHtmlPrefix.data(), kHtmlPrefix.size()) != 0) {
     datadog::telemetry::counter::increment(
         telemetry::injection_skipped,
         telemetry::build_tags("reason:content-type", ctx.application_id_tag,

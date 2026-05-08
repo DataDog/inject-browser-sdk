@@ -86,9 +86,9 @@ class MockHttpContext : public IHttpContext {
   VOID* m_allocatedMemory;
 
  public:
-  MockHttpContext() : m_allocatedMemory(NULL) {};
+  MockHttpContext() : m_allocatedMemory(nullptr) {};
   ~MockHttpContext() {
-    if (m_allocatedMemory != NULL) free(m_allocatedMemory);
+    if (m_allocatedMemory != nullptr) free(m_allocatedMemory);
   };
 
   MOCK_METHOD(IHttpSite*, GetSite, (), (override));

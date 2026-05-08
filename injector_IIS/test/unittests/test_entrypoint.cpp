@@ -13,20 +13,16 @@ using ::testing::DoAll;
 using ::testing::Return;
 using ::testing::SaveArg;
 
-TEST(TestRegisterModule,
-     TestRegistersForBeginRequestAndSendResponseNotifications) {
+TEST(TestRegisterModule, TestRegistersForBeginRequestAndSendResponseNotifications) {
   MockModule module;
   MockServer server;
 
   EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(nullptr));
 
-  EXPECT_CALL(module, SetGlobalNotifications(_, GL_APPLICATION_START |
-                                                    GL_CONFIGURATION_CHANGE |
-                                                    GL_APPLICATION_STOP))
+  EXPECT_CALL(module, SetGlobalNotifications(
+                          _, GL_APPLICATION_START | GL_CONFIGURATION_CHANGE | GL_APPLICATION_STOP))
       .Times(1);
-  EXPECT_CALL(module, SetRequestNotifications(
-                          _, RQ_SEND_RESPONSE | RQ_BEGIN_REQUEST, _))
-      .Times(1);
+  EXPECT_CALL(module, SetRequestNotifications(_, RQ_SEND_RESPONSE | RQ_BEGIN_REQUEST, _)).Times(1);
   EXPECT_CALL(module, GetId()).Times(1);
 
   auto result = RegisterModule(0, &module, &server);

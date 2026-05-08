@@ -26,8 +26,7 @@ class GlobalModule final : public CGlobalModule {
   std::map<std::wstring, ModuleContext*> configurations_;
 
  public:
-  GlobalModule(IHttpServer* server, DWORD server_version,
-               std::shared_ptr<Logger> logger);
+  GlobalModule(IHttpServer* server, DWORD server_version, std::shared_ptr<Logger> logger);
   ~GlobalModule() = default;
   void Terminate() override;
 
@@ -41,8 +40,7 @@ class GlobalModule final : public CGlobalModule {
   OnGlobalApplicationStop(IHttpApplicationStopProvider* provider) override;
 
   GLOBAL_NOTIFICATION_STATUS
-  OnGlobalConfigurationChange(
-      IGlobalConfigurationChangeProvider* provider) override;
+  OnGlobalConfigurationChange(IGlobalConfigurationChangeProvider* provider) override;
 
  private:
   void update_server_log_level();

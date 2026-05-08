@@ -51,26 +51,24 @@ class Logger : public datadog::tracing::Logger {
   virtual void info(std::string message) {
     if (!should_log(LogLevel::Info)) return;
 
-    report_event(std::move(message), EVENTLOG_INFORMATION_TYPE,
-                 INJECTOR_CATEGORY, MSG_GENERIC_INFO);
+    report_event(std::move(message), EVENTLOG_INFORMATION_TYPE, INJECTOR_CATEGORY,
+                 MSG_GENERIC_INFO);
   }
 
   virtual void debug(std::string message) {
     if (!should_log(LogLevel::Debug)) return;
 
-    report_event(std::move(message), EVENTLOG_INFORMATION_TYPE,
-                 INJECTOR_CATEGORY, MSG_GENERIC_DEBUG);
+    report_event(std::move(message), EVENTLOG_INFORMATION_TYPE, INJECTOR_CATEGORY,
+                 MSG_GENERIC_DEBUG);
   }
 
   virtual void error(std::string message) {
     if (!should_log(LogLevel::Error)) return;
 
-    report_event(std::move(message), EVENTLOG_ERROR_TYPE, INJECTOR_CATEGORY,
-                 MSG_GENERIC_ERROR);
+    report_event(std::move(message), EVENTLOG_ERROR_TYPE, INJECTOR_CATEGORY, MSG_GENERIC_ERROR);
   }
 
-  void report_event(std::string message, WORD type, WORD category,
-                    DWORD id) const {
+  void report_event(std::string message, WORD type, WORD category, DWORD id) const {
     if (m_eventLog == nullptr) return;
 
     LPCSTR szNotification = message.c_str();
@@ -95,23 +93,21 @@ class Logger : public datadog::tracing::Logger {
     m_stream.str("");
 
     f(m_stream);
-    report_event(m_stream.str(), EVENTLOG_ERROR_TYPE, TRACER_CATEGORY,
-                 MSG_GENERIC_ERROR);
+    report_event(m_stream.str(), EVENTLOG_ERROR_TYPE, TRACER_CATEGORY, MSG_GENERIC_ERROR);
   }
 
   void log_error(const datadog::tracing::Error& error) override {
     if (!should_log(LogLevel::Error)) return;
 
-    report_event(std::format("[dd-trace-cpp error code {}] {}",
-                             static_cast<int>(error.code), error.message),
-                 EVENTLOG_ERROR_TYPE, TRACER_CATEGORY, MSG_GENERIC_ERROR);
+    report_event(
+        std::format("[dd-trace-cpp error code {}] {}", static_cast<int>(error.code), error.message),
+        EVENTLOG_ERROR_TYPE, TRACER_CATEGORY, MSG_GENERIC_ERROR);
   }
 
   void log_error(datadog::tracing::StringView sv) override {
     if (!should_log(LogLevel::Error)) return;
 
-    report_event(std::string(sv), EVENTLOG_ERROR_TYPE, TRACER_CATEGORY,
-                 MSG_GENERIC_ERROR);
+    report_event(std::string(sv), EVENTLOG_ERROR_TYPE, TRACER_CATEGORY, MSG_GENERIC_ERROR);
   }
 };
 }  // namespace datadog::rum

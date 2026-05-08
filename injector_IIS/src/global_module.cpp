@@ -30,13 +30,12 @@ GlobalModule::GlobalModule(IHttpServer* server, DWORD server_version,
 
   auto maybe_telemetry_cfg = datadog::telemetry::finalize_config(cfg);
   if (auto error = maybe_telemetry_cfg.if_error()) {
-    logger_->error(std::format("Failed to configure the telemetry module: {}",
-                               error->message));
+    logger_->error(std::format("Failed to configure the telemetry module: {}", error->message));
   } else {
     const datadog::tracing::Clock& clock = datadog::tracing::default_clock;
     datadog::tracing::DatadogAgentConfig agent_cfg_for_telemetry;
-    auto finalized_agent_cfg_result = datadog::tracing::finalize_config(
-        agent_cfg_for_telemetry, logger_, clock);
+    auto finalized_agent_cfg_result =
+        datadog::tracing::finalize_config(agent_cfg_for_telemetry, logger_, clock);
     if (auto* error = finalized_agent_cfg_result.if_error()) {
       logger_->log_error(
           error->with_prefix("Failed to finalize agent settings for "
@@ -44,17 +43,15 @@ GlobalModule::GlobalModule(IHttpServer* server, DWORD server_version,
 
       return;
     }
-    datadog::tracing::FinalizedDatadogAgentConfig dac =
-        *finalized_agent_cfg_result;
+    datadog::tracing::FinalizedDatadogAgentConfig dac = *finalized_agent_cfg_result;
 
     if (!dac.http_client) {
-      logger_->error(
-          "HTTPClient for telemetry is null, no telemetry will be sent");
+      logger_->error("HTTPClient for telemetry is null, no telemetry will be sent");
       return;
     }
 
-    datadog::telemetry::init(*maybe_telemetry_cfg, logger_, dac.http_client,
-                             dac.event_scheduler, dac.url, clock);
+    datadog::telemetry::init(*maybe_telemetry_cfg, logger_, dac.http_client, dac.event_scheduler,
+                             dac.url, clock);
   }
 }
 
@@ -68,8 +65,7 @@ void GlobalModule::update_server_log_level() {
 void GlobalModule::Terminate() { delete this; }
 
 GLOBAL_NOTIFICATION_STATUS
-GlobalModule::OnGlobalApplicationStart(
-    IHttpApplicationStartProvider* provider) {
+GlobalModule::OnGlobalApplicationStart(IHttpApplicationStartProvider* provider) {
   assert(server_ != nullptr);
 
   auto ctx = std::make_unique<ModuleContext>();
@@ -85,11 +81,10 @@ GlobalModule::OnGlobalApplicationStart(
                             wstring_to_utf8(app->GetApplicationId())));
 
   update_module_context(*ctx, *server_, config_path, *logger_);
-  auto hr = app->GetModuleContextContainer()->SetModuleContext(ctx.get(),
-                                                               g_module_id);
+  auto hr = app->GetModuleContextContainer()->SetModuleContext(ctx.get(), g_module_id);
   if (FAILED(hr)) {
-    logger_->error(std::format("Failed to set app module context: {}",
-                               std::system_category().message(hr)));
+    logger_->error(
+        std::format("Failed to set app module context: {}", std::system_category().message(hr)));
     return GL_NOTIFICATION_CONTINUE;
   }
 
@@ -132,12 +127,11 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
     return GL_NOTIFICATION_CONTINUE;
   }
 
-  logger_->info(std::format("Dispatching configuration update (\"{}\")",
-                            wstring_to_utf8(cfg_path)));
+  logger_->info(
+      std::format("Dispatching configuration update (\"{}\")", wstring_to_utf8(cfg_path)));
 
   std::wstring_view change_path_view(cfg_path);
-  if (change_path_view.find(L"MACHINE/WEBROOT/APPHOST") !=
-      std::wstring_view::npos) {
+  if (change_path_view.find(L"MACHINE/WEBROOT/APPHOST") != std::wstring_view::npos) {
     update_server_log_level();
   }
 

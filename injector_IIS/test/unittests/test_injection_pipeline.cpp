@@ -38,9 +38,7 @@ class MockAppHostProperty : public IAppHostProperty {
   VARIANT value_;
 
  public:
-  MockAppHostProperty(LPCWSTR name, VARIANT val) : value_(val) {
-    name_ = SysAllocString(name);
-  }
+  MockAppHostProperty(LPCWSTR name, VARIANT val) : value_(val) { name_ = SysAllocString(name); }
   ~MockAppHostProperty() {
     SysFreeString(name_);
     VariantClear(&value_);
@@ -48,9 +46,7 @@ class MockAppHostProperty : public IAppHostProperty {
 
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
-  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override {
-    return E_NOINTERFACE;
-  }
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
 
   HRESULT STDMETHODCALLTYPE get_Name(BSTR* pName) override {
     *pName = SysAllocString(name_);
@@ -60,23 +56,14 @@ class MockAppHostProperty : public IAppHostProperty {
     return VariantCopy(pValue, &value_);
   }
   HRESULT STDMETHODCALLTYPE put_Value(VARIANT) override { return E_NOTIMPL; }
-  HRESULT STDMETHODCALLTYPE get_Schema(IAppHostPropertySchema**) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR, VARIANT*) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE SetMetadata(BSTR, VARIANT) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE
-  get_Exception(IAppHostPropertyException**) override {
+  HRESULT STDMETHODCALLTYPE get_Schema(IAppHostPropertySchema**) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR, VARIANT*) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE SetMetadata(BSTR, VARIANT) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE get_Exception(IAppHostPropertyException**) override {
     return E_NOTIMPL;
   }
   HRESULT STDMETHODCALLTYPE Clear() override { return E_NOTIMPL; }
-  HRESULT STDMETHODCALLTYPE get_StringValue(BSTR*) override {
-    return E_NOTIMPL;
-  }
+  HRESULT STDMETHODCALLTYPE get_StringValue(BSTR*) override { return E_NOTIMPL; }
 };
 
 static VARIANT bstr_variant(LPCWSTR s) {
@@ -110,37 +97,24 @@ class MockOptionElement : public IAppHostElement {
 
  public:
   MockOptionElement(LPCWSTR name, LPCWSTR value)
-      : name_prop_(L"name", bstr_variant(name)),
-        value_prop_(L"value", bstr_variant(value)) {}
+      : name_prop_(L"name", bstr_variant(name)), value_prop_(L"value", bstr_variant(value)) {}
 
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
-  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override {
-    return E_NOINTERFACE;
-  }
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
   HRESULT STDMETHODCALLTYPE get_Name(BSTR*) override { return E_NOTIMPL; }
-  HRESULT STDMETHODCALLTYPE
-  get_Collection(IAppHostElementCollection**) override {
+  HRESULT STDMETHODCALLTYPE get_Collection(IAppHostElementCollection**) override {
     return E_NOTIMPL;
   }
-  HRESULT STDMETHODCALLTYPE
-  get_ChildElements(IAppHostChildElementCollection**) override {
+  HRESULT STDMETHODCALLTYPE get_ChildElements(IAppHostChildElementCollection**) override {
     return E_NOTIMPL;
   }
-  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR, VARIANT*) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE SetMetadata(BSTR, VARIANT) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE get_Schema(IAppHostElementSchema**) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE GetElementByName(BSTR, IAppHostElement**) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE
-  GetPropertyByName(BSTR bstrName, IAppHostProperty** ppProperty) override {
+  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR, VARIANT*) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE SetMetadata(BSTR, VARIANT) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE get_Schema(IAppHostElementSchema**) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE GetElementByName(BSTR, IAppHostElement**) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE GetPropertyByName(BSTR bstrName,
+                                              IAppHostProperty** ppProperty) override {
     if (_wcsicmp(bstrName, L"name") == 0) {
       *ppProperty = &name_prop_;
       return S_OK;
@@ -152,36 +126,28 @@ class MockOptionElement : public IAppHostElement {
     *ppProperty = nullptr;
     return S_FALSE;
   }
-  HRESULT STDMETHODCALLTYPE
-  get_Properties(IAppHostPropertyCollection**) override {
+  HRESULT STDMETHODCALLTYPE get_Properties(IAppHostPropertyCollection**) override {
     return E_NOTIMPL;
   }
   HRESULT STDMETHODCALLTYPE Clear() override { return E_NOTIMPL; }
-  HRESULT STDMETHODCALLTYPE get_Methods(IAppHostMethodCollection**) override {
-    return E_NOTIMPL;
-  }
+  HRESULT STDMETHODCALLTYPE get_Methods(IAppHostMethodCollection**) override { return E_NOTIMPL; }
 };
 
 class MockElementCollection : public IAppHostElementCollection {
   std::vector<MockOptionElement>& elements_;
 
  public:
-  MockElementCollection(std::vector<MockOptionElement>& elems)
-      : elements_(elems) {}
+  MockElementCollection(std::vector<MockOptionElement>& elems) : elements_(elems) {}
 
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
-  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override {
-    return E_NOINTERFACE;
-  }
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
   HRESULT STDMETHODCALLTYPE get_Count(DWORD* pCount) override {
     *pCount = static_cast<DWORD>(elements_.size());
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE get_Item(VARIANT index,
-                                     IAppHostElement** ppElement) override {
-    DWORD i =
-        (index.vt == VT_UI4) ? index.ulVal : static_cast<DWORD>(index.iVal);
+  HRESULT STDMETHODCALLTYPE get_Item(VARIANT index, IAppHostElement** ppElement) override {
+    DWORD i = (index.vt == VT_UI4) ? index.ulVal : static_cast<DWORD>(index.iVal);
     if (i < elements_.size()) {
       *ppElement = &elements_[i];
       return S_OK;
@@ -189,19 +155,11 @@ class MockElementCollection : public IAppHostElementCollection {
     *ppElement = nullptr;
     return E_FAIL;
   }
-  HRESULT STDMETHODCALLTYPE AddElement(IAppHostElement*, INT) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE DeleteElement(VARIANT) override {
-    return E_NOTIMPL;
-  }
+  HRESULT STDMETHODCALLTYPE AddElement(IAppHostElement*, INT) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE DeleteElement(VARIANT) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE Clear() override { return E_NOTIMPL; }
-  HRESULT STDMETHODCALLTYPE CreateNewElement(BSTR, IAppHostElement**) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE get_Schema(IAppHostCollectionSchema**) override {
-    return E_NOTIMPL;
-  }
+  HRESULT STDMETHODCALLTYPE CreateNewElement(BSTR, IAppHostElement**) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE get_Schema(IAppHostCollectionSchema**) override { return E_NOTIMPL; }
 };
 
 // Root datadogRum config element — configurable enabled, version, options.
@@ -213,8 +171,7 @@ class MockRumConfigElement : public IAppHostElement {
 
  public:
   // Configurable constructor.
-  MockRumConfigElement(bool enabled,
-                       std::vector<std::pair<LPCWSTR, LPCWSTR>> opts)
+  MockRumConfigElement(bool enabled, std::vector<std::pair<LPCWSTR, LPCWSTR>> opts)
       : enabled_prop_(L"enabled", bool_variant(enabled)),
         version_prop_(L"version", int_variant(5)),
         collection_(options_) {
@@ -234,33 +191,21 @@ class MockRumConfigElement : public IAppHostElement {
 
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
-  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override {
-    return E_NOINTERFACE;
-  }
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
   HRESULT STDMETHODCALLTYPE get_Name(BSTR*) override { return E_NOTIMPL; }
-  HRESULT STDMETHODCALLTYPE
-  get_Collection(IAppHostElementCollection** ppCol) override {
+  HRESULT STDMETHODCALLTYPE get_Collection(IAppHostElementCollection** ppCol) override {
     *ppCol = &collection_;
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE
-  get_ChildElements(IAppHostChildElementCollection**) override {
+  HRESULT STDMETHODCALLTYPE get_ChildElements(IAppHostChildElementCollection**) override {
     return E_NOTIMPL;
   }
-  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR, VARIANT*) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE SetMetadata(BSTR, VARIANT) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE get_Schema(IAppHostElementSchema**) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE GetElementByName(BSTR, IAppHostElement**) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE
-  GetPropertyByName(BSTR bstrName, IAppHostProperty** ppProperty) override {
+  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR, VARIANT*) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE SetMetadata(BSTR, VARIANT) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE get_Schema(IAppHostElementSchema**) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE GetElementByName(BSTR, IAppHostElement**) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE GetPropertyByName(BSTR bstrName,
+                                              IAppHostProperty** ppProperty) override {
     if (_wcsicmp(bstrName, L"enabled") == 0) {
       *ppProperty = &enabled_prop_;
       return S_OK;
@@ -272,14 +217,11 @@ class MockRumConfigElement : public IAppHostElement {
     *ppProperty = nullptr;
     return S_FALSE;
   }
-  HRESULT STDMETHODCALLTYPE
-  get_Properties(IAppHostPropertyCollection**) override {
+  HRESULT STDMETHODCALLTYPE get_Properties(IAppHostPropertyCollection**) override {
     return E_NOTIMPL;
   }
   HRESULT STDMETHODCALLTYPE Clear() override { return E_NOTIMPL; }
-  HRESULT STDMETHODCALLTYPE get_Methods(IAppHostMethodCollection**) override {
-    return E_NOTIMPL;
-  }
+  HRESULT STDMETHODCALLTYPE get_Methods(IAppHostMethodCollection**) override { return E_NOTIMPL; }
 };
 
 // Path-aware admin manager: returns different config based on the config path
@@ -299,13 +241,10 @@ class MockAdminManager : public IAppHostAdminManager {
 
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
-  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override {
-    return E_NOINTERFACE;
-  }
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
 
-  HRESULT STDMETHODCALLTYPE
-  GetAdminSection(BSTR bstrSectionName, BSTR bstrPath,
-                  IAppHostElement** ppElement) override {
+  HRESULT STDMETHODCALLTYPE GetAdminSection(BSTR bstrSectionName, BSTR bstrPath,
+                                            IAppHostElement** ppElement) override {
     if (_wcsicmp(bstrSectionName, L"system.webServer/datadogRum") == 0) {
       // Look up by exact path first, then fall back to default.
       std::wstring path(bstrPath ? bstrPath : L"");
@@ -326,14 +265,9 @@ class MockAdminManager : public IAppHostAdminManager {
     *ppElement = nullptr;
     return E_FAIL;
   }
-  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR, VARIANT*) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE SetMetadata(BSTR, VARIANT) override {
-    return E_NOTIMPL;
-  }
-  HRESULT STDMETHODCALLTYPE
-  get_ConfigManager(IAppHostConfigManager**) override {
+  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR, VARIANT*) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE SetMetadata(BSTR, VARIANT) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE get_ConfigManager(IAppHostConfigManager**) override {
     return E_NOTIMPL;
   }
 };
@@ -364,9 +298,7 @@ class MockMetadataInfo : public IMetadataInfo {
   PCWSTR GetMetaPath() const override { return meta_path_.c_str(); }
   PCWSTR GetVrPath() const override { return L""; }
   IHttpTokenEntry* GetVrToken() override { return nullptr; }
-  IHttpModuleContextContainer* GetModuleContextContainer() override {
-    return &container_;
-  }
+  IHttpModuleContextContainer* GetModuleContextContainer() override { return &container_; }
 };
 
 // MockHttpApplication with configurable config path.
@@ -375,16 +307,13 @@ class MockAppWithContext : public IHttpApplication {
   std::wstring config_path_;
 
  public:
-  MockAppWithContext(
-      LPCWSTR configPath = L"MACHINE/WEBROOT/APPHOST/Default Web Site")
+  MockAppWithContext(LPCWSTR configPath = L"MACHINE/WEBROOT/APPHOST/Default Web Site")
       : config_path_(configPath) {}
 
   PCWSTR GetApplicationPhysicalPath() const override { return L"C:\\test"; }
   PCWSTR GetApplicationId() const override { return L"/"; }
   PCWSTR GetAppConfigPath() const override { return config_path_.c_str(); }
-  IHttpModuleContextContainer* GetModuleContextContainer() override {
-    return &container_;
-  }
+  IHttpModuleContextContainer* GetModuleContextContainer() override { return &container_; }
 };
 
 class MockAppStartProvider : public IHttpApplicationStartProvider {
@@ -432,33 +361,26 @@ struct PreparedResponse {
   HTTP_RESPONSE raw;
 };
 
-static void setupHtmlResponse(MockHttpContext& ctx, MockHttpResponse& resp,
-                              IHttpApplication* app, MockMetadataInfo* metadata,
-                              PreparedResponse& pr, const char* html) {
+static void setupHtmlResponse(MockHttpContext& ctx, MockHttpResponse& resp, IHttpApplication* app,
+                              MockMetadataInfo* metadata, PreparedResponse& pr, const char* html) {
   EXPECT_CALL(ctx, GetApplication()).WillRepeatedly(Return(app));
   EXPECT_CALL(ctx, GetResponse()).WillRepeatedly(Return(&resp));
   EXPECT_CALL(ctx, GetMetadata()).WillRepeatedly(Return(metadata));
 
   const char* ct = "text/html";
   EXPECT_CALL(resp, GetHeader(Matcher<PCSTR>(StrEq("Content-Type")), _))
-      .WillRepeatedly(DoAll(Invoke([ct](_In_ PCSTR, _Out_ USHORT* len) {
-                              *len = (USHORT)strlen(ct);
-                            }),
-                            Return(ct)));
+      .WillRepeatedly(DoAll(
+          Invoke([ct](_In_ PCSTR, _Out_ USHORT* len) { *len = (USHORT)strlen(ct); }), Return(ct)));
   EXPECT_CALL(resp, GetHeader(Matcher<PCSTR>(StrEq("Content-Encoding")), _))
-      .WillRepeatedly(DoAll(
-          Invoke([](_In_ PCSTR, _Out_ USHORT* len) { *len = 0; }), Return("")));
-  EXPECT_CALL(resp,
-              GetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _))
-      .WillRepeatedly(DoAll(
-          Invoke([](_In_ PCSTR, _Out_ USHORT* len) { *len = 0; }), Return("")));
+      .WillRepeatedly(DoAll(Invoke([](_In_ PCSTR, _Out_ USHORT* len) { *len = 0; }), Return("")));
+  EXPECT_CALL(resp, GetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _))
+      .WillRepeatedly(DoAll(Invoke([](_In_ PCSTR, _Out_ USHORT* len) { *len = 0; }), Return("")));
 
   EXPECT_CALL(resp, GetStatus(_, _, _, _, _, _, _, _, _))
-      .WillRepeatedly(DoAll(
-          Invoke([](_Out_ USHORT* pCode, _Out_ USHORT*, PCSTR*, _Out_ USHORT*,
-                    _Out_ HRESULT*, PCWSTR*, _Out_ DWORD*,
-                    IAppHostConfigException**, _Out_ BOOL*) { *pCode = 200; }),
-          Return()));
+      .WillRepeatedly(DoAll(Invoke([](_Out_ USHORT* pCode, _Out_ USHORT*, PCSTR*, _Out_ USHORT*,
+                                      _Out_ HRESULT*, PCWSTR*, _Out_ DWORD*,
+                                      IAppHostConfigException**, _Out_ BOOL*) { *pCode = 200; }),
+                            Return()));
 
   pr.chunk.DataChunkType = HttpDataChunkFromMemory;
   pr.chunk.FromMemory.pBuffer = (PVOID)html;
@@ -478,8 +400,7 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
   MockRumConfigElement rumConfig;
   MockAdminManager adminManager(&rumConfig);
   MockServer mockServer;
-  EXPECT_CALL(mockServer, GetAdminManager())
-      .WillRepeatedly(Return(&adminManager));
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
   auto mod = registerModule(mockServer);
   ASSERT_NE(mod.global, nullptr);
@@ -488,11 +409,10 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
   // App start → config reading
   MockAppWithContext app;
   MockAppStartProvider appStart(app);
-  EXPECT_EQ(mod.global->OnGlobalApplicationStart(&appStart),
-            GL_NOTIFICATION_CONTINUE);
+  EXPECT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
 
-  auto* ctx = static_cast<ModuleContext*>(
-      app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
   ASSERT_NE(ctx, nullptr);
   ASSERT_NE(ctx->snippet, nullptr);
 
@@ -510,20 +430,16 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
       "<body>Hello</body></html>";
   setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
 
-  EXPECT_CALL(
-      httpResp,
-      SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
       .WillOnce(Return(S_OK));
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
-  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr),
-            RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
 
   std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
                      pr.chunk.FromMemory.BufferLength);
-  EXPECT_NE(output.find("DD_RUM"), std::string::npos)
-      << "Expected DD_RUM in output, got:\n"
-      << output;
+  EXPECT_NE(output.find("DD_RUM"), std::string::npos) << "Expected DD_RUM in output, got:\n"
+                                                      << output;
   EXPECT_NE(output.find("test-app-id"), std::string::npos);
   EXPECT_NE(output.find("test-client-token"), std::string::npos);
   EXPECT_NE(output.find("test-service"), std::string::npos);
@@ -534,15 +450,13 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
 }
 
 TEST(InjectionPipeline, DisabledConfig) {
-  MockRumConfigElement rumConfig(false,
-                                 {
-                                     {L"applicationId", L"test-app-id"},
-                                     {L"clientToken", L"test-client-token"},
-                                 });
+  MockRumConfigElement rumConfig(false, {
+                                            {L"applicationId", L"test-app-id"},
+                                            {L"clientToken", L"test-client-token"},
+                                        });
   MockAdminManager adminManager(&rumConfig);
   MockServer mockServer;
-  EXPECT_CALL(mockServer, GetAdminManager())
-      .WillRepeatedly(Return(&adminManager));
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
   auto mod = registerModule(mockServer);
 
@@ -550,8 +464,8 @@ TEST(InjectionPipeline, DisabledConfig) {
   MockAppStartProvider appStart(app);
   mod.global->OnGlobalApplicationStart(&appStart);
 
-  auto* ctx = static_cast<ModuleContext*>(
-      app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
   ASSERT_NE(ctx, nullptr);
   // When disabled, no snippet should be created.
   EXPECT_EQ(ctx->snippet, nullptr);
@@ -567,8 +481,7 @@ TEST(InjectionPipeline, DisabledConfig) {
   setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
 
   // OnSendResponse should skip injection (CONTINUE, not FINISH_REQUEST).
-  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr),
-            RQ_NOTIFICATION_CONTINUE);
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
 
   // Body unchanged.
   std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
@@ -599,8 +512,7 @@ TEST(InjectionPipeline, PerLocationConfig) {
   MockAdminManager adminManager(configs);
 
   MockServer mockServer;
-  EXPECT_CALL(mockServer, GetAdminManager())
-      .WillRepeatedly(Return(&adminManager));
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
   auto mod = registerModule(mockServer);
 
@@ -623,14 +535,11 @@ TEST(InjectionPipeline, PerLocationConfig) {
     MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
     PreparedResponse pr;
     setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
-    EXPECT_CALL(
-        httpResp,
-        SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
         .WillOnce(Return(S_OK));
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
-    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr),
-              RQ_NOTIFICATION_FINISH_REQUEST);
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
 
     std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
                        pr.chunk.FromMemory.BufferLength);
@@ -647,8 +556,7 @@ TEST(InjectionPipeline, PerLocationConfig) {
     PreparedResponse pr;
     setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
 
-    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr),
-              RQ_NOTIFICATION_CONTINUE)
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE)
         << "/api path should skip injection (location override disabled RUM)";
 
     std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),

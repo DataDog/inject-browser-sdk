@@ -10,6 +10,7 @@
 
 #include "framework.h"
 
-extern "C" __declspec(dllexport) HRESULT __stdcall RegisterModule(
-    DWORD dwServerVersion, IHttpModuleRegistrationInfo* pModuleInfo,
-    IHttpServer* pGlobalInfo);
+extern "C"
+    __declspec(dllexport) HRESULT __stdcall RegisterModule(DWORD dwServerVersion,
+                                                           IHttpModuleRegistrationInfo* pModuleInfo,
+                                                           IHttpServer* pGlobalInfo);

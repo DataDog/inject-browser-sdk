@@ -21,15 +21,12 @@ class HttpModule : public CHttpModule {
                                              IN IHttpEventProvider* pProvider);
 
   REQUEST_NOTIFICATION_STATUS
-  OnSendResponse(IN IHttpContext* pHttpContext,
-                 IN ISendResponseProvider* pProvider);
+  OnSendResponse(IN IHttpContext* pHttpContext, IN ISendResponseProvider* pProvider);
 
-  bool ShouldAttemptInjection(IHttpResponse& pHttpResponse,
-                              const ModuleContext& ctx) const;
+  bool ShouldAttemptInjection(IHttpResponse& pHttpResponse, const ModuleContext& ctx) const;
 
   REQUEST_NOTIFICATION_STATUS PerformInjection(IHttpContext& pHttpContext,
-                                               IHttpResponse& pHttpResponse,
-                                               ModuleContext& ctx);
+                                               IHttpResponse& pHttpResponse, ModuleContext& ctx);
 };
 
 class HttpModuleFactory : public IHttpModuleFactory {

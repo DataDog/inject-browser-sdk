@@ -1,0 +1,11 @@
+# Devcontainer build inputs. Edit this to change what gets shipped to the
+# builder — also recomputes the image tag hash. Paths are relative to the
+# repository root (the shared tooling rsyncs at the repo root before
+# calling --files-from).
+#
+# Only files the image BUILD needs go here. Per-repo runtime data is read
+# from the bind-mounted workspace, not baked into the image.
+
+.devcontainer/Dockerfile
+rust-toolchain.toml
+scripts/install-xwin-toolchain.py

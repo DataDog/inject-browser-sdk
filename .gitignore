@@ -18,6 +18,7 @@ target/
 # IIS
 injector_IIS/include/
 injector_IIS/build/
+injector_IIS/build-*/
 injector_IIS/test/e2e_testsa/test_assets/injector_IIS_installer.msi
 injector_IIS/test/e2e_testsa/vendor
 build_out/

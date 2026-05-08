@@ -178,6 +178,7 @@ if (IIS_INJECTOR_DEBUG_BREAK)
 endif ()
 
 option(IIS_ENABLE_ASAN "Enable Address Sanitizer" OFF)
+option(IIS_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer (trap mode)" OFF)
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   target_compile_options(iis_injector-objects

@@ -3,8 +3,11 @@
 ## Run IIS unit tests
 
 ```bash
-make test-iis                                # full suite
-make test-iis TEST_FILTER='*MissingEnabled*' # subset
+make iis-unit-test                                # full suite
+make iis-unit-test TEST_FILTER='*MissingEnabled*' # subset
+make iis-unit-test-ubsan                          # UBSan trap mode
 ```
 
-Uses `.devcontainer/iis-tests/devcontainer.json` (linux/amd64-pinned so wine64 is x86_64-native; Apple Silicon goes through Rosetta).
+Cross-compiled to `x86_64-pc-windows-msvc` and run via wine64 in the linux/amd64 devcontainer (Apple Silicon goes through Rosetta).
+
+ASan: the MSVC ASan VSIX is fetched into xwin by `scripts/install-xwin-toolchain.py`, and `IIS_ENABLE_ASAN` in CMakeLists wires the link, so an ASan build succeeds. Running it under wine64 fails because ASan's interception_win can't patch wine's CET (ENDBR64) prologues — use the `injector_IIS_unit_test_asan` GitLab CI Windows job for ASan coverage.

@@ -70,20 +70,31 @@ test-cmake-version:
 
 # Build and run the IIS unit tests in-container (linux/amd64-pinned so wine64
 # is x86_64-native; Apple Silicon emulates via Rosetta). Override TEST_FILTER
-# to narrow the gtest run, e.g. `make test-iis TEST_FILTER='*MissingEnabled*'`.
+# to narrow the gtest run, e.g. `make iis-unit-test TEST_FILTER='*Missing*'`.
+# `iis-unit-test-ubsan` builds the same suite with UBSan in trap mode. ASan
+# is wired through `IIS_ENABLE_ASAN` in CMakeLists and the runtime libs are
+# in xwin (see scripts/install-xwin-toolchain.py), but the tests can't run
+# end-to-end under wine64 because ASan's interception_win can't patch CET
+# (ENDBR64) prologues in wine's runtime — use the GitLab CI
+# `injector_IIS_unit_test_asan` Windows job for ASan coverage.
 TEST_FILTER ?= *
-.PHONY: test-iis
-test-iis: dev-image-x86_64-cached
+_IIS_UNIT_TEST_BUILD_DIR ?= build
+_IIS_UNIT_TEST_CMAKE_FLAGS ?=
+
+.PHONY: iis-unit-test iis-unit-test-ubsan
+iis-unit-test-ubsan: _IIS_UNIT_TEST_BUILD_DIR := build-ubsan
+iis-unit-test-ubsan: _IIS_UNIT_TEST_CMAKE_FLAGS := -DIIS_ENABLE_UBSAN=ON
+iis-unit-test iis-unit-test-ubsan: dev-image-x86_64-cached
 	$(IN_DEVCONTAINER_X86_64) bash -lc '\
 	  set -eu; \
 	  cd $(IIS_DIR); \
 	  export PATH=/usr/lib/llvm-20/bin:$$PATH; \
 	  export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link; \
 	  export RUSTFLAGS="-Lnative=/xwin/crt/lib/x86_64 -Lnative=/xwin/sdk/lib/ucrt/x86_64 -Lnative=/xwin/sdk/lib/um/x86_64"; \
-	  cmake --preset=ci-xcomp -B build -DTOOLCHAIN_ROOT=/usr/lib/llvm-20/bin/; \
-	  cmake --build build --target iis_injector_tests -j; \
+	  cmake --preset=ci-xcomp -B $(_IIS_UNIT_TEST_BUILD_DIR) -DTOOLCHAIN_ROOT=/usr/lib/llvm-20/bin/ $(_IIS_UNIT_TEST_CMAKE_FLAGS); \
+	  cmake --build $(_IIS_UNIT_TEST_BUILD_DIR) --target iis_injector_tests -j; \
 	  export WINEDEBUG=-all WINEPREFIX=$$HOME/.wine; \
-	  /usr/lib/wine/wine64 build/test/unittests/iis_injector_tests.exe --gtest_filter="$(TEST_FILTER)"'
+	  /usr/lib/wine/wine64 $(_IIS_UNIT_TEST_BUILD_DIR)/test/unittests/iis_injector_tests.exe --gtest_filter="$(TEST_FILTER)"'
 
 .PHONY: artifacts
 artifacts:

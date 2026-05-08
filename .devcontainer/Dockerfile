@@ -54,6 +54,7 @@ RUN set -eux; \
         clang-tidy-${LLVM_VERSION} \
         lld-${LLVM_VERSION} \
         llvm-${LLVM_VERSION} \
+        libclang-rt-${LLVM_VERSION}-dev \
         wine64 \
         qemu-user-static \
         ; \

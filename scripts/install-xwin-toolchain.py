@@ -12,6 +12,7 @@ Usage:
 ./install-xwin-toolchain.py --output-dir /xwin
 """
 import argparse
+import json
 import typing
 import subprocess
 import sys
@@ -21,6 +22,7 @@ import tarfile
 import urllib.request
 import shutil
 import hashlib
+import zipfile
 from pathlib import Path
 
 XWIN_VERSION = "0.6.5"
@@ -111,6 +113,11 @@ def main() -> int:
     parser.add_argument(
         "--output-dir", help="Location where the toolchain will be installed"
     )
+    parser.add_argument(
+        "--skip-asan",
+        help="Skip fetching MSVC ASan VSIX packages",
+        action="store_true",
+    )
     args = parser.parse_args()
 
     os = platform.system()
@@ -143,7 +150,95 @@ def main() -> int:
 
         cmd = f"{xwin_bin} --accept-license splat --include-debug-libs --include-debug-symbols --output {args.output_dir}"
         rc = run(cmd)
-        return rc
+        if rc != 0:
+            return rc
+
+        # xwin's package filter excludes the MSVC ASan VSIX packages, so the
+        # x86_64 sanitizer libs/headers (clang_rt.asan*) aren't part of the
+        # splatted output. Fetch them manually from Microsoft's VS catalog.
+        if not args.skip_asan:
+            install_msvc_asan(Path(args.output_dir), p_work_dir)
+        return 0
+
+
+VS_CHANNEL_MANIFEST_URL = "https://aka.ms/vs/17/release/channel"
+
+
+def install_msvc_asan(output_dir: Path, work_dir: Path) -> None:
+    """Download and splat the MSVC ASan VSIX packages into the xwin output.
+
+    xwin doesn't include ASan in its default package set, so we resolve the
+    latest `Microsoft.VC.<ver>.ASAN.{X64,Headers}.base` packages from the VS
+    Build Tools manifest, download the VSIX zips, and copy
+      - `Contents/VC/Tools/MSVC/<ver>/lib/x64/clang_rt.asan*.lib`
+      - `Contents/VC/Tools/MSVC/<ver>/include/sanitizer/*`
+    into the matching `crt/lib/x86_64/` and `crt/include/` paths xwin uses.
+    """
+    print("Resolving MSVC ASan packages from VS catalog...")
+    channel_path = work_dir / "vs_channel.json"
+    download_file(VS_CHANNEL_MANIFEST_URL, channel_path)
+    with open(channel_path) as f:
+        channel = json.load(f)
+    vsman_url = next(
+        pl["url"]
+        for ci in channel["channelItems"]
+        if ci.get("id") == "Microsoft.VisualStudio.Manifests.VisualStudio"
+        for pl in ci.get("payloads", [])
+        if pl.get("fileName", "").endswith(".vsman")
+    )
+    vsman_path = work_dir / "vs.vsman"
+    download_file(vsman_url, vsman_path)
+    with open(vsman_path) as f:
+        vsman = json.load(f)
+
+    asan_x64 = max(
+        (p for p in vsman["packages"] if p["id"].endswith(".ASAN.X64.base")),
+        key=lambda p: p["id"],
+    )
+    asan_headers = max(
+        (p for p in vsman["packages"] if p["id"].endswith(".ASAN.Headers.base")),
+        key=lambda p: p["id"],
+    )
+    print(f"Using {asan_x64['id']} and {asan_headers['id']}")
+
+    crt_lib = output_dir / "crt" / "lib" / "x86_64"
+    crt_include = output_dir / "crt" / "include"
+    crt_lib.mkdir(parents=True, exist_ok=True)
+    crt_include.mkdir(parents=True, exist_ok=True)
+
+    # (pkg, [(path-substring matched against VSIX entry, dest dir, basename predicate)])
+    rules: list[tuple[dict, list[tuple[str, Path, typing.Callable[[str], bool]]]]] = [
+        (
+            asan_x64,
+            [
+                ("/lib/x64/", crt_lib, lambda n: n.startswith("clang_rt.asan")),
+                ("/bin/Hostx64/x64/", crt_lib, lambda n: n.startswith("clang_rt.asan") and n.endswith(".dll")),
+            ],
+        ),
+        (asan_headers, [("/include/sanitizer/", crt_include / "sanitizer", lambda n: True)]),
+    ]
+    for pkg, patterns in rules:
+        for payload in pkg.get("payloads", []):
+            if not payload.get("fileName", "").endswith(".vsix"):
+                continue
+            vsix_path = work_dir / payload["fileName"]
+            download_file(payload["url"], vsix_path)
+            with zipfile.ZipFile(vsix_path) as zf:
+                for member in zf.namelist():
+                    if member.endswith("/"):
+                        continue
+                    for needle, dest_root, predicate in patterns:
+                        idx = member.find(needle)
+                        if idx == -1:
+                            continue
+                        rel = member[idx + len(needle):]
+                        if not predicate(Path(rel).name):
+                            continue
+                        target = dest_root / rel
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(member) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        break
 
 
 if __name__ == "__main__":

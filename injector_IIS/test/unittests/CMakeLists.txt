@@ -33,6 +33,20 @@ if (IIS_ENABLE_ASAN)
   target_compile_definitions(iis_injector_tests PRIVATE
     _DISABLE_STRING_ANNOTATION=1
     _DISABLE_VECTOR_ANNOTATION=1)
+  # clang-cl emits #pragma comment(lib, "clang_rt.asan*-x86_64.lib") refs that
+  # native MSVC link.exe resolves automatically; lld-link in our cross-compile
+  # setup needs them passed explicitly.
+  target_link_libraries(iis_injector_tests
+    clang_rt.asan_dynamic-x86_64
+    clang_rt.asan_dynamic_runtime_thunk-x86_64)
+endif()
+
+# UBSan in trap mode: produces inline traps instead of runtime calls, so it
+# works under clang-cl + xwin without a Windows ubsan_runtime library. Caught
+# UB aborts with SIGILL / EXCEPTION_ILLEGAL_INSTRUCTION (no diagnostic text).
+if (IIS_ENABLE_UBSAN)
+  target_compile_options(iis_injector_tests PRIVATE
+    -fsanitize=undefined -fsanitize-trap=undefined)
 endif()
 
 target_link_libraries(

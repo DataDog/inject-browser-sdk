@@ -304,12 +304,12 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   return ReadConfResult::ok(RumConfig{cfg_version, std::move(rum_sdk_opts)});
 }
 
-ReadConfStatus update_module_context(ModuleContext& ctx, const IHttpServer& server,
-                                     PCWSTR config_path, Logger& logger) {
+void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR config_path,
+                           Logger& logger) {
   auto result = read_conf(server, config_path, logger);
   if (result.status == ReadConfStatus::Error) {
     logger.info("Keeping existing config after transient read error");
-    return result.status;
+    return;
   }
   if (result.status == ReadConfStatus::Absent) {
     if (ctx.snippet != nullptr) {
@@ -318,7 +318,7 @@ ReadConfStatus update_module_context(ModuleContext& ctx, const IHttpServer& serv
     }
     ctx.application_id_tag.clear();
     ctx.remote_config_tag.clear();
-    return result.status;
+    return;
   }
 
   auto& config = *result.config;
@@ -326,12 +326,12 @@ ReadConfStatus update_module_context(ModuleContext& ctx, const IHttpServer& serv
 
   if (snippet == nullptr) {
     logger.error("Failed to create RUM snippet");
-    return ReadConfStatus::Error;
+    return;
   }
   if (snippet->error_code != 0) {
     logger.error(std::format("Failed to create RUM snippet: {}", snippet->error_message));
     snippet_cleanup(snippet);
-    return ReadConfStatus::Error;
+    return;
   }
 
   logger.info("Configuration validated");
@@ -348,7 +348,6 @@ ReadConfStatus update_module_context(ModuleContext& ctx, const IHttpServer& serv
 
   auto rcUsed = config.sdk_options.count("remoteConfigurationId") > 0;
   ctx.remote_config_tag = std::format("remote_config_used:{}", rcUsed);
-  return result.status;
 }
 
 }  // namespace datadog::rum

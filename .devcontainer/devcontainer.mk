@@ -141,8 +141,18 @@ _DEV_CONTAINER_MOUNTS := \
 IN_DEVCONTAINER ?= docker run --rm -i $(_DEV_CONTAINER_MOUNTS) \
   $$(cat $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref)
 
+# linux/amd64 variant: same shape as IN_DEVCONTAINER but pinned to amd64,
+# for running cross-compiled x86_64 binaries (e.g. Windows test exes under
+# wine64) on any host. On Apple Silicon, Docker emulates via Rosetta. On
+# native amd64 the platform pin is a no-op and we reuse the regular image.
+# Targets that use this should depend on `dev-image-x86_64-cached`.
+_X86_64_IMAGE_REF_FILE := $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref-x86_64
+IN_DEVCONTAINER_X86_64 ?= docker run --rm -i --platform=linux/amd64 $(_DEV_CONTAINER_MOUNTS) \
+  $$(cat $(_X86_64_IMAGE_REF_FILE))
+
 ifeq ($(_DEV_CONTAINER_INSIDE),1)
   IN_DEVCONTAINER :=
+  IN_DEVCONTAINER_X86_64 :=
 endif
 
 # Targets whose behaviour differs inside vs outside a container.
@@ -150,7 +160,7 @@ endif
 # loudly because there's no docker daemon.
 ifeq ($(_DEV_CONTAINER_INSIDE),1)
 
-dev-image:
+dev-image dev-image-x86_64:
 	@:
 
 dev-shell:
@@ -177,6 +187,27 @@ dev-image:
 	    "$$ctx"; \
 	fi; \
 	echo "$$ref" > $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref
+
+# Build the linux/amd64 variant. On amd64 hosts this reuses dev-image; on
+# arm64 hosts it produces a separate `:<tag>-x86_64` image so it doesn't
+# clobber the native one. Buildx caches per-platform so repeats are cheap.
+ifeq ($(_DEV_CONTAINER_PLATFORM),linux/amd64)
+dev-image-x86_64: dev-image
+	@cp $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref $(_X86_64_IMAGE_REF_FILE)
+else
+dev-image-x86_64:
+	@$(_dev_container_stage_context); \
+	$(_dev_container_compute_tag); \
+	ref="$(DEV_CONTAINER_IMAGE_NAME):$$tag-x86_64"; \
+	docker buildx build --platform=linux/amd64 \
+	  --file "$$ctx/.devcontainer/Dockerfile" \
+	  --build-context repo="$$ctx" \
+	  --build-arg ARCH=x86_64 \
+	  $(DOCKER_BUILDX_FLAGS) \
+	  --load -t "$$ref" \
+	  "$$ctx"; \
+	echo "$$ref" > $(_X86_64_IMAGE_REF_FILE)
+endif
 
 # Interactive shell in the built image. Mirrors IN_DEVCONTAINER but with
 # `-it` for terminal handling.

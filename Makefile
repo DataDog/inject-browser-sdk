@@ -38,11 +38,13 @@ lint-cpp: format-cpp-check tidy-cpp
 
 .PHONY: lint-rust
 lint-rust:
-	./scripts/codestyle.sh lint
+	cargo fmt --all -- --check
+	cargo clippy --all-targets --all-features
 
 .PHONY: format-rust
 format-rust:
-	./scripts/codestyle.sh format
+	cargo fmt --all
+	cargo clippy --fix --allow-dirty
 
 .PHONY: lint
 lint: lint-cpp lint-rust
@@ -50,9 +52,10 @@ lint: lint-cpp lint-rust
 .PHONY: format
 format: format-cpp format-rust
 
+# tidy-cpp runs before format-cpp so clang-format normalizes any code clang-tidy --fix rewrote.
 .PHONY: lint-fix
 lint-fix: TIDY_FLAGS := --fix-errors
-lint-fix: format-cpp format-rust tidy-cpp
+lint-fix: tidy-cpp format-cpp format-rust
 
 .PHONY: doc
 doc:

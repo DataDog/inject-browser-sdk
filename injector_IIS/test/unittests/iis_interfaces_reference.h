@@ -46,8 +46,7 @@ class IHttpRequest {
 
   virtual const HTTP_REQUEST* GetRawHttpRequest(VOID) const = 0;
 
-  virtual PCSTR GetHeader(IN PCSTR pszHeaderName,
-                          OUT USHORT* pcchHeaderValue = NULL) const = 0;
+  virtual PCSTR GetHeader(IN PCSTR pszHeaderName, OUT USHORT* pcchHeaderValue = NULL) const = 0;
 
   virtual PCSTR GetHeader(IN HTTP_HEADER_ID ulHeaderIndex,
                           OUT USHORT* pcchHeaderValue = NULL) const = 0;
@@ -55,9 +54,8 @@ class IHttpRequest {
   virtual HRESULT SetHeader(IN PCSTR pszHeaderName, IN PCSTR pszHeaderValue,
                             IN USHORT cchHeaderValue, IN BOOL fReplace) = 0;
 
-  virtual HRESULT SetHeader(IN HTTP_HEADER_ID ulHeaderIndex,
-                            IN PCSTR pszHeaderValue, IN USHORT cchHeaderValue,
-                            IN BOOL fReplace) = 0;
+  virtual HRESULT SetHeader(IN HTTP_HEADER_ID ulHeaderIndex, IN PCSTR pszHeaderValue,
+                            IN USHORT cchHeaderValue, IN BOOL fReplace) = 0;
 
   virtual HRESULT DeleteHeader(IN PCSTR pszHeaderName) = 0;
 
@@ -67,11 +65,9 @@ class IHttpRequest {
 
   virtual HRESULT SetHttpMethod(IN PCSTR pszHttpMethod) = 0;
 
-  virtual HRESULT SetUrl(IN PCWSTR pszUrl, IN DWORD cchUrl,
-                         IN BOOL fResetQueryString) = 0;
+  virtual HRESULT SetUrl(IN PCWSTR pszUrl, IN DWORD cchUrl, IN BOOL fResetQueryString) = 0;
 
-  virtual HRESULT SetUrl(IN PCSTR pszUrl, IN DWORD cchUrl,
-                         IN BOOL fResetQueryString) = 0;
+  virtual HRESULT SetUrl(IN PCSTR pszUrl, IN DWORD cchUrl, IN BOOL fResetQueryString) = 0;
 
   virtual BOOL GetUrlChanged(VOID) const = 0;
 
@@ -81,34 +77,31 @@ class IHttpRequest {
 
   virtual PSOCKADDR GetRemoteAddress(VOID) const = 0;
 
-  virtual HRESULT ReadEntityBody(OUT VOID* pvBuffer, IN DWORD cbBuffer,
-                                 IN BOOL fAsync, OUT DWORD* pcbBytesReceived,
+  virtual HRESULT ReadEntityBody(OUT VOID* pvBuffer, IN DWORD cbBuffer, IN BOOL fAsync,
+                                 OUT DWORD* pcbBytesReceived,
                                  OUT BOOL* pfCompletionPending = NULL) = 0;
 
   virtual HRESULT InsertEntityBody(IN VOID* pvBuffer, IN DWORD cbBuffer) = 0;
 
   virtual DWORD GetRemainingEntityBytes(VOID) = 0;
 
-  virtual VOID GetHttpVersion(OUT USHORT* pMajorVersion,
-                              OUT USHORT* pMinorVersion) const = 0;
+  virtual VOID GetHttpVersion(OUT USHORT* pMajorVersion, OUT USHORT* pMinorVersion) const = 0;
 
-  virtual HRESULT GetClientCertificate(
-      OUT HTTP_SSL_CLIENT_CERT_INFO** ppClientCertInfo,
-      OUT BOOL* pfClientCertNegotiated) = 0;
+  virtual HRESULT GetClientCertificate(OUT HTTP_SSL_CLIENT_CERT_INFO** ppClientCertInfo,
+                                       OUT BOOL* pfClientCertNegotiated) = 0;
 
-  virtual HRESULT NegotiateClientCertificate(
-      IN BOOL fAsync, OUT BOOL* pfCompletionPending = NULL) = 0;
+  virtual HRESULT NegotiateClientCertificate(IN BOOL fAsync,
+                                             OUT BOOL* pfCompletionPending = NULL) = 0;
 
   virtual DWORD GetSiteId(VOID) const = 0;
 
-  virtual HRESULT GetHeaderChanges(
-      IN DWORD dwOldChangeNumber, OUT DWORD* pdwNewChangeNumber,
-      IN OUT PCSTR knownHeaderSnapshot[HttpHeaderRequestMaximum],
-      IN OUT DWORD* pdwUnknownHeaderSnapshot,
-      IN OUT PCSTR** ppUnknownHeaderNameSnapshot,
-      IN OUT PCSTR** ppUnknownHeaderValueSnapshot,
-      __out_ecount(HttpHeaderRequestMaximum + 1)
-          DWORD diffedKnownHeaderIndices[HttpHeaderRequestMaximum + 1],
-      OUT DWORD* pdwDiffedUnknownHeaders,
-      OUT DWORD** ppDiffedUnknownHeaderIndices) = 0;
+  virtual HRESULT GetHeaderChanges(IN DWORD dwOldChangeNumber, OUT DWORD* pdwNewChangeNumber,
+                                   IN OUT PCSTR knownHeaderSnapshot[HttpHeaderRequestMaximum],
+                                   IN OUT DWORD* pdwUnknownHeaderSnapshot,
+                                   IN OUT PCSTR** ppUnknownHeaderNameSnapshot,
+                                   IN OUT PCSTR** ppUnknownHeaderValueSnapshot,
+                                   __out_ecount(HttpHeaderRequestMaximum + 1)
+                                       DWORD diffedKnownHeaderIndices[HttpHeaderRequestMaximum + 1],
+                                   OUT DWORD* pdwDiffedUnknownHeaders,
+                                   OUT DWORD** ppDiffedUnknownHeaderIndices) = 0;
 };

@@ -25,9 +25,16 @@ compile_commands.json: $(shell find $(IIS_DIR) -name CMakeLists.txt -o -name '*.
 format-cpp-check: dev-image-cached
 	$(IN_DEVCONTAINER) clang-format --dry-run --Werror $(FORMAT_FILES)
 
+# Short aliases used by CI (.gitlab/devcontainer.yml) and pre-commit hooks.
+.PHONY: format-check
+format-check: format-cpp-check
+
 .PHONY: tidy-cpp
 tidy-cpp: dev-image-cached compile_commands.json
 	$(IN_DEVCONTAINER) clang-tidy -p . $(TIDY_FLAGS) $(TIDY_FILES)
+
+.PHONY: tidy
+tidy: tidy-cpp
 
 .PHONY: format-cpp
 format-cpp: dev-image-cached

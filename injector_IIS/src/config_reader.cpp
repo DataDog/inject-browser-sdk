@@ -181,11 +181,9 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
 
   IAppHostProperty* enabled_prop = get_property(*cfg_root_elem, L"enabled");
   if (enabled_prop == nullptr) {
-    // get_property returns nullptr for both "attribute missing" and a
-    // failed COM call; can't distinguish. Treat as transient error so a
-    // schema-violating or transiently-failing read keeps the existing
-    // snippet rather than silently wiping injection.
-    logger.debug("Failed to read 'enabled' property — keeping existing config");
+    // get_property conflates "attribute missing" with COM failure; treat as
+    // Error so a transient failure can't silently wipe injection.
+    logger.debug("Failed to read 'enabled' property");
     return ReadConfResult::error();
   }
 
@@ -310,13 +308,10 @@ ReadConfStatus update_module_context(ModuleContext& ctx, const IHttpServer& serv
                                      PCWSTR config_path, Logger& logger) {
   auto result = read_conf(server, config_path, logger);
   if (result.status == ReadConfStatus::Error) {
-    // Transient COM error — keep existing config so a subsequent
-    // OnGlobalConfigurationChange can retry and self-heal.
     logger.info("Keeping existing config after transient read error");
     return result.status;
   }
   if (result.status == ReadConfStatus::Absent) {
-    // Config definitively missing or disabled — clear snippet.
     if (ctx.snippet != nullptr) {
       snippet_cleanup(ctx.snippet);
       ctx.snippet = nullptr;
@@ -329,11 +324,8 @@ ReadConfStatus update_module_context(ModuleContext& ctx, const IHttpServer& serv
   auto& config = *result.config;
   Snippet* snippet = make_snippet(config.version, config.sdk_options, logger);
 
-  // Snippet creation failures are treated as transient: keep the existing
-  // snippet/tags and signal Error so callers (e.g. per-location caching)
-  // skip caching this failure state and retry on the next request.
   if (snippet == nullptr) {
-    logger.error("Failed to create RUM snippet — keeping existing snippet for retry");
+    logger.error("Failed to create RUM snippet");
     return ReadConfStatus::Error;
   }
   if (snippet->error_code != 0) {

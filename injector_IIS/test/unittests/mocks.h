@@ -180,10 +180,10 @@ class MockHttpContext : public IHttpContext {
   // To make memory management a little easier, we'll implement this function
   // instead of mocking it
   VOID* AllocateRequestMemory(DWORD size) override {
-    if (m_allocatedMemory != NULL) {
+    if (m_allocatedMemory != nullptr) {
       free(m_allocatedMemory);
     };
-    m_allocatedMemory = (VOID*)malloc(size);
+    m_allocatedMemory = static_cast<VOID*>(malloc(size));
     return m_allocatedMemory;
   };
 };

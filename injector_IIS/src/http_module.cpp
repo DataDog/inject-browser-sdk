@@ -18,6 +18,7 @@ namespace datadog::rum {
 namespace {
 
 constexpr const char* k_injection_header = "x-datadog-rum-injected";
+constexpr const char* k_injection_pending_header = "x-datadog-rum-injection-pending";
 
 std::string_view get_header(IHttpResponse& http_response, const char* header) {
   USHORT length = 0;
@@ -84,7 +85,7 @@ HttpModule::OnBeginRequest(IN IHttpContext* http_context, IN IHttpEventProvider*
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  HRESULT const result = http_request->SetHeader("x-datadog-rum-injection-pending", "1", 1, TRUE);
+  HRESULT const result = http_request->SetHeader(k_injection_pending_header, "1", 1, TRUE);
   if (result != S_OK) {
     event_provider->SetErrorStatus(result);
     ctx->logger->error("Error setting request header: " + std::system_category().message(result));

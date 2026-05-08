@@ -177,6 +177,7 @@ class MockRumConfigElement : public IAppHostElement {
   std::vector<MockOptionElement> options_;
   MockElementCollection collection_;
   HRESULT collection_result_ = S_OK;
+  bool enabled_lookup_fails_ = false;
 
  public:
   // Configurable constructor.
@@ -202,6 +203,7 @@ class MockRumConfigElement : public IAppHostElement {
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
   void SetCollectionResult(HRESULT hr) { collection_result_ = hr; }
+  void SetEnabledPropertyMissing(bool missing) { enabled_lookup_fails_ = missing; }
 
   HRESULT STDMETHODCALLTYPE get_Name(BSTR*) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE get_Collection(IAppHostElementCollection** ppCol) override {
@@ -222,6 +224,10 @@ class MockRumConfigElement : public IAppHostElement {
   HRESULT STDMETHODCALLTYPE GetPropertyByName(BSTR bstrName,
                                               IAppHostProperty** ppProperty) override {
     if (_wcsicmp(bstrName, L"enabled") == 0) {
+      if (enabled_lookup_fails_) {
+        *ppProperty = nullptr;
+        return S_FALSE;
+      }
       *ppProperty = &enabled_prop_;
       return S_OK;
     }
@@ -1106,6 +1112,66 @@ TEST(InjectionPipeline, GetCollectionFailurePreservesExistingConfig) {
   mod.global->OnGlobalConfigurationChange(&configChange);
 
   // Existing snippet should be preserved — not cleared by the transient error.
+  EXPECT_EQ(ctx->snippet, original_snippet);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// 'enabled' attribute lookup fails on initial load — get_property cannot
+// distinguish a missing attribute from a COM failure, so the read is treated
+// as Error. With no prior snippet, snippet stays nullptr.
+TEST(InjectionPipeline, MissingEnabledAttributeOnFirstLoad) {
+  MockRumConfigElement config;
+  config.SetEnabledPropertyMissing(true);
+
+  MockAdminManager adminManager(&config);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  ASSERT_NE(ctx, nullptr);
+  EXPECT_EQ(ctx->snippet, nullptr);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// 'enabled' attribute lookup fails during config reload — existing snippet
+// must be preserved (Error semantics) so a transient COM failure can't
+// silently wipe injection.
+TEST(InjectionPipeline, MissingEnabledAttributePreservesExistingConfig) {
+  MockRumConfigElement config;
+
+  MockAdminManager adminManager(&config);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+
+  MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  ASSERT_NE(ctx, nullptr);
+  ASSERT_NE(ctx->snippet, nullptr);
+  auto* original_snippet = ctx->snippet;
+
+  // Now break the 'enabled' lookup and trigger a config reload.
+  config.SetEnabledPropertyMissing(true);
+
+  MockConfigChangeProvider configChange(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  mod.global->OnGlobalConfigurationChange(&configChange);
+
   EXPECT_EQ(ctx->snippet, original_snippet);
 
   mod.factory->Terminate();

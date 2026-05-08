@@ -24,7 +24,7 @@ jobs:
           rustup component add rustfmt
           rustup component add clippy
       - name: Check codestyle
-        run: ./scripts/codestyle.sh lint
+        run: make lint-rust
 
   build-and-test:
     runs-on: ubuntu-latest

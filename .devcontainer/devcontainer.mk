@@ -93,7 +93,7 @@ ifneq ($(strip $(DEV_CONTAINER_REQUIRED_PATHS)),)
   endif
 endif
 
-.PHONY: dev-image dev-shell dev-image-tag \
+.PHONY: dev-image dev-image-cached dev-shell dev-image-tag \
         .devcontainer-stage-context .devcontainer-image-hash
 
 # Stage the build context into a stable path under .devcontainer/.staged/.
@@ -150,13 +150,19 @@ endif
 # loudly because there's no docker daemon.
 ifeq ($(_DEV_CONTAINER_INSIDE),1)
 
-dev-image:
+dev-image dev-image-cached:
 	@:
 
 dev-shell:
 	@echo "make dev-shell: already inside the devcontainer; run /bin/sh directly" >&2; exit 1
 
 else # _DEV_CONTAINER_INSIDE
+
+# Fast-path for hot-path callers (pre-commit hooks etc.): skip the
+# stage+hash+docker-pull cycle when .image-ref already exists. Run
+# `make dev-image` explicitly to refresh after Dockerfile/context changes.
+dev-image-cached:
+	@[ -f $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref ] || $(MAKE) dev-image
 
 # Pull the image if available; otherwise build locally from the staged context.
 dev-image:

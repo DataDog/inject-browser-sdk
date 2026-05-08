@@ -10,7 +10,7 @@ repos:
 
       - id: clang-tidy
         name: clang-tidy
-        entry: bash -c 'make tidy TIDY_FILES="$*"' bash
+        entry: bash -c 'make tidy-cpp TIDY_FILES="$*"' bash
         language: system
         pass_filenames: true
         stages: [pre-push]

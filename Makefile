@@ -20,7 +20,8 @@ lint-configure: dev-image-cached
 	$(IN_DEVCONTAINER) cmake --build $(BUILD_DIR) \
 		--target _corrosion_cbindgen_inject_browser_sdk_ffi_bindings_injectbrowsersdk_h
 
-# Sub-make so this stays a non-phony file target (build once, reused).
+# lint-configure is .PHONY (always rebuilds); wrap it in a sub-make so this
+# file target is only (re)generated when missing.
 compile_commands.json:
 	$(MAKE) lint-configure
 	cp $(BUILD_DIR)/compile_commands.json $@
@@ -29,8 +30,8 @@ compile_commands.json:
 format-cpp-check: dev-image-cached
 	$(IN_DEVCONTAINER) clang-format --dry-run --Werror $(FORMAT_FILES)
 
-.PHONY: tidy
-tidy: dev-image-cached compile_commands.json
+.PHONY: tidy-cpp
+tidy-cpp: dev-image-cached compile_commands.json
 	$(IN_DEVCONTAINER) clang-tidy -p . --warnings-as-errors='*' $(TIDY_FILES)
 
 .PHONY: format-cpp
@@ -38,7 +39,7 @@ format-cpp: dev-image-cached
 	$(IN_DEVCONTAINER) clang-format -i $(FORMAT_FILES)
 
 .PHONY: lint-cpp
-lint-cpp: format-cpp-check tidy
+lint-cpp: format-cpp-check tidy-cpp
 
 .PHONY: lint-rust
 lint-rust:

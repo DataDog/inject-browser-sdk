@@ -87,3 +87,14 @@ devcontainer_image:
   artifacts:
     reports:
       dotenv: build.env
+
+format:
+  stage: test
+  extends: .not_scheduled
+  image: $DEVCONTAINER_IMAGE
+  tags: ["arch:amd64"]
+  needs:
+    - job: devcontainer_image
+      artifacts: true
+  script:
+    - make format-cpp-check

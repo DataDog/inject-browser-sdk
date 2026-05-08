@@ -14,4 +14,4 @@ const Counter injection_skipped = {"injection.skipped", "rum", true};
 const Counter injection_succeed = {"injection.succeed", "rum", true};
 const Counter injection_failed = {"injection.failed", "rum", true};
 
-} // namespace datadog::rum::telemetry
+}  // namespace datadog::rum::telemetry

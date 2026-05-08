@@ -13,21 +13,16 @@ using ::testing::DoAll;
 using ::testing::Return;
 using ::testing::SaveArg;
 
-TEST(TestRegisterModule,
-     TestRegistersForBeginRequestAndSendResponseNotifications) {
+TEST(TestRegisterModule, TestRegistersForBeginRequestAndSendResponseNotifications) {
   MockModule module;
   MockServer server;
 
-  EXPECT_CALL(server, GetAdminManager())
-      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(nullptr));
 
-  EXPECT_CALL(module, SetGlobalNotifications(_, GL_APPLICATION_START |
-                                                    GL_CONFIGURATION_CHANGE |
-                                                    GL_APPLICATION_STOP))
+  EXPECT_CALL(module, SetGlobalNotifications(
+                          _, GL_APPLICATION_START | GL_CONFIGURATION_CHANGE | GL_APPLICATION_STOP))
       .Times(1);
-  EXPECT_CALL(module, SetRequestNotifications(
-                          _, RQ_SEND_RESPONSE | RQ_BEGIN_REQUEST, _))
-      .Times(1);
+  EXPECT_CALL(module, SetRequestNotifications(_, RQ_SEND_RESPONSE | RQ_BEGIN_REQUEST, _)).Times(1);
   EXPECT_CALL(module, GetId()).Times(1);
 
   auto result = RegisterModule(0, &module, &server);
@@ -39,10 +34,9 @@ TEST(TestRegisterModule, TestRegistersValidHTTPModuleFactory) {
   MockModule module;
   MockServer server;
 
-  EXPECT_CALL(server, GetAdminManager())
-      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(nullptr));
 
-  IHttpModuleFactory *resultFactory = NULL;
+  IHttpModuleFactory* resultFactory = NULL;
   ON_CALL(module, SetRequestNotifications)
       .WillByDefault(DoAll(SaveArg<0>(&resultFactory), Return(S_OK)));
 
@@ -55,7 +49,7 @@ TEST(TestRegisterModule, TestRegistersValidHTTPModuleFactory) {
   EXPECT_EQ(result, S_OK);
   ASSERT_NE(resultFactory, nullptr);
 
-  CHttpModule *resultFactoryOutput = NULL;
+  CHttpModule* resultFactoryOutput = NULL;
   result = resultFactory->GetHttpModule(&resultFactoryOutput, NULL);
 
   EXPECT_EQ(result, S_OK);

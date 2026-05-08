@@ -2,9 +2,11 @@
 # directory name (the new shared template derives it from $(CURDIR) by default).
 DEV_CONTAINER_IMAGE_NAME := registry.ddbuild.io/ci/inject-browser-sdk/devcontainer
 
-CPP_FORMAT_SOURCES := $(shell find injector_IIS/src injector_IIS/test -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.c' \))
-CPP_TIDY_SOURCES := $(shell find injector_IIS/src -type f -name '*.cpp')
 BUILD_DIR := build_out
+# Override FORMAT_FILES / TIDY_FILES on the command line to lint a subset
+# (e.g. from pre-commit hooks). Default to the full source set.
+FORMAT_FILES ?= $(shell find injector_IIS/src injector_IIS/test -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.c' \))
+TIDY_FILES ?= $(shell find injector_IIS/src -type f -name '*.cpp')
 
 .PHONY: lint-configure
 lint-configure: dev-image
@@ -22,27 +24,18 @@ $(BUILD_DIR)/compile_commands.json:
 
 .PHONY: format-check
 format-check: dev-image
-	$(IN_DEVCONTAINER) clang-format --dry-run --Werror $(CPP_FORMAT_SOURCES)
+	$(IN_DEVCONTAINER) clang-format --dry-run --Werror $(FORMAT_FILES)
 
 .PHONY: tidy
 tidy: dev-image compile_commands.json
-	$(IN_DEVCONTAINER) clang-tidy -p . --warnings-as-errors='*' $(CPP_TIDY_SOURCES)
-
-.PHONY: lint-cpp
-lint-cpp: format-check tidy
+	$(IN_DEVCONTAINER) clang-tidy -p . --warnings-as-errors='*' $(TIDY_FILES)
 
 .PHONY: format-cpp
 format-cpp: dev-image
-	$(IN_DEVCONTAINER) clang-format -i $(CPP_FORMAT_SOURCES)
+	$(IN_DEVCONTAINER) clang-format -i $(FORMAT_FILES)
 
-# Pre-commit / piecewise variants — operate only on FILES passed in.
-.PHONY: format-cpp-files
-format-cpp-files: dev-image
-	$(IN_DEVCONTAINER) clang-format -i $(FILES)
-
-.PHONY: tidy-files
-tidy-files: dev-image compile_commands.json
-	$(IN_DEVCONTAINER) clang-tidy -p . --warnings-as-errors='*' $(FILES)
+.PHONY: lint-cpp
+lint-cpp: format-check tidy
 
 .PHONY: lint-rust
 lint-rust:
@@ -59,8 +52,8 @@ lint: lint-cpp lint-rust
 format: format-cpp format-rust
 
 .PHONY: lint-fix
-lint-fix: format-cpp compile_commands.json
-	$(IN_DEVCONTAINER) clang-tidy --fix-errors -p . $(CPP_TIDY_SOURCES)
+lint-fix: format-cpp format-rust compile_commands.json
+	$(IN_DEVCONTAINER) clang-tidy --fix-errors -p . $(TIDY_FILES)
 
 .PHONY: doc
 doc:

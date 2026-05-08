@@ -3,14 +3,14 @@ repos:
     hooks:
       - id: clang-format
         name: clang-format
-        entry: bash -c 'make format-cpp-files FILES="$*"' bash
+        entry: bash -c 'make format-cpp FORMAT_FILES="$*"' bash
         language: system
         pass_filenames: true
         files: '\.(cpp|h|c)$'
 
       - id: clang-tidy
         name: clang-tidy
-        entry: bash -c 'make tidy-files FILES="$*"' bash
+        entry: bash -c 'make tidy TIDY_FILES="$*"' bash
         language: system
         pass_filenames: true
         stages: [pre-push]

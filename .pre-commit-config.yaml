@@ -3,18 +3,18 @@ repos:
     hooks:
       - id: clang-format
         name: clang-format
-        entry: make format
+        entry: bash -c 'make format-cpp-files FILES="$*"' bash
         language: system
-        pass_filenames: false
+        pass_filenames: true
         files: '\.(cpp|h|c)$'
 
       - id: clang-tidy
         name: clang-tidy
-        entry: make lint
+        entry: bash -c 'make tidy-files FILES="$*"' bash
         language: system
-        pass_filenames: false
+        pass_filenames: true
         stages: [pre-push]
-        files: '\.(cpp|h|c)$'
+        files: '\.cpp$'
 
       - id: cargo-fmt
         name: cargo fmt

@@ -28,15 +28,38 @@ format-check: dev-image
 tidy: dev-image compile_commands.json
 	$(IN_DEVCONTAINER) clang-tidy -p . --warnings-as-errors='*' $(CPP_TIDY_SOURCES)
 
-.PHONY: lint
-lint: format-check tidy
+.PHONY: lint-cpp
+lint-cpp: format-check tidy
 
-.PHONY: format
-format: dev-image
+.PHONY: format-cpp
+format-cpp: dev-image
 	$(IN_DEVCONTAINER) clang-format -i $(CPP_FORMAT_SOURCES)
 
+# Pre-commit / piecewise variants — operate only on FILES passed in.
+.PHONY: format-cpp-files
+format-cpp-files: dev-image
+	$(IN_DEVCONTAINER) clang-format -i $(FILES)
+
+.PHONY: tidy-files
+tidy-files: dev-image compile_commands.json
+	$(IN_DEVCONTAINER) clang-tidy -p . --warnings-as-errors='*' $(FILES)
+
+.PHONY: lint-rust
+lint-rust:
+	./scripts/codestyle.sh lint
+
+.PHONY: format-rust
+format-rust:
+	./scripts/codestyle.sh format
+
+.PHONY: lint
+lint: lint-cpp lint-rust
+
+.PHONY: format
+format: format-cpp format-rust
+
 .PHONY: lint-fix
-lint-fix: format compile_commands.json
+lint-fix: format-cpp compile_commands.json
 	$(IN_DEVCONTAINER) clang-tidy --fix-errors -p . $(CPP_TIDY_SOURCES)
 
 .PHONY: doc

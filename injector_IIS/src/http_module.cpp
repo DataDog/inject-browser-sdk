@@ -192,7 +192,7 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
 
   // IIS does not NUL-terminate the header buffer, so guard the prefix length
   // against the explicit string_view size before calling _strnicmp.
-  std::string_view content_type = get_header(pHttpResponse, "Content-Type");
+  const std::string_view content_type = get_header(pHttpResponse, "Content-Type");
   if (content_type.size() < 9 ||
       _strnicmp(content_type.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
                 "text/html", 9) != 0) {

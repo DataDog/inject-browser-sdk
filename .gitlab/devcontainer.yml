@@ -17,14 +17,36 @@ devcontainer_image:
   tags: ["arch:amd64"]
   needs: []
   script:
-    - set -euo pipefail
-    # Hash inputs come from .devcontainer/context.files (the same list rsync
-    # uses to stage the build context) so this stays in sync if files are
-    # added/removed.
-    - HASH_INPUTS=$(grep -Ev '^[[:space:]]*(#|$)' .devcontainer/context.files)
-    - TAG=$(cat $HASH_INPUTS | sha256sum | cut -c1-12)
-    - IMAGE="${DEVCONTAINER_IMAGE_NAME}:${TAG}"
-    - echo "DEVCONTAINER_IMAGE=${IMAGE}" > build.env
+    # Stage and hash the devcontainer build context the same way
+    # .devcontainer/devcontainer.mk does (rsync the files listed in
+    # .devcontainer/context.files into a temp dir, optionally applying
+    # context.filter, then hash the staged tree with `--- <path> ---`
+    # markers). Local `make dev-image` and this CI job must produce the
+    # same tag — otherwise the cache-hit check below misses every time.
+    - |
+      set -euo pipefail
+      if [ ! -f .devcontainer/context.files ]; then
+        echo "ERROR: .devcontainer/context.files not found" >&2
+        exit 1
+      fi
+      ctx=$(mktemp -d)
+      trap 'rm -rf "$ctx"' EXIT
+      if [ -f .devcontainer/context.filter ]; then
+        grep -Ev '^[[:space:]]*(#|$)' .devcontainer/context.files \
+          | rsync -aR --files-from=- --filter="merge .devcontainer/context.filter" ./ "$ctx/"
+      else
+        grep -Ev '^[[:space:]]*(#|$)' .devcontainer/context.files \
+          | rsync -aR --files-from=- ./ "$ctx/"
+      fi
+      if [ ! -f "$ctx/.devcontainer/Dockerfile" ]; then
+        echo "ERROR: .devcontainer/Dockerfile not staged; check .devcontainer/context.files" >&2
+        exit 1
+      fi
+      TAG=$(cd "$ctx" && find . -type f | LC_ALL=C sort \
+        | while IFS= read -r f; do printf -- '--- %s ---\n' "$f"; cat "$f"; done \
+        | sha256sum | cut -c1-12)
+      IMAGE="${DEVCONTAINER_IMAGE_NAME}:${TAG}"
+      echo "DEVCONTAINER_IMAGE=${IMAGE}" > build.env
     - |
       if crane manifest "${IMAGE}" >/dev/null 2>&1; then
         echo "Image ${IMAGE} already exists in registry"

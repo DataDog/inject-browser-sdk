@@ -23,9 +23,5 @@ Checks: >
   readability-redundant-smartptr-get,
   readability-simplify-boolean-expr,
 
-CheckOptions:
-  # Prefer if (!ptr) over if (ptr == nullptr) — C++ Core Guidelines ES.87
-  readability-simplify-boolean-expr.SimplifyDeMorgan: true
-
 WarningsAsErrors: ''
 HeaderFilterRegex: 'injector_IIS/src/.*'

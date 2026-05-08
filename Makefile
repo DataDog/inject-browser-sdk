@@ -20,11 +20,12 @@ lint-configure: dev-image
 	$(IN_DEVCONTAINER) cmake --build $(BUILD_DIR) \
 		--target _corrosion_cbindgen_inject_browser_sdk_ffi_bindings_injectbrowsersdk_h
 
-compile_commands.json: $(BUILD_DIR)/compile_commands.json
-	cp $< $@
-
-$(BUILD_DIR)/compile_commands.json:
+# Sub-make for lint-configure so this file target stays non-phony — once
+# compile_commands.json exists, downstream targets (tidy, lint-fix) reuse
+# it instead of reconfiguring on every invocation.
+compile_commands.json:
 	$(MAKE) lint-configure
+	cp $(BUILD_DIR)/compile_commands.json $@
 
 .PHONY: format-check
 format-check: dev-image

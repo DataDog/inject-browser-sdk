@@ -8,29 +8,23 @@ BUILD_DIR := build_out
 # file expects versionless `clang-cl`/`lld-link`/etc. which apt installs
 # under /usr/lib/llvm-<ver>/bin/.
 LLVM_VERSION ?= 20
-# Override FORMAT_FILES / TIDY_FILES on the command line to lint a subset
-# (e.g. from pre-commit hooks). Default to the full source set.
+# Override on the command line (e.g. from pre-commit hooks) to lint a subset.
 FORMAT_FILES ?= $(shell find $(IIS_DIR)/src $(IIS_DIR)/test -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.c' \))
 TIDY_FILES ?= $(shell find $(IIS_DIR)/src -type f -name '*.cpp')
 
 .PHONY: lint-configure
-lint-configure: dev-image
+lint-configure: dev-image-cached
 	$(IN_DEVCONTAINER) cmake -S $(IIS_DIR) --preset=ci-xcomp \
 		-B $(BUILD_DIR) \
 		-DTOOLCHAIN_ROOT=/usr/lib/llvm-$(LLVM_VERSION)/bin/
 	$(IN_DEVCONTAINER) cmake --build $(BUILD_DIR) \
 		--target _corrosion_cbindgen_inject_browser_sdk_ffi_bindings_injectbrowsersdk_h
 
-# Sub-make for lint-configure so this file target stays non-phony — once
-# compile_commands.json exists, downstream targets (tidy, lint-fix) reuse
-# it instead of reconfiguring on every invocation.
+# Sub-make so this stays a non-phony file target (build once, reused).
 compile_commands.json:
 	$(MAKE) lint-configure
 	cp $(BUILD_DIR)/compile_commands.json $@
 
-# Hot-path C++ targets depend on dev-image-cached (skips the stage+hash+
-# docker-pull cycle when .devcontainer/.image-ref already exists). Run
-# `make dev-image` explicitly to refresh.
 .PHONY: format-cpp-check
 format-cpp-check: dev-image-cached
 	$(IN_DEVCONTAINER) clang-format --dry-run --Werror $(FORMAT_FILES)

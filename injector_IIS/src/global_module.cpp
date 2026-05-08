@@ -29,11 +29,11 @@ GlobalModule::GlobalModule(IHttpServer* server, DWORD server_version,
   cfg.integration_version = std::to_string(server_version);
 
   auto maybe_telemetry_cfg = datadog::telemetry::finalize_config(cfg);
-  if (auto error = maybe_telemetry_cfg.if_error()) {
+  if (auto* error = maybe_telemetry_cfg.if_error()) {
     logger_->error(std::format("Failed to configure the telemetry module: {}", error->message));
   } else {
     const datadog::tracing::Clock& clock = datadog::tracing::default_clock;
-    datadog::tracing::DatadogAgentConfig agent_cfg_for_telemetry;
+    datadog::tracing::DatadogAgentConfig const agent_cfg_for_telemetry;
     auto finalized_agent_cfg_result =
         datadog::tracing::finalize_config(agent_cfg_for_telemetry, logger_, clock);
     if (auto* error = finalized_agent_cfg_result.if_error()) {
@@ -43,7 +43,7 @@ GlobalModule::GlobalModule(IHttpServer* server, DWORD server_version,
 
       return;
     }
-    datadog::tracing::FinalizedDatadogAgentConfig dac = *finalized_agent_cfg_result;
+    datadog::tracing::FinalizedDatadogAgentConfig const dac = *finalized_agent_cfg_result;
 
     if (!dac.http_client) {
       logger_->error("HTTPClient for telemetry is null, no telemetry will be sent");
@@ -72,10 +72,10 @@ GlobalModule::OnGlobalApplicationStart(IHttpApplicationStartProvider* provider) 
   ctx->logger = logger_.get();
   ctx->server = server_;
 
-  auto app = provider->GetApplication();
+  auto* app = provider->GetApplication();
   assert(app);
 
-  auto config_path = app->GetAppConfigPath();
+  const auto* config_path = app->GetAppConfigPath();
   logger_->info(std::format("Parsing configuration \"{}\" for app (id: {})",
                             wstring_to_utf8(config_path),
                             wstring_to_utf8(app->GetApplicationId())));
@@ -101,7 +101,7 @@ GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider* provider) {
   if (!app) {
     return GL_NOTIFICATION_CONTINUE;
   }
-  auto cfg_path = app->GetAppConfigPath();
+  const auto* cfg_path = app->GetAppConfigPath();
   if (!cfg_path) {
     return GL_NOTIFICATION_CONTINUE;
   }
@@ -122,7 +122,7 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
   assert(provider != nullptr);
   assert(server_ != nullptr);
 
-  auto cfg_path = provider->GetChangePath();
+  const auto* cfg_path = provider->GetChangePath();
   if (cfg_path == nullptr) {
     return GL_NOTIFICATION_CONTINUE;
   }
@@ -130,7 +130,7 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
   logger_->info(
       std::format("Dispatching configuration update (\"{}\")", wstring_to_utf8(cfg_path)));
 
-  std::wstring_view change_path_view(cfg_path);
+  std::wstring_view const change_path_view(cfg_path);
   if (change_path_view.find(L"MACHINE/WEBROOT/APPHOST") != std::wstring_view::npos) {
     update_server_log_level();
   }

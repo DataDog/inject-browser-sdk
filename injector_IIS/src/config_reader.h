@@ -18,6 +18,7 @@
 
 namespace datadog::rum {
 
+// NOLINTNEXTLINE(bugprone-exception-escape)
 struct RumConfig {
   int version;
   std::unordered_map<std::string, std::string> sdk_options;

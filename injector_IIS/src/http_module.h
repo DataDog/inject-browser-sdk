@@ -10,6 +10,7 @@
 
 #include "framework.h"
 #include "module_context.h"
+#include <new>
 
 namespace datadog::rum {
 
@@ -18,10 +19,10 @@ class HttpModule : public CHttpModule {
   static const DWORD NotificationsMask = RQ_SEND_RESPONSE | RQ_BEGIN_REQUEST;
 
   REQUEST_NOTIFICATION_STATUS OnBeginRequest(IN IHttpContext* pHttpContext,
-                                             IN IHttpEventProvider* pProvider);
+                                             IN IHttpEventProvider* pProvider) override;
 
   REQUEST_NOTIFICATION_STATUS
-  OnSendResponse(IN IHttpContext* pHttpContext, IN ISendResponseProvider* pProvider);
+  OnSendResponse(IN IHttpContext* pHttpContext, IN ISendResponseProvider* pProvider) override;
 
   bool ShouldAttemptInjection(IHttpResponse& pHttpResponse, const ModuleContext& ctx) const;
 
@@ -33,17 +34,17 @@ class HttpModuleFactory : public IHttpModuleFactory {
  public:
   ~HttpModuleFactory() = default;
 
-  HRESULT GetHttpModule(OUT CHttpModule** ppModule, IN IModuleAllocator*) {
-    auto http_module = new HttpModule;
+  HRESULT GetHttpModule(OUT CHttpModule** ppModule, IN IModuleAllocator*) override {
+    auto* http_module = new (std::nothrow) HttpModule;
     if (http_module == nullptr) {
-      return ERROR_NOT_ENOUGH_MEMORY;
+      return E_OUTOFMEMORY;
     }
 
     *ppModule = http_module;
     return S_OK;
   }
 
-  inline void Terminate() { delete this; }
+  inline void Terminate() override { delete this; }
 };
 
 }  // namespace datadog::rum

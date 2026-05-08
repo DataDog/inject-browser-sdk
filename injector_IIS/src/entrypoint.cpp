@@ -11,6 +11,7 @@
 #include "module_context.h"
 #include "version.h"
 #include <cassert>
+#include <new>
 
 __declspec(dllexport) HRESULT __stdcall RegisterModule(DWORD server_version,
                                                        IHttpModuleRegistrationInfo* module_info,
@@ -35,7 +36,12 @@ __declspec(dllexport) HRESULT __stdcall RegisterModule(DWORD server_version,
   // come to a complete stop. We don't want to cause any downtime on our
   // customers' servers, so even in the case of a fatal error, we write an error
   // to the event log and return S_OK.
-  auto global_module = new datadog::rum::GlobalModule(server, server_version, logger);
+  auto* global_module =
+      new (std::nothrow) datadog::rum::GlobalModule(server, server_version, logger);
+  if (global_module == nullptr) {
+    logger->error("Out of memory while creating GlobalModule");
+    return S_OK;
+  }
 
   auto hr = module_info->SetGlobalNotifications(global_module,
                                                 datadog::rum::GlobalModule::NotificationsMask);
@@ -44,7 +50,11 @@ __declspec(dllexport) HRESULT __stdcall RegisterModule(DWORD server_version,
     return S_OK;
   }
 
-  auto http_factory = new datadog::rum::HttpModuleFactory;
+  auto* http_factory = new (std::nothrow) datadog::rum::HttpModuleFactory;
+  if (http_factory == nullptr) {
+    logger->error("Out of memory while creating HttpModuleFactory");
+    return S_OK;
+  }
 
   hr = module_info->SetRequestNotifications(http_factory,
                                             datadog::rum::HttpModule::NotificationsMask, 0);

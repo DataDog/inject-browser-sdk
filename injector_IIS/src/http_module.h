@@ -37,7 +37,7 @@ class HttpModuleFactory : public IHttpModuleFactory {
   HRESULT GetHttpModule(OUT CHttpModule** ppModule, IN IModuleAllocator*) override {
     auto* http_module = new (std::nothrow) HttpModule;
     if (http_module == nullptr) {
-      return ERROR_NOT_ENOUGH_MEMORY;
+      return E_OUTOFMEMORY;
     }
 
     *ppModule = http_module;

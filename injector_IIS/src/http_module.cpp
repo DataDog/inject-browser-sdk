@@ -18,6 +18,7 @@ namespace datadog::rum {
 namespace {
 
 constexpr std::string_view k_injection_header = "x-datadog-rum-injected";
+constexpr std::string_view k_text_html = "text/html";
 
 std::string_view get_header(IHttpResponse& http_response, std::string_view header) {
   USHORT length = 0;
@@ -181,9 +182,9 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
   // IIS does not NUL-terminate the header buffer, so guard the prefix length
   // against the explicit string_view size before calling _strnicmp.
   std::string_view content_type = get_header(pHttpResponse, "Content-Type");
-  if (content_type.size() < 9 ||
+  if (content_type.size() < k_text_html.size() ||
       _strnicmp(content_type.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
-                "text/html", 9) != 0) {
+                k_text_html.data(), k_text_html.size()) != 0) {
     datadog::telemetry::counter::increment(
         telemetry::injection_skipped,
         telemetry::build_tags("reason:content-type", ctx.application_id_tag,

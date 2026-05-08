@@ -16,8 +16,11 @@ lint-configure: dev-image-cached
 		--target _corrosion_cbindgen_inject_browser_sdk_ffi_bindings_injectbrowsersdk_h
 
 # lint-configure is .PHONY (always rebuilds); wrap it in a sub-make so this
-# file target is only (re)generated when its CMake inputs change.
-compile_commands.json: $(shell find $(IIS_DIR) -name CMakeLists.txt -o -name '*.cmake' -o -name CMakePresets.json)
+# file target is only (re)generated when its CMake inputs change. Prune any
+# `build*` subtree so we don't depend on cmake-generated files (which can
+# contain whitespace, e.g. corrosion's `output directory/` test fixture, and
+# would otherwise break Make's whitespace-separated prereq parsing).
+compile_commands.json: $(shell find $(IIS_DIR) -path '*/build*' -prune -o \( -name CMakeLists.txt -o -name '*.cmake' -o -name CMakePresets.json \) -print)
 	$(MAKE) lint-configure
 	cp $(BUILD_DIR)/compile_commands.json $@
 

@@ -97,4 +97,4 @@ format:
     - job: devcontainer_image
       artifacts: true
   script:
-    - make format-check
+    - make format-cpp-check

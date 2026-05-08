@@ -21,7 +21,7 @@
 #include <utility>
 
 using namespace datadog::rum;
-using ::testing::_;
+using ::testing::_;  // NOLINT(bugprone-reserved-identifier) — gtest matcher convention
 using ::testing::DoAll;
 using ::testing::Invoke;
 using ::testing::Matcher;
@@ -155,7 +155,7 @@ class MockElementCollection : public IAppHostElementCollection {
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE get_Item(VARIANT index, IAppHostElement** ppElement) override {
-    DWORD i = (index.vt == VT_UI4) ? index.ulVal : static_cast<DWORD>(index.iVal);
+    const DWORD i = (index.vt == VT_UI4) ? index.ulVal : static_cast<DWORD>(index.iVal);
     if (i < elements_.size()) {
       *ppElement = &elements_[i];
       return S_OK;
@@ -264,11 +264,12 @@ class MockAdminManager : public IAppHostAdminManager {
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
 
-  HRESULT STDMETHODCALLTYPE GetAdminSection(BSTR bstrSectionName, BSTR bstrPath,
-                                            IAppHostElement** ppElement) override {
+  HRESULT STDMETHODCALLTYPE
+  GetAdminSection(BSTR bstrSectionName,  // NOLINT(bugprone-easily-swappable-parameters)
+                  BSTR bstrPath, IAppHostElement** ppElement) override {
     if (_wcsicmp(bstrSectionName, L"system.webServer/datadogRum") == 0) {
       // Look up by exact path first, then fall back to default.
-      std::wstring path(bstrPath ? bstrPath : L"");
+      const std::wstring path(bstrPath ? bstrPath : L"");
       auto it = configs_.find(path);
       if (it != configs_.end()) {
         *ppElement = it->second;
@@ -418,7 +419,7 @@ static RegisteredModule registerModule(MockServer& server) {
       .WillByDefault(DoAll(SaveArg<0>(&result.factory), Return(S_OK)));
   EXPECT_CALL(moduleInfo, SetRequestNotifications(_, _, _)).Times(1);
 
-  HRESULT hr = RegisterModule(0, &moduleInfo, &server);
+  const HRESULT hr = RegisterModule(0, &moduleInfo, &server);
   EXPECT_EQ(hr, S_OK);
   return result;
 }
@@ -505,8 +506,8 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
 
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
 
-  std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                     pr.chunk.FromMemory.BufferLength);
+  const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                           pr.chunk.FromMemory.BufferLength);
   EXPECT_NE(output.find("DD_RUM"), std::string::npos) << "Expected DD_RUM in output, got:\n"
                                                       << output;
   EXPECT_NE(output.find("test-app-id"), std::string::npos);
@@ -553,8 +554,8 @@ TEST(InjectionPipeline, DisabledConfig) {
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
 
   // Body unchanged.
-  std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                     pr.chunk.FromMemory.BufferLength);
+  const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                           pr.chunk.FromMemory.BufferLength);
   EXPECT_EQ(output, html);
 
   mod.factory->Terminate();
@@ -610,8 +611,8 @@ TEST(InjectionPipeline, PerLocationConfig) {
 
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
 
-    std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                       pr.chunk.FromMemory.BufferLength);
+    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                             pr.chunk.FromMemory.BufferLength);
     EXPECT_NE(output.find("service-a"), std::string::npos)
         << "Root path should inject with service-a, got:\n"
         << output;
@@ -628,8 +629,8 @@ TEST(InjectionPipeline, PerLocationConfig) {
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE)
         << "/api path should skip injection (location override disabled RUM)";
 
-    std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                       pr.chunk.FromMemory.BufferLength);
+    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                             pr.chunk.FromMemory.BufferLength);
     EXPECT_EQ(output, html) << "/api path response should be unchanged";
   }
 
@@ -682,8 +683,8 @@ TEST(InjectionPipeline, MetadataCacheHit) {
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
 
-    std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                       pr.chunk.FromMemory.BufferLength);
+    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                             pr.chunk.FromMemory.BufferLength);
     EXPECT_NE(output.find("DD_RUM"), std::string::npos);
   }
 
@@ -765,8 +766,8 @@ TEST(InjectionPipeline, SetModuleContextFailure) {
 
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
 
-  std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                     pr.chunk.FromMemory.BufferLength);
+  const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                           pr.chunk.FromMemory.BufferLength);
   EXPECT_EQ(output, html);
 
   mod.factory->Terminate();
@@ -894,8 +895,8 @@ TEST(InjectionPipeline, TwoEnabledLocationsDistinctConfig) {
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
-    std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                       pr.chunk.FromMemory.BufferLength);
+    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                             pr.chunk.FromMemory.BufferLength);
     EXPECT_NE(output.find("svc-alpha"), std::string::npos);
     EXPECT_EQ(output.find("svc-beta"), std::string::npos);
   }
@@ -912,8 +913,8 @@ TEST(InjectionPipeline, TwoEnabledLocationsDistinctConfig) {
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
-    std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                       pr.chunk.FromMemory.BufferLength);
+    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                             pr.chunk.FromMemory.BufferLength);
     EXPECT_NE(output.find("svc-beta"), std::string::npos);
     EXPECT_EQ(output.find("svc-alpha"), std::string::npos);
   }
@@ -1015,7 +1016,7 @@ TEST(InjectionPipeline, OnBeginRequestRespectsLocationOverride) {
 // MissingConfig: no datadogRum section at all — should not crash or inject.
 TEST(InjectionPipeline, MissingConfig) {
   // Admin manager that returns E_FAIL for all paths — no datadogRum config.
-  std::map<std::wstring, MockRumConfigElement*> empty;
+  const std::map<std::wstring, MockRumConfigElement*> empty;
   MockAdminManager adminManager(empty);
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
@@ -1043,8 +1044,8 @@ TEST(InjectionPipeline, MissingConfig) {
 
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
 
-  std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                     pr.chunk.FromMemory.BufferLength);
+  const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                           pr.chunk.FromMemory.BufferLength);
   EXPECT_EQ(output, html);
 
   mod.factory->Terminate();

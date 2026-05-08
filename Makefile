@@ -3,6 +3,10 @@
 DEV_CONTAINER_IMAGE_NAME := registry.ddbuild.io/ci/inject-browser-sdk/devcontainer
 
 BUILD_DIR := build_out
+# Must match ARG LLVM_VERSION in .devcontainer/Dockerfile — the toolchain
+# file expects versionless `clang-cl`/`lld-link`/etc. which apt installs
+# under /usr/lib/llvm-<ver>/bin/.
+LLVM_VERSION ?= 20
 # Override FORMAT_FILES / TIDY_FILES on the command line to lint a subset
 # (e.g. from pre-commit hooks). Default to the full source set.
 FORMAT_FILES ?= $(shell find injector_IIS/src injector_IIS/test -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.c' \))
@@ -12,7 +16,7 @@ TIDY_FILES ?= $(shell find injector_IIS/src -type f -name '*.cpp')
 lint-configure: dev-image
 	$(IN_DEVCONTAINER) cmake -S injector_IIS --preset=ci-xcomp \
 		-B $(BUILD_DIR) \
-		-DTOOLCHAIN_ROOT=/usr/lib/llvm-20/bin/
+		-DTOOLCHAIN_ROOT=/usr/lib/llvm-$(LLVM_VERSION)/bin/
 	$(IN_DEVCONTAINER) cmake --build $(BUILD_DIR) \
 		--target _corrosion_cbindgen_inject_browser_sdk_ffi_bindings_injectbrowsersdk_h
 

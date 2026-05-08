@@ -95,7 +95,7 @@ set(DD_TRACE_STATIC_CRT ON)
 FetchContent_Declare(
   dd-trace-cpp
   GIT_REPOSITORY https://github.com/DataDog/dd-trace-cpp
-  GIT_TAG        290cc2780482318e6c7aa44b70063ad5eb19b361
+  GIT_TAG        290cc2780482318e6c7aa44b70063ad5eb19b361 
   GIT_SHALLOW    OFF
   GIT_PROGRESS   ON
 )

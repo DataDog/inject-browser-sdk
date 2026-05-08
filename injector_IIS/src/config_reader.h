@@ -30,8 +30,12 @@ enum class ReadConfStatus {
 };
 
 struct ReadConfResult {
+  static ReadConfResult ok(RumConfig config) { return {ReadConfStatus::Ok, std::move(config)}; }
+  static ReadConfResult absent() { return {ReadConfStatus::Absent, {}}; }
+  static ReadConfResult error() { return {ReadConfStatus::Error, {}}; }
+
   ReadConfStatus status;
-  std::optional<RumConfig> config;  // Set only when status == Ok.
+  std::optional<RumConfig> config = std::nullopt;  // Set only when status == Ok.
 };
 
 struct ServerConfig {

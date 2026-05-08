@@ -73,7 +73,10 @@ GlobalModule::OnGlobalApplicationStart(IHttpApplicationStartProvider* provider) 
   ctx->server = server_;
 
   auto* app = provider->GetApplication();
-  assert(app);
+  if (app == nullptr) {
+    logger_->error("Application is null in OnGlobalApplicationStart");
+    return GL_NOTIFICATION_CONTINUE;
+  }
 
   const auto* config_path = app->GetAppConfigPath();
   if (!config_path) {

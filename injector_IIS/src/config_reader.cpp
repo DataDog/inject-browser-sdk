@@ -165,7 +165,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   auto* admin_manager = server.GetAdminManager();
   if (admin_manager == nullptr) {
     logger.debug("Admin manager is null, cannot read RUM config");
-    return {ReadConfStatus::Error, std::nullopt};
+    return ReadConfResult::error();
   }
 
   IAppHostElement* cfg_root_elem = nullptr;
@@ -174,15 +174,19 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   if (res != S_OK) {
     logger.debug(std::format("datadogRum config section not found: {}",
                              std::system_category().message(res)));
-    return {ReadConfStatus::Absent, std::nullopt};
+    return ReadConfResult::absent();
   }
 
   const auto defer_root = defer([&] { cfg_root_elem->Release(); });
 
   IAppHostProperty* enabled_prop = get_property(*cfg_root_elem, L"enabled");
   if (enabled_prop == nullptr) {
-    // missing enabled attribute -> invalid format -> disabled
-    return {ReadConfStatus::Absent, std::nullopt};
+    // get_property returns nullptr for both "attribute missing" and a
+    // failed COM call; can't distinguish. Treat as transient error so a
+    // schema-violating or transiently-failing read keeps the existing
+    // snippet rather than silently wiping injection.
+    logger.debug("Failed to read 'enabled' property — keeping existing config");
+    return ReadConfResult::error();
   }
 
   const auto defer_enabled_prop = defer([&] { enabled_prop->Release(); });
@@ -191,11 +195,11 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   const auto defer_enabled_val = defer([&] { VariantClear(&enabled_val); });
   if (enabled_val.vt != VT_BOOL) {
     logger.debug("Failed to read 'enabled' property value");
-    return {ReadConfStatus::Error, std::nullopt};
+    return ReadConfResult::error();
   }
   if (!enabled_val.boolVal) {
     logger.info("RUM injection disabled for this path");
-    return {ReadConfStatus::Absent, std::nullopt};
+    return ReadConfResult::absent();
   }
 
   int cfg_version = 6;
@@ -224,7 +228,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   if (FAILED(hr_col)) {
     logger.error(std::format("Failed to read SDK options collection: {}",
                              std::system_category().message(hr_col)));
-    return {ReadConfStatus::Error, std::nullopt};
+    return ReadConfResult::error();
   }
   if (col != nullptr) {
     const auto defer_col = defer([&] { col->Release(); });
@@ -234,7 +238,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     if (FAILED(hr_count)) {
       logger.error(std::format("Failed to read SDK option count: {}",
                                std::system_category().message(hr_count)));
-      return {ReadConfStatus::Error, std::nullopt};
+      return ReadConfResult::error();
     }
 
     VARIANT item_idx;
@@ -299,7 +303,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     }
   }
 
-  return {ReadConfStatus::Ok, RumConfig{cfg_version, std::move(rum_sdk_opts)}};
+  return ReadConfResult::ok(RumConfig{cfg_version, std::move(rum_sdk_opts)});
 }
 
 ReadConfStatus update_module_context(ModuleContext& ctx, const IHttpServer& server,
@@ -325,26 +329,17 @@ ReadConfStatus update_module_context(ModuleContext& ctx, const IHttpServer& serv
   auto& config = *result.config;
   Snippet* snippet = make_snippet(config.version, config.sdk_options, logger);
 
+  // Snippet creation failures are treated as transient: keep the existing
+  // snippet/tags and signal Error so callers (e.g. per-location caching)
+  // skip caching this failure state and retry on the next request.
   if (snippet == nullptr) {
-    logger.error("Failed to create RUM snippet");
-    if (ctx.snippet != nullptr) {
-      snippet_cleanup(ctx.snippet);
-      ctx.snippet = nullptr;
-    }
-    ctx.application_id_tag.clear();
-    ctx.remote_config_tag.clear();
-    return result.status;
+    logger.error("Failed to create RUM snippet — keeping existing snippet for retry");
+    return ReadConfStatus::Error;
   }
   if (snippet->error_code != 0) {
     logger.error(std::format("Failed to create RUM snippet: {}", snippet->error_message));
     snippet_cleanup(snippet);
-    if (ctx.snippet != nullptr) {
-      snippet_cleanup(ctx.snippet);
-      ctx.snippet = nullptr;
-    }
-    ctx.application_id_tag.clear();
-    ctx.remote_config_tag.clear();
-    return result.status;
+    return ReadConfStatus::Error;
   }
 
   logger.info("Configuration validated");

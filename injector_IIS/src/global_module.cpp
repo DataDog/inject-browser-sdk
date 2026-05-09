@@ -148,20 +148,15 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
     update_server_log_level();
   }
 
-  // NOTE(@dmehala): There's a mismatch between the config path given in
-  // `OnGlobalApplicationStart` and the one here. This path is the common parent
-  // config, we need to ensure the update is sent to all applications that
-  // inherit from it.
-  for (const auto& [path, ctx] : configurations_) {
-    if (ctx == nullptr) {
-      // Application was stopped — the pointer was nulled in
-      // OnGlobalApplicationStop. Safe to skip.
-      // TODO(@dmehala): Report a telemetry log.
-      continue;
-    }
-
-    if (std::wstring_view(path).starts_with(cfg_path)) {
-      update_module_context(*ctx, *server_, path.c_str(), *logger_);
+  // The change path is the common parent; iterate apps whose config path
+  // is rooted at it. configurations_ is std::map (sorted), so lower_bound
+  // skips unrelated leading entries.
+  // TODO(@dmehala): Report a telemetry log when ctx is null (stopped app).
+  std::wstring_view const change_path(cfg_path);
+  for (auto it = configurations_.lower_bound(std::wstring(change_path));
+       it != configurations_.end() && std::wstring_view(it->first).starts_with(change_path); ++it) {
+    if (it->second != nullptr) {
+      update_module_context(*it->second, *server_, it->first.c_str(), *logger_);
     }
   }
 

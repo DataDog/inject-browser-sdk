@@ -260,7 +260,6 @@ class MockAdminManager : public IAppHostAdminManager {
   MockAdminManager(std::map<std::wstring, MockRumConfigElement*> configs)
       : configs_(std::move(configs)) {}
 
-  // Swap the default config (used by reload tests).
   void SetConfig(MockRumConfigElement* element) { configs_[L""] = element; }
 
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
@@ -966,8 +965,7 @@ TEST(InjectionPipeline, OnBeginRequestRespectsLocationOverride) {
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
   }
 
-  // Now: OnBeginRequest to /api — should NOT set the pending header because
-  // the per-location cache says disabled.
+  // OnBeginRequest to /api — pending header must NOT be set (location is disabled).
   {
     MockHttpContext httpCtx;
     MockHttpRequest httpReq;
@@ -1107,7 +1105,6 @@ TEST(InjectionPipeline, GetCollectionFailurePreservesExistingConfig) {
   ASSERT_NE(ctx->snippet, nullptr);
   auto* original_snippet = ctx->snippet;
 
-  // Now break get_Collection and trigger config reload.
   config.SetCollectionResult(E_OUTOFMEMORY);
 
   MockConfigChangeProvider configChange(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
@@ -1146,8 +1143,7 @@ TEST(InjectionPipeline, MissingEnabledAttributeOnFirstLoad) {
   mod.global->Terminate();
 }
 
-// A reload that produces a config which fails make_snippet validation
-// (here: sessionSampleRate=200, out of the 0..100 range) must preserve the
+// A reload whose config fails make_snippet validation must preserve the
 // previous valid snippet — operators rely on last-known-good injection
 // continuing while a broken deploy is investigated.
 TEST(InjectionPipeline, InvalidConfigOnReloadPreservesExistingSnippet) {
@@ -1169,9 +1165,7 @@ TEST(InjectionPipeline, InvalidConfigOnReloadPreservesExistingSnippet) {
   ASSERT_NE(ctx->snippet, nullptr);
   auto* original_snippet = ctx->snippet;
 
-  // Swap in a config that the SDK validator rejects. Note: this must build
-  // the same way as the default constructor uses but with an out-of-range
-  // sample rate so make_snippet returns a snippet with error_code != 0.
+  // sessionSampleRate=200 is out of the 0..100 range → error_code 4.
   MockRumConfigElement invalid(true, {{L"applicationId", L"test-app-id"},
                                       {L"clientToken", L"test-client-token"},
                                       {L"site", L"datadoghq.com"},
@@ -1208,7 +1202,6 @@ TEST(InjectionPipeline, MissingEnabledAttributePreservesExistingConfig) {
   ASSERT_NE(ctx->snippet, nullptr);
   auto* original_snippet = ctx->snippet;
 
-  // Now break the 'enabled' lookup and trigger a config reload.
   config.SetEnabledPropertyMissing(true);
 
   MockConfigChangeProvider configChange(L"MACHINE/WEBROOT/APPHOST/Default Web Site");

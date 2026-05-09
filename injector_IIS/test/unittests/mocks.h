@@ -196,13 +196,6 @@ class MockHttpSite : public IHttpSite {
   MOCK_METHOD(IHttpPerfCounterInfo*, GetPerfCounterInfo, (), (override));
 };
 
-class MockHttpApplication : public IHttpApplication {
- public:
-  MOCK_METHOD(PCWSTR, GetApplicationPhysicalPath, (), (const, override));
-  MOCK_METHOD(PCWSTR, GetApplicationId, (), (const, override));
-  MOCK_METHOD(PCWSTR, GetAppConfigPath, (), (const, override));
-  MOCK_METHOD(IHttpModuleContextContainer*, GetModuleContextContainer, (), (override));
-};
 class MockEventProvider : public IHttpEventProvider {
  public:
   MOCK_METHOD(VOID, SetErrorStatus, (HRESULT hrError), (override));

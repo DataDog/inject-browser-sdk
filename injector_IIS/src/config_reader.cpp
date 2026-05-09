@@ -329,20 +329,20 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
   // On make_snippet failure, preserve the existing snippet/tags. Operators
   // prefer continued injection with the last-known-good config over going
   // dark on a broken deploy; the next valid reload replaces it.
-  if (snippet == nullptr) {
-    logger.error("Failed to create RUM snippet; keeping previous config");
+  auto report_invalid = [&](std::string error_tag, const std::string& message) {
+    logger.error(message + "; keeping previous config");
     datadog::telemetry::counter::increment(
         telemetry::config_invalid,
-        telemetry::build_tags("error_code:alloc", ctx.application_id_tag, ctx.remote_config_tag));
+        telemetry::build_tags(std::move(error_tag), ctx.application_id_tag, ctx.remote_config_tag));
+  };
+
+  if (snippet == nullptr) {
+    report_invalid("error_code:alloc", "Failed to create RUM snippet");
     return;
   }
   if (snippet->error_code != 0) {
-    logger.error(std::format("Failed to create RUM snippet: {}; keeping previous config",
-                             snippet->error_message));
-    datadog::telemetry::counter::increment(
-        telemetry::config_invalid,
-        telemetry::build_tags(std::format("error_code:{}", snippet->error_code),
-                              ctx.application_id_tag, ctx.remote_config_tag));
+    report_invalid(std::format("error_code:{}", snippet->error_code),
+                   std::format("Failed to create RUM snippet: {}", snippet->error_message));
     snippet_cleanup(snippet);
     return;
   }

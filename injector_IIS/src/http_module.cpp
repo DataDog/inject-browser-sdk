@@ -47,6 +47,52 @@ ModuleContext* resolve_cached_context(IHttpContext& http_context, ModuleContext&
   return &app_ctx;
 }
 
+// Reads + caches the per-location context for this request. Returns the new
+// context on success, &app_ctx when no metadata path is available (use
+// app-level config), or nullptr on a fatal caching failure (caller should
+// short-circuit the notification).
+ModuleContext* try_cache_per_location_context(IHttpContext& http_context, ModuleContext& app_ctx) {
+  auto* metadata = http_context.GetMetadata();
+  if (!metadata || !app_ctx.server) return &app_ctx;
+
+  auto* meta_container = metadata->GetModuleContextContainer();
+  if (!meta_container) return &app_ctx;
+
+  const auto* meta_path = metadata->GetMetaPath();
+  if (!meta_path) {
+    app_ctx.logger->debug("MetaPath is null, using app-level config");
+    return &app_ctx;
+  }
+
+  auto new_ctx = std::make_unique<ModuleContext>();
+  new_ctx->logger = app_ctx.logger;
+  new_ctx->server = app_ctx.server;
+
+  // Cache even on Error: avoids retrying a broken COM read every request.
+  // Recovery happens via OnGlobalConfigurationChange.
+  update_module_context(*new_ctx, *app_ctx.server, meta_path, *app_ctx.logger);
+
+  // Inherit app-level tags when per-location config didn't set its own.
+  if (new_ctx->application_id_tag.empty()) new_ctx->application_id_tag = app_ctx.application_id_tag;
+  if (new_ctx->remote_config_tag.empty()) new_ctx->remote_config_tag = app_ctx.remote_config_tag;
+
+  auto hr = meta_container->SetModuleContext(new_ctx.get(), g_module_id);
+  if (SUCCEEDED(hr)) {
+    return new_ctx.release();  // container owns it now
+  }
+  if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
+    // Another thread won the race — use its cached context.
+    auto* won = static_cast<ModuleContext*>(meta_container->GetModuleContext(g_module_id));
+    if (!won) {
+      app_ctx.logger->error("Race condition: cached context disappeared");
+    }
+    return won;  // nullptr on the (rare) lookup miss
+  }
+  app_ctx.logger->error(
+      std::format("Failed to cache per-location context: {}", std::system_category().message(hr)));
+  return nullptr;
+}
+
 }  // namespace
 
 REQUEST_NOTIFICATION_STATUS
@@ -117,49 +163,10 @@ HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvid
   // Resolve per-<location> config. Cached on the IMetadataInfo container;
   // IIS recycles it on config change, so hot-reload works automatically.
   ModuleContext* ctx = resolve_cached_context(*http_context, app_ctx);
-
-  // Cache miss — read config for this request's effective path.
   if (ctx == &app_ctx) {
-    auto* metadata = http_context->GetMetadata();
-    if (metadata && app_ctx.server) {
-      auto* meta_container = metadata->GetModuleContextContainer();
-      if (meta_container) {
-        const auto* meta_path = metadata->GetMetaPath();
-        if (!meta_path) {
-          app_ctx.logger->debug("MetaPath is null, using app-level config");
-        } else {
-          auto new_ctx = std::make_unique<ModuleContext>();
-          new_ctx->logger = app_ctx.logger;
-          new_ctx->server = app_ctx.server;
-
-          // Cache even on Error: avoids retrying a broken COM read every
-          // request. Recovery happens via OnGlobalConfigurationChange.
-          update_module_context(*new_ctx, *app_ctx.server, meta_path, *app_ctx.logger);
-
-          // Inherit app-level tags if per-location config didn't set its own.
-          if (new_ctx->application_id_tag.empty())
-            new_ctx->application_id_tag = app_ctx.application_id_tag;
-          if (new_ctx->remote_config_tag.empty())
-            new_ctx->remote_config_tag = app_ctx.remote_config_tag;
-
-          auto hr = meta_container->SetModuleContext(new_ctx.get(), g_module_id);
-          if (SUCCEEDED(hr)) {
-            ctx = new_ctx.release();  // container owns it now
-          } else if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
-            // Another thread won the race — use its cached context.
-            // unique_ptr auto-deletes new_ctx.
-            ctx = static_cast<ModuleContext*>(meta_container->GetModuleContext(g_module_id));
-            if (!ctx) {
-              app_ctx.logger->error("Race condition: cached context disappeared");
-              return RQ_NOTIFICATION_CONTINUE;
-            }
-          } else {
-            app_ctx.logger->error(std::format("Failed to cache per-location context: {}",
-                                              std::system_category().message(hr)));
-            return RQ_NOTIFICATION_CONTINUE;
-          }
-        }
-      }
+    ctx = try_cache_per_location_context(*http_context, app_ctx);
+    if (!ctx) {
+      return RQ_NOTIFICATION_CONTINUE;
     }
   }
 
@@ -177,14 +184,9 @@ HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvid
 
 bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
                                         const ModuleContext& ctx) const {
-  // First, we must validate that the content type is 'text/html'
-  // Note that the value of the Content-Type header is case insensitive, and it
-  // may or may not be followed by semicolon-delimited parameters
-  //   ie Text/HTML;Charset="utf-8"
-  // see https://www.rfc-editor.org/rfc/rfc9110#name-content-type
-
-  // IIS does not NUL-terminate the header buffer, so guard the prefix length
-  // against the explicit string_view size before calling _strnicmp.
+  // Match RFC 9110: Content-Type is case-insensitive and may carry parameters
+  // (e.g. Text/HTML;Charset="utf-8"). IIS does not NUL-terminate the header
+  // buffer, so bound _strnicmp by the explicit prefix length.
   static constexpr std::string_view kHtmlPrefix = "text/html";
   const std::string_view content_type = get_header(pHttpResponse, "Content-Type");
   if (content_type.size() < kHtmlPrefix.size() ||
@@ -201,7 +203,7 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
   USHORT statusCode = 0;
   pHttpResponse.GetStatus(&statusCode);
 
-  // only inject if response code is 2xx, 4xx, 5xx
+  // 3xx redirects have no body to inject into; <200 are informational.
   if (statusCode < 200 || (statusCode >= 300 && statusCode < 400)) {
     ctx.logger->debug(std::format("Skipping RUM injection: return code {}", statusCode));
     return false;
@@ -218,8 +220,6 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
     return false;
   }
 
-  // We must also validate that another injector in this environment hasn't
-  // previously attempted injection into this response
   if (!get_header(pHttpResponse, k_injection_header).empty()) {
     datadog::telemetry::counter::increment(
         telemetry::injection_skipped,

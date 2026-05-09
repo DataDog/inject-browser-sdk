@@ -120,6 +120,21 @@ injector_IIS_unit_test_asan:
       -Preset ci-native-asan -BuildDir build-asan -BuildType Debug
     - If ($lastExitCode -ne 0) { exit $lastExitCode }
 
+# Cross-compile + wine64 mirror of injector_IIS_unit_test, run on a Linux
+# runner inside the devcontainer image. Same gtest binary the local
+# `make test-iis` produces. Faster feedback than the Windows-container path.
+injector_IIS_unit_test_linux_wine:
+  stage: test
+  extends: .IIS_build_when
+  tags: ["arch:amd64"]
+  image: $DEVCONTAINER_IMAGE
+  needs:
+    - devcontainer_image
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+  script:
+    - make test-iis
+
 .injector_IIS_e2e_test_template:
   stage: test
   tags: ["arch:amd64"]

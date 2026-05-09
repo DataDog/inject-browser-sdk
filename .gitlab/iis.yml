@@ -186,6 +186,9 @@ injector_IIS_e2e_test:
     - .injector_IIS_e2e_test_template
     - .IIS_build_when
   needs: ["injector_IIS_build"]
+  # Temporarily disabled; re-enable once PR #87 lands.
+  rules:
+    - when: never
 
 manual_injector_IIS_e2e_test:
   extends: .injector_IIS_e2e_test_template

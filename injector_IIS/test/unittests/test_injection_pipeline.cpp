@@ -260,6 +260,9 @@ class MockAdminManager : public IAppHostAdminManager {
   MockAdminManager(std::map<std::wstring, MockRumConfigElement*> configs)
       : configs_(std::move(configs)) {}
 
+  // Swap the default config (used by reload tests).
+  void SetConfig(MockRumConfigElement* element) { configs_[L""] = element; }
+
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
@@ -1138,6 +1141,48 @@ TEST(InjectionPipeline, MissingEnabledAttributeOnFirstLoad) {
       static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
   ASSERT_NE(ctx, nullptr);
   EXPECT_EQ(ctx->snippet, nullptr);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// A reload that produces a config which fails make_snippet validation
+// (here: sessionSampleRate=200, out of the 0..100 range) must preserve the
+// previous valid snippet — operators rely on last-known-good injection
+// continuing while a broken deploy is investigated.
+TEST(InjectionPipeline, InvalidConfigOnReloadPreservesExistingSnippet) {
+  MockRumConfigElement valid;
+
+  MockAdminManager adminManager(&valid);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+
+  MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  ASSERT_NE(ctx, nullptr);
+  ASSERT_NE(ctx->snippet, nullptr);
+  auto* original_snippet = ctx->snippet;
+
+  // Swap in a config that the SDK validator rejects. Note: this must build
+  // the same way as the default constructor uses but with an out-of-range
+  // sample rate so make_snippet returns a snippet with error_code != 0.
+  MockRumConfigElement invalid(true, {{L"applicationId", L"test-app-id"},
+                                      {L"clientToken", L"test-client-token"},
+                                      {L"site", L"datadoghq.com"},
+                                      {L"service", L"test-service"},
+                                      {L"sessionSampleRate", L"200"}});
+  adminManager.SetConfig(&invalid);
+
+  MockConfigChangeProvider configChange(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  mod.global->OnGlobalConfigurationChange(&configChange);
+
+  EXPECT_EQ(ctx->snippet, original_snippet);
 
   mod.factory->Terminate();
   mod.global->Terminate();

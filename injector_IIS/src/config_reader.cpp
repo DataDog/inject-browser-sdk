@@ -8,8 +8,10 @@
 #include "defer.h"
 #include "injectbrowsersdk.h"
 #include "module_context.h"
+#include "telemetry.h"
 
 #include <cassert>
+#include <datadog/telemetry/telemetry.h>
 #include <format>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -324,12 +326,23 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
   auto& config = *result.config;
   Snippet* snippet = make_snippet(config.version, config.sdk_options, logger);
 
+  // On make_snippet failure, preserve the existing snippet/tags. Operators
+  // prefer continued injection with the last-known-good config over going
+  // dark on a broken deploy; the next valid reload replaces it.
   if (snippet == nullptr) {
-    logger.error("Failed to create RUM snippet");
+    logger.error("Failed to create RUM snippet; keeping previous config");
+    datadog::telemetry::counter::increment(
+        telemetry::config_invalid,
+        telemetry::build_tags("error_code:alloc", ctx.application_id_tag, ctx.remote_config_tag));
     return;
   }
   if (snippet->error_code != 0) {
-    logger.error(std::format("Failed to create RUM snippet: {}", snippet->error_message));
+    logger.error(std::format("Failed to create RUM snippet: {}; keeping previous config",
+                             snippet->error_message));
+    datadog::telemetry::counter::increment(
+        telemetry::config_invalid,
+        telemetry::build_tags(std::format("error_code:{}", snippet->error_code),
+                              ctx.application_id_tag, ctx.remote_config_tag));
     snippet_cleanup(snippet);
     return;
   }

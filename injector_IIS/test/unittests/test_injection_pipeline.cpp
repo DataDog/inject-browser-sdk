@@ -443,7 +443,7 @@ static void setupHtmlResponse(MockHttpContext& ctx, MockHttpResponse& resp, IHtt
           Invoke([ct](_In_ PCSTR, _Out_ USHORT* len) { *len = (USHORT)strlen(ct); }), Return(ct)));
   EXPECT_CALL(resp, GetHeader(Matcher<PCSTR>(StrEq("Content-Encoding")), _))
       .WillRepeatedly(DoAll(Invoke([](_In_ PCSTR, _Out_ USHORT* len) { *len = 0; }), Return("")));
-  EXPECT_CALL(resp, GetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _))
+  EXPECT_CALL(resp, GetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _))
       .WillRepeatedly(DoAll(Invoke([](_In_ PCSTR, _Out_ USHORT* len) { *len = 0; }), Return("")));
 
   EXPECT_CALL(resp, GetStatus(_, _, _, _, _, _, _, _, _))
@@ -500,7 +500,7 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
       "<body>Hello</body></html>";
   setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
 
-  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
       .WillOnce(Return(S_OK));
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
@@ -605,7 +605,7 @@ TEST(InjectionPipeline, PerLocationConfig) {
     MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
     PreparedResponse pr;
     setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
-    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
         .WillOnce(Return(S_OK));
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
@@ -666,7 +666,7 @@ TEST(InjectionPipeline, MetadataCacheHit) {
     MockHttpResponse httpResp;
     PreparedResponse pr;
     setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
-    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
         .WillOnce(Return(S_OK));
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
@@ -678,7 +678,7 @@ TEST(InjectionPipeline, MetadataCacheHit) {
     MockHttpResponse httpResp;
     PreparedResponse pr;
     setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
-    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
         .WillOnce(Return(S_OK));
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
@@ -728,7 +728,7 @@ TEST(InjectionPipeline, SetModuleContextRace) {
   MockHttpResponse httpResp;
   PreparedResponse pr;
   setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
-  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
       .WillOnce(Return(S_OK));
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
@@ -794,7 +794,7 @@ TEST(InjectionPipeline, NullMetadataFallback) {
   MockHttpResponse httpResp;
   PreparedResponse pr;
   setupHtmlResponse(httpCtx, httpResp, &app, nullptr, pr, html);
-  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
       .WillOnce(Return(S_OK));
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
@@ -828,7 +828,7 @@ TEST(InjectionPipeline, NullMetadataContainerFallback) {
   MockHttpResponse httpResp;
   PreparedResponse pr;
   setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
-  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
       .WillOnce(Return(S_OK));
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
@@ -890,7 +890,7 @@ TEST(InjectionPipeline, TwoEnabledLocationsDistinctConfig) {
     MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
     PreparedResponse pr;
     setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
-    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
         .WillOnce(Return(S_OK));
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
@@ -908,7 +908,7 @@ TEST(InjectionPipeline, TwoEnabledLocationsDistinctConfig) {
     MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site/blog");
     PreparedResponse pr;
     setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
-    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
         .WillOnce(Return(S_OK));
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
@@ -974,8 +974,7 @@ TEST(InjectionPipeline, OnBeginRequestRespectsLocationOverride) {
     EXPECT_CALL(httpCtx, GetMetadata()).WillRepeatedly(Return(&apiMetadata));
 
     // The pending header should NOT be set.
-    EXPECT_CALL(httpReq,
-                SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injection-pending")), _, _, _))
+    EXPECT_CALL(httpReq, SetHeader(Matcher<PCSTR>(StrEq(k_injection_pending_header)), _, _, _))
         .Times(0);
 
     EXPECT_EQ(httpMod->OnBeginRequest(&httpCtx, &eventProvider), RQ_NOTIFICATION_CONTINUE);
@@ -989,7 +988,7 @@ TEST(InjectionPipeline, OnBeginRequestRespectsLocationOverride) {
     MockHttpResponse httpResp;
     PreparedResponse pr;
     setupHtmlResponse(httpCtx, httpResp, &app, &rootMetadata, pr, html);
-    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
         .WillOnce(Return(S_OK));
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
@@ -1002,8 +1001,7 @@ TEST(InjectionPipeline, OnBeginRequestRespectsLocationOverride) {
     EXPECT_CALL(httpCtx, GetApplication()).WillRepeatedly(Return(&app));
     EXPECT_CALL(httpCtx, GetMetadata()).WillRepeatedly(Return(&rootMetadata));
 
-    EXPECT_CALL(httpReq,
-                SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injection-pending")), _, _, _))
+    EXPECT_CALL(httpReq, SetHeader(Matcher<PCSTR>(StrEq(k_injection_pending_header)), _, _, _))
         .WillOnce(Return(S_OK));
 
     EXPECT_EQ(httpMod->OnBeginRequest(&httpCtx, &eventProvider), RQ_NOTIFICATION_CONTINUE);
@@ -1145,9 +1143,7 @@ TEST(InjectionPipeline, MissingEnabledAttributeOnFirstLoad) {
   mod.global->Terminate();
 }
 
-// 'enabled' attribute lookup fails during config reload — existing snippet
-// must be preserved (Error semantics) so a transient COM failure can't
-// silently wipe injection.
+// Error semantics on the 'enabled' read must not wipe an active snippet.
 TEST(InjectionPipeline, MissingEnabledAttributePreservesExistingConfig) {
   MockRumConfigElement config;
 

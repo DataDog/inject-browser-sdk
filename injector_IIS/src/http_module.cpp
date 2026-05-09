@@ -17,9 +17,6 @@
 namespace datadog::rum {
 namespace {
 
-constexpr const char* k_injection_header = "x-datadog-rum-injected";
-constexpr const char* k_injection_pending_header = "x-datadog-rum-injection-pending";
-
 std::string_view get_header(IHttpResponse& http_response, const char* header) {
   USHORT length = 0;
   PCSTR data = http_response.GetHeader(header, &length);
@@ -135,12 +132,8 @@ HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvid
           new_ctx->logger = app_ctx.logger;
           new_ctx->server = app_ctx.server;
 
-          // Always cache the per-location ctx, even when update_module_context
-          // returned Error: a failing read pins the location to "no injection"
-          // until the next OnGlobalConfigurationChange reload (which re-runs
-          // update_module_context on the cached ctx and recovers). This is
-          // preferable to skipping the cache and retrying the same broken
-          // read on every request.
+          // Cache even on Error: avoids retrying a broken COM read every
+          // request. Recovery happens via OnGlobalConfigurationChange.
           update_module_context(*new_ctx, *app_ctx.server, meta_path, *app_ctx.logger);
 
           // Inherit app-level tags if per-location config didn't set its own.
@@ -214,13 +207,13 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
     return false;
   }
 
-  // Check if content is compressed, skip injection if Content-Encoding header
-  // exists
-  if (!get_header(pHttpResponse, "Content-Encoding").empty()) {
+  if (auto content_encoding = get_header(pHttpResponse, "Content-Encoding");
+      !content_encoding.empty()) {
     datadog::telemetry::counter::increment(
         telemetry::injection_skipped,
-        telemetry::build_tags("reason:compressed_html", ctx.application_id_tag,
-                              ctx.remote_config_tag));
+        telemetry::build_tags("reason:compressed_html",
+                              "content_encoding:" + std::string(content_encoding),
+                              ctx.application_id_tag, ctx.remote_config_tag));
     ctx.logger->debug("Skipping RUM injection: content is compressed");
     return false;
   }
@@ -318,13 +311,9 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
         telemetry::injection_succeed,
         telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
   } else {
-    auto tags = telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag);
-    if (auto content_encoding = get_header(pHttpResponse, "Content-Encoding");
-        !content_encoding.empty()) {
-      tags.emplace_back("content_encoding:" + std::string(content_encoding));
-    }
-
-    datadog::telemetry::counter::increment(telemetry::injection_failed, tags);
+    datadog::telemetry::counter::increment(
+        telemetry::injection_failed,
+        telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
   }
 
   injector_cleanup(injector);

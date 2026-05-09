@@ -54,6 +54,8 @@ RUN set -eux; \
         clang-tidy-${LLVM_VERSION} \
         lld-${LLVM_VERSION} \
         llvm-${LLVM_VERSION} \
+        wine64 \
+        qemu-user-static \
         ; \
     npm install -g @devcontainers/cli; \
     npm cache clean --force; \

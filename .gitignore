@@ -29,6 +29,8 @@ build_out/
 .devcontainer/.staged/
 # Written by `make dev-image`; holds the last built/pulled image ref.
 .devcontainer/.image-ref
+# Written by `make dev-image-x86_64` on non-amd64 hosts.
+.devcontainer/.image-ref-x86_64
 
 # Installer
 installer/proxy-configurator

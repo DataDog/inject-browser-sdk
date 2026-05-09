@@ -140,7 +140,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidStatusCode) {
               DoAll(Invoke([](_In_ PCSTR, _Out_ USHORT* headerValueLen) { *headerValueLen = 0; }),
                     Return("")));
 
-      EXPECT_CALL(httpResponse, GetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _))
+      EXPECT_CALL(httpResponse, GetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _))
           .WillRepeatedly(
               DoAll(Invoke([](_In_ PCSTR, _Out_ USHORT* headerValueLen) { *headerValueLen = 0; }),
                     Return("")));
@@ -168,7 +168,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsFalseWhenCustomHeaderPresent)
   const char* contentTypeHeader = "Content-Type";
   const char* contentTypeHeaderValue = "text/html";
 
-  const char* customHeader = "x-datadog-rum-injected";
+  const char* customHeader = k_injection_header;
   const char* customHeaderValue = "1";
   USHORT const code = 200;
 
@@ -209,7 +209,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidHeaders) {
   const char* contentTypeHeader = "Content-Type";
   const char* contentTypeHeaderValue = "Text/HTML; Charset=\"utf - 8\"";
 
-  const char* customHeader = "x-datadog-rum-injected";
+  const char* customHeader = k_injection_header;
   const char* customHeaderValue = "";
   USHORT const code = 200;
 

@@ -16,8 +16,11 @@ lint-configure: dev-image-cached
 		--target _corrosion_cbindgen_inject_browser_sdk_ffi_bindings_injectbrowsersdk_h
 
 # lint-configure is .PHONY (always rebuilds); wrap it in a sub-make so this
-# file target is only (re)generated when its CMake inputs change.
-compile_commands.json: $(shell find $(IIS_DIR) -name CMakeLists.txt -o -name '*.cmake' -o -name CMakePresets.json)
+# file target is only (re)generated when its CMake inputs change. Prune any
+# `build*` subtree so we don't depend on cmake-generated files (which can
+# contain whitespace, e.g. corrosion's `output directory/` test fixture, and
+# would otherwise break Make's whitespace-separated prereq parsing).
+compile_commands.json: $(shell find $(IIS_DIR) -path '*/build*' -prune -o \( -name CMakeLists.txt -o -name '*.cmake' -o -name CMakePresets.json \) -print)
 	$(MAKE) lint-configure
 	cp $(BUILD_DIR)/compile_commands.json $@
 
@@ -65,6 +68,23 @@ doc:
 test-cmake-version:
 	ci/cmake-consumer-test/run_validate_version.sh
 
+# Build and run the IIS unit tests in-container (linux/amd64-pinned so wine64
+# is x86_64-native; Apple Silicon emulates via Rosetta). Override TEST_FILTER
+# to narrow the gtest run, e.g. `make test-iis TEST_FILTER='*MissingEnabled*'`.
+TEST_FILTER ?= *
+.PHONY: test-iis
+test-iis: dev-image-x86_64-cached
+	$(IN_DEVCONTAINER_X86_64) bash -lc '\
+	  set -eu; \
+	  cd $(IIS_DIR); \
+	  export PATH=/usr/lib/llvm-20/bin:$$PATH; \
+	  export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link; \
+	  export RUSTFLAGS="-Lnative=/xwin/crt/lib/x86_64 -Lnative=/xwin/sdk/lib/ucrt/x86_64 -Lnative=/xwin/sdk/lib/um/x86_64"; \
+	  cmake --preset=ci-xcomp -B build -DTOOLCHAIN_ROOT=/usr/lib/llvm-20/bin/; \
+	  cmake --build build --target iis_injector_tests -j; \
+	  export WINEDEBUG=-all WINEPREFIX=$$HOME/.wine; \
+	  /usr/lib/wine/wine64 build/test/unittests/iis_injector_tests.exe --gtest_filter="$(TEST_FILTER)"'
+
 .PHONY: artifacts
 artifacts:
 	docker buildx bake artifacts
@@ -79,11 +99,13 @@ include .devcontainer/devcontainer.mk
 # stage+hash+docker-pull cycle when .image-ref already exists. Run
 # `make dev-image` explicitly to refresh after Dockerfile/context changes.
 # Lives here rather than in devcontainer.mk because that file is upstream-synced.
-.PHONY: dev-image-cached
+.PHONY: dev-image-cached dev-image-x86_64-cached
 ifeq ($(_DEV_CONTAINER_INSIDE),1)
-dev-image-cached:
+dev-image-cached dev-image-x86_64-cached:
 	@:
 else
 dev-image-cached:
 	@[ -f $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref ] || $(MAKE) dev-image
+dev-image-x86_64-cached:
+	@[ -f $(_X86_64_IMAGE_REF_FILE) ] || $(MAKE) dev-image-x86_64
 endif

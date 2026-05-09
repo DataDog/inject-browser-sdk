@@ -21,3 +21,12 @@ cd installer/configurator && CGO_ENABLED=0 go build
 - `docker-bake.hcl` - Buildx bake config
 - `Dockerfile` - Builder image (musl + Windows cross-compile)
 - Registry: `ghcr.io/datadog/inject-browser-sdk`
+
+## Run IIS unit tests
+
+```bash
+make test-iis                                # full suite
+make test-iis TEST_FILTER='*MissingEnabled*' # subset
+```
+
+Cross-compiled to `x86_64-pc-windows-msvc` and run via wine64 in the linux/amd64 devcontainer (Apple Silicon goes through Rosetta).

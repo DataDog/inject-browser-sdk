@@ -14,6 +14,9 @@
 
 namespace datadog::rum {
 
+constexpr const char* k_injection_header = "x-datadog-rum-injected";
+constexpr const char* k_injection_pending_header = "x-datadog-rum-injection-pending";
+
 class HttpModule : public CHttpModule {
  public:
   static const DWORD NotificationsMask = RQ_SEND_RESPONSE | RQ_BEGIN_REQUEST;

@@ -6,7 +6,7 @@
 
 // Integration-style test that exercises the full IIS module pipeline:
 //   RegisterModule → OnGlobalApplicationStart (config reading)
-//     → OnSendResponse (injection into HTML)
+//     → OnBeginRequest (pending header) / OnSendResponse (injection into HTML)
 //
 // Uses mock IAppHost* COM interfaces to feed configuration, and a mock
 // HTTP response containing an HTML body with <head></head>.
@@ -21,7 +21,7 @@
 #include <utility>
 
 using namespace datadog::rum;
-using ::testing::_;
+using ::testing::_;  // NOLINT(bugprone-reserved-identifier) — gtest matcher convention
 using ::testing::DoAll;
 using ::testing::Invoke;
 using ::testing::Matcher;
@@ -43,6 +43,14 @@ class MockAppHostProperty : public IAppHostProperty {
     SysFreeString(name_);
     VariantClear(&value_);
   }
+  MockAppHostProperty(const MockAppHostProperty&) = delete;
+  MockAppHostProperty& operator=(const MockAppHostProperty&) = delete;
+  MockAppHostProperty(MockAppHostProperty&& other) noexcept
+      : name_(other.name_), value_(other.value_) {
+    other.name_ = nullptr;
+    VariantInit(&other.value_);
+  }
+  MockAppHostProperty& operator=(MockAppHostProperty&&) = delete;
 
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
@@ -147,7 +155,7 @@ class MockElementCollection : public IAppHostElementCollection {
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE get_Item(VARIANT index, IAppHostElement** ppElement) override {
-    DWORD i = (index.vt == VT_UI4) ? index.ulVal : static_cast<DWORD>(index.iVal);
+    const DWORD i = (index.vt == VT_UI4) ? index.ulVal : static_cast<DWORD>(index.iVal);
     if (i < elements_.size()) {
       *ppElement = &elements_[i];
       return S_OK;
@@ -168,6 +176,8 @@ class MockRumConfigElement : public IAppHostElement {
   MockAppHostProperty version_prop_;
   std::vector<MockOptionElement> options_;
   MockElementCollection collection_;
+  HRESULT collection_result_ = S_OK;
+  bool enabled_lookup_fails_ = false;
 
  public:
   // Configurable constructor.
@@ -192,8 +202,15 @@ class MockRumConfigElement : public IAppHostElement {
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
+  void SetCollectionResult(HRESULT hr) { collection_result_ = hr; }
+  void SetEnabledPropertyMissing(bool missing) { enabled_lookup_fails_ = missing; }
+
   HRESULT STDMETHODCALLTYPE get_Name(BSTR*) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE get_Collection(IAppHostElementCollection** ppCol) override {
+    if (FAILED(collection_result_)) {
+      *ppCol = nullptr;
+      return collection_result_;
+    }
     *ppCol = &collection_;
     return S_OK;
   }
@@ -207,6 +224,10 @@ class MockRumConfigElement : public IAppHostElement {
   HRESULT STDMETHODCALLTYPE GetPropertyByName(BSTR bstrName,
                                               IAppHostProperty** ppProperty) override {
     if (_wcsicmp(bstrName, L"enabled") == 0) {
+      if (enabled_lookup_fails_) {
+        *ppProperty = nullptr;
+        return S_FALSE;
+      }
       *ppProperty = &enabled_prop_;
       return S_OK;
     }
@@ -239,15 +260,18 @@ class MockAdminManager : public IAppHostAdminManager {
   MockAdminManager(std::map<std::wstring, MockRumConfigElement*> configs)
       : configs_(std::move(configs)) {}
 
+  void SetConfig(MockRumConfigElement* element) { configs_[L""] = element; }
+
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
 
-  HRESULT STDMETHODCALLTYPE GetAdminSection(BSTR bstrSectionName, BSTR bstrPath,
-                                            IAppHostElement** ppElement) override {
+  HRESULT STDMETHODCALLTYPE
+  GetAdminSection(BSTR bstrSectionName,  // NOLINT(bugprone-easily-swappable-parameters)
+                  BSTR bstrPath, IAppHostElement** ppElement) override {
     if (_wcsicmp(bstrSectionName, L"system.webServer/datadogRum") == 0) {
       // Look up by exact path first, then fall back to default.
-      std::wstring path(bstrPath ? bstrPath : L"");
+      const std::wstring path(bstrPath ? bstrPath : L"");
       auto it = configs_.find(path);
       if (it != configs_.end()) {
         *ppElement = it->second;
@@ -278,27 +302,66 @@ class MockAdminManager : public IAppHostAdminManager {
 
 class MockModuleContextContainer : public IHttpModuleContextContainer {
   IHttpStoredContext* ctx_ = nullptr;
+  IHttpStoredContext* race_winner_ = nullptr;
+  HRESULT set_result_ = S_OK;
 
  public:
+  ~MockModuleContextContainer() {
+    if (ctx_ != nullptr) {
+      ctx_->CleanupStoredContext();
+    }
+  }
+
+  void SetModuleContextResult(HRESULT hr) { set_result_ = hr; }
+
+  // Simulates a race where another thread cached `winner` between the caller's
+  // GetModuleContext (which returned null) and SetModuleContext: the SetModule
+  // call rejects with ERROR_ALREADY_ASSIGNED, and a subsequent GetModule call
+  // returns the winner.
+  void SimulateRaceWith(IHttpStoredContext* winner) {
+    race_winner_ = winner;
+    set_result_ = HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED);
+  }
+
   IHttpStoredContext* GetModuleContext(HTTP_MODULE_ID) override { return ctx_; }
   HRESULT SetModuleContext(IHttpStoredContext* ctx, HTTP_MODULE_ID) override {
+    if (set_result_ == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
+      // Simulate race: pretend another thread inserted its context first so
+      // the next GetModuleContext call sees the winner.
+      if (race_winner_ != nullptr) {
+        ctx_ = race_winner_;
+        race_winner_ = nullptr;
+      }
+      return set_result_;
+    }
+    if (FAILED(set_result_)) {
+      return set_result_;
+    }
     ctx_ = ctx;
     return S_OK;
   }
+
+  void PrePopulate(IHttpStoredContext* ctx) { ctx_ = ctx; }
 };
 
 // Mock IMetadataInfo — provides per-request config path and context container.
 class MockMetadataInfo : public IMetadataInfo {
   std::wstring meta_path_;
   MockModuleContextContainer container_;
+  bool return_null_container_ = false;
 
  public:
   MockMetadataInfo(LPCWSTR metaPath) : meta_path_(metaPath) {}
 
+  MockModuleContextContainer& Container() { return container_; }
+  void SetReturnNullContainer(bool v) { return_null_container_ = v; }
+
   PCWSTR GetMetaPath() const override { return meta_path_.c_str(); }
   PCWSTR GetVrPath() const override { return L""; }
   IHttpTokenEntry* GetVrToken() override { return nullptr; }
-  IHttpModuleContextContainer* GetModuleContextContainer() override { return &container_; }
+  IHttpModuleContextContainer* GetModuleContextContainer() override {
+    return return_null_container_ ? nullptr : &container_;
+  }
 };
 
 // MockHttpApplication with configurable config path.
@@ -322,6 +385,15 @@ class MockAppStartProvider : public IHttpApplicationStartProvider {
  public:
   MockAppStartProvider(IHttpApplication& app) : app_(app) {}
   IHttpApplication* GetApplication() override { return &app_; }
+  VOID SetErrorStatus(HRESULT) override {}
+};
+
+class MockConfigChangeProvider : public IGlobalConfigurationChangeProvider {
+  std::wstring path_;
+
+ public:
+  MockConfigChangeProvider(LPCWSTR path) : path_(path) {}
+  PCWSTR GetChangePath() const override { return path_.c_str(); }
   VOID SetErrorStatus(HRESULT) override {}
 };
 
@@ -349,7 +421,7 @@ static RegisteredModule registerModule(MockServer& server) {
       .WillByDefault(DoAll(SaveArg<0>(&result.factory), Return(S_OK)));
   EXPECT_CALL(moduleInfo, SetRequestNotifications(_, _, _)).Times(1);
 
-  HRESULT hr = RegisterModule(0, &moduleInfo, &server);
+  const HRESULT hr = RegisterModule(0, &moduleInfo, &server);
   EXPECT_EQ(hr, S_OK);
   return result;
 }
@@ -373,7 +445,7 @@ static void setupHtmlResponse(MockHttpContext& ctx, MockHttpResponse& resp, IHtt
           Invoke([ct](_In_ PCSTR, _Out_ USHORT* len) { *len = (USHORT)strlen(ct); }), Return(ct)));
   EXPECT_CALL(resp, GetHeader(Matcher<PCSTR>(StrEq("Content-Encoding")), _))
       .WillRepeatedly(DoAll(Invoke([](_In_ PCSTR, _Out_ USHORT* len) { *len = 0; }), Return("")));
-  EXPECT_CALL(resp, GetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _))
+  EXPECT_CALL(resp, GetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _))
       .WillRepeatedly(DoAll(Invoke([](_In_ PCSTR, _Out_ USHORT* len) { *len = 0; }), Return("")));
 
   EXPECT_CALL(resp, GetStatus(_, _, _, _, _, _, _, _, _))
@@ -430,14 +502,14 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
       "<body>Hello</body></html>";
   setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
 
-  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
       .WillOnce(Return(S_OK));
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
 
-  std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                     pr.chunk.FromMemory.BufferLength);
+  const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                           pr.chunk.FromMemory.BufferLength);
   EXPECT_NE(output.find("DD_RUM"), std::string::npos) << "Expected DD_RUM in output, got:\n"
                                                       << output;
   EXPECT_NE(output.find("test-app-id"), std::string::npos);
@@ -484,8 +556,8 @@ TEST(InjectionPipeline, DisabledConfig) {
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
 
   // Body unchanged.
-  std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                     pr.chunk.FromMemory.BufferLength);
+  const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                           pr.chunk.FromMemory.BufferLength);
   EXPECT_EQ(output, html);
 
   mod.factory->Terminate();
@@ -535,14 +607,14 @@ TEST(InjectionPipeline, PerLocationConfig) {
     MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
     PreparedResponse pr;
     setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
-    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("x-datadog-rum-injected")), _, _, _))
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
         .WillOnce(Return(S_OK));
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
 
-    std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                       pr.chunk.FromMemory.BufferLength);
+    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                             pr.chunk.FromMemory.BufferLength);
     EXPECT_NE(output.find("service-a"), std::string::npos)
         << "Root path should inject with service-a, got:\n"
         << output;
@@ -559,10 +631,583 @@ TEST(InjectionPipeline, PerLocationConfig) {
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE)
         << "/api path should skip injection (location override disabled RUM)";
 
-    std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                       pr.chunk.FromMemory.BufferLength);
+    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                             pr.chunk.FromMemory.BufferLength);
     EXPECT_EQ(output, html) << "/api path response should be unchanged";
   }
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// ---------------------------------------------------------------------------
+// Edge-case and error-path tests
+// ---------------------------------------------------------------------------
+
+// Cache hit: second request to the same metadata path uses cached context.
+TEST(InjectionPipeline, MetadataCacheHit) {
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  CHttpModule* httpMod = nullptr;
+  mod.factory->GetHttpModule(&httpMod, nullptr);
+
+  const char* html = "<html><head></head><body>Hello</body></html>";
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+
+  // First request — cache miss, populates metadata container.
+  {
+    MockHttpContext httpCtx;
+    MockHttpResponse httpResp;
+    PreparedResponse pr;
+    setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+        .WillOnce(Return(S_OK));
+    EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+  }
+
+  // Second request — cache hit, same metadata object.
+  {
+    MockHttpContext httpCtx;
+    MockHttpResponse httpResp;
+    PreparedResponse pr;
+    setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+        .WillOnce(Return(S_OK));
+    EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+
+    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                             pr.chunk.FromMemory.BufferLength);
+    EXPECT_NE(output.find("DD_RUM"), std::string::npos);
+  }
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// SetModuleContext returns ERROR_ALREADY_ASSIGNED (race condition).
+TEST(InjectionPipeline, SetModuleContextRace) {
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  CHttpModule* httpMod = nullptr;
+  mod.factory->GetHttpModule(&httpMod, nullptr);
+
+  // Simulate the race the production code is trying to handle: this thread's
+  // GetModuleContext returns null (cache miss), so it builds new_ctx and
+  // calls SetModuleContext, which is rejected with ERROR_ALREADY_ASSIGNED
+  // because another thread inserted winner_ctx first. The second
+  // GetModuleContext then returns winner_ctx.
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  auto* winner_ctx = new ModuleContext;
+  auto* app_ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  winner_ctx->logger = app_ctx->logger;
+  winner_ctx->snippet = snippet_create_from_json(
+      R"({"majorVersion":5,"rum":{"applicationId":"test-app-id","clientToken":"test-client-token","service":"test-service","sessionSampleRate":100}})");
+  ASSERT_NE(winner_ctx->snippet, nullptr);
+  ASSERT_EQ(winner_ctx->snippet->error_code, 0u);
+  metadata.Container().SimulateRaceWith(winner_ctx);
+
+  const char* html = "<html><head></head><body>Hello</body></html>";
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  PreparedResponse pr;
+  setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .WillOnce(Return(S_OK));
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+
+  // winner_ctx is owned by metadata.Container() and freed by its destructor.
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// SetModuleContext returns a generic failure — no injection, no crash.
+TEST(InjectionPipeline, SetModuleContextFailure) {
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  CHttpModule* httpMod = nullptr;
+  mod.factory->GetHttpModule(&httpMod, nullptr);
+
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  metadata.Container().SetModuleContextResult(E_FAIL);
+
+  const char* html = "<html><head></head><body>Hello</body></html>";
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  PreparedResponse pr;
+  setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
+
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
+
+  const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                           pr.chunk.FromMemory.BufferLength);
+  EXPECT_EQ(output, html);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// Null metadata — falls back to app-level context and injects.
+TEST(InjectionPipeline, NullMetadataFallback) {
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  CHttpModule* httpMod = nullptr;
+  mod.factory->GetHttpModule(&httpMod, nullptr);
+
+  const char* html = "<html><head></head><body>Hello</body></html>";
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  PreparedResponse pr;
+  setupHtmlResponse(httpCtx, httpResp, &app, nullptr, pr, html);
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .WillOnce(Return(S_OK));
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// Null metadata context container — falls back to app-level context and
+// injects.
+TEST(InjectionPipeline, NullMetadataContainerFallback) {
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  CHttpModule* httpMod = nullptr;
+  mod.factory->GetHttpModule(&httpMod, nullptr);
+
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  metadata.SetReturnNullContainer(true);
+
+  const char* html = "<html><head></head><body>Hello</body></html>";
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  PreparedResponse pr;
+  setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .WillOnce(Return(S_OK));
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+  // Falls back to app-level context and injects.
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// CleanupStoredContext properly frees snippet.
+TEST(InjectionPipeline, CleanupStoredContextFreesSnippet) {
+  auto* ctx = new ModuleContext;
+  ctx->snippet = snippet_create_from_json(
+      R"({"majorVersion":5,"rum":{"applicationId":"test","clientToken":"tok"}})");
+  ASSERT_NE(ctx->snippet, nullptr);
+
+  // Under ASan this catches use-after-free or double-free.
+  ctx->CleanupStoredContext();
+}
+
+// Two enabled locations with different services — verify per-path isolation.
+TEST(InjectionPipeline, TwoEnabledLocationsDistinctConfig) {
+  MockRumConfigElement configA(true, {
+                                         {L"applicationId", L"app-a"},
+                                         {L"clientToken", L"tok-a"},
+                                         {L"service", L"svc-alpha"},
+                                         {L"sessionSampleRate", L"100"},
+                                     });
+  MockRumConfigElement configB(true, {
+                                         {L"applicationId", L"app-b"},
+                                         {L"clientToken", L"tok-b"},
+                                         {L"service", L"svc-beta"},
+                                         {L"sessionSampleRate", L"100"},
+                                     });
+
+  std::map<std::wstring, MockRumConfigElement*> configs;
+  configs[L"MACHINE/WEBROOT/APPHOST/Default Web Site"] = &configA;
+  configs[L"MACHINE/WEBROOT/APPHOST/Default Web Site/blog"] = &configB;
+  MockAdminManager adminManager(configs);
+
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  CHttpModule* httpMod = nullptr;
+  mod.factory->GetHttpModule(&httpMod, nullptr);
+
+  const char* html = "<html><head></head><body>Hello</body></html>";
+
+  // Root — svc-alpha
+  {
+    MockHttpContext httpCtx;
+    MockHttpResponse httpResp;
+    MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+    PreparedResponse pr;
+    setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+        .WillOnce(Return(S_OK));
+    EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                             pr.chunk.FromMemory.BufferLength);
+    EXPECT_NE(output.find("svc-alpha"), std::string::npos);
+    EXPECT_EQ(output.find("svc-beta"), std::string::npos);
+  }
+
+  // /blog — svc-beta
+  {
+    MockHttpContext httpCtx;
+    MockHttpResponse httpResp;
+    MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site/blog");
+    PreparedResponse pr;
+    setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+        .WillOnce(Return(S_OK));
+    EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                             pr.chunk.FromMemory.BufferLength);
+    EXPECT_NE(output.find("svc-beta"), std::string::npos);
+    EXPECT_EQ(output.find("svc-alpha"), std::string::npos);
+  }
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// OnBeginRequest uses per-location cache: pending header should NOT be set
+// for a path where RUM is disabled via <location> override (after cache is
+// populated by a prior OnSendResponse).
+TEST(InjectionPipeline, OnBeginRequestRespectsLocationOverride) {
+  MockRumConfigElement configA(true, {
+                                         {L"applicationId", L"test-app-id"},
+                                         {L"clientToken", L"test-client-token"},
+                                         {L"service", L"service-a"},
+                                         {L"sessionSampleRate", L"100"},
+                                     });
+  MockRumConfigElement configB(false, {});
+
+  std::map<std::wstring, MockRumConfigElement*> configs;
+  configs[L"MACHINE/WEBROOT/APPHOST/Default Web Site"] = &configA;
+  configs[L"MACHINE/WEBROOT/APPHOST/Default Web Site/api"] = &configB;
+  MockAdminManager adminManager(configs);
+
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  CHttpModule* httpMod = nullptr;
+  mod.factory->GetHttpModule(&httpMod, nullptr);
+
+  const char* html = "<html><head></head><body>Hello</body></html>";
+
+  // First: OnSendResponse to /api to populate the metadata cache (disabled).
+  MockMetadataInfo apiMetadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site/api");
+  {
+    MockHttpContext httpCtx;
+    MockHttpResponse httpResp;
+    PreparedResponse pr;
+    setupHtmlResponse(httpCtx, httpResp, &app, &apiMetadata, pr, html);
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
+  }
+
+  // OnBeginRequest to /api — pending header must NOT be set (location is disabled).
+  {
+    MockHttpContext httpCtx;
+    MockHttpRequest httpReq;
+    MockEventProvider eventProvider;
+    EXPECT_CALL(httpCtx, GetRequest()).WillRepeatedly(Return(&httpReq));
+    EXPECT_CALL(httpCtx, GetApplication()).WillRepeatedly(Return(&app));
+    EXPECT_CALL(httpCtx, GetMetadata()).WillRepeatedly(Return(&apiMetadata));
+
+    // The pending header should NOT be set.
+    EXPECT_CALL(httpReq, SetHeader(Matcher<PCSTR>(StrEq(k_injection_pending_header)), _, _, _))
+        .Times(0);
+
+    EXPECT_EQ(httpMod->OnBeginRequest(&httpCtx, &eventProvider), RQ_NOTIFICATION_CONTINUE);
+  }
+
+  // Contrast: OnBeginRequest to root — SHOULD set the pending header.
+  MockMetadataInfo rootMetadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  {
+    // First populate root cache via OnSendResponse.
+    MockHttpContext httpCtx;
+    MockHttpResponse httpResp;
+    PreparedResponse pr;
+    setupHtmlResponse(httpCtx, httpResp, &app, &rootMetadata, pr, html);
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+        .WillOnce(Return(S_OK));
+    EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+  }
+  {
+    MockHttpContext httpCtx;
+    MockHttpRequest httpReq;
+    MockEventProvider eventProvider;
+    EXPECT_CALL(httpCtx, GetRequest()).WillRepeatedly(Return(&httpReq));
+    EXPECT_CALL(httpCtx, GetApplication()).WillRepeatedly(Return(&app));
+    EXPECT_CALL(httpCtx, GetMetadata()).WillRepeatedly(Return(&rootMetadata));
+
+    EXPECT_CALL(httpReq, SetHeader(Matcher<PCSTR>(StrEq(k_injection_pending_header)), _, _, _))
+        .WillOnce(Return(S_OK));
+
+    EXPECT_EQ(httpMod->OnBeginRequest(&httpCtx, &eventProvider), RQ_NOTIFICATION_CONTINUE);
+  }
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// MissingConfig: no datadogRum section at all — should not crash or inject.
+TEST(InjectionPipeline, MissingConfig) {
+  // Admin manager that returns E_FAIL for all paths — no datadogRum config.
+  const std::map<std::wstring, MockRumConfigElement*> empty;
+  MockAdminManager adminManager(empty);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  ASSERT_NE(ctx, nullptr);
+  EXPECT_EQ(ctx->snippet, nullptr);
+
+  CHttpModule* httpMod = nullptr;
+  mod.factory->GetHttpModule(&httpMod, nullptr);
+
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  PreparedResponse pr;
+  const char* html = "<html><head></head><body>Hello</body></html>";
+  setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html);
+
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
+
+  const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                           pr.chunk.FromMemory.BufferLength);
+  EXPECT_EQ(output, html);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// get_Collection fails on initial load — no prior snippet to keep, so snippet
+// stays nullptr (no injection).
+TEST(InjectionPipeline, GetCollectionFailureOnFirstLoad) {
+  MockRumConfigElement config(true, {{L"applicationId", L"test-app-id"},
+                                     {L"clientToken", L"test-client-token"},
+                                     {L"service", L"test-service"},
+                                     {L"sessionSampleRate", L"100"}});
+  config.SetCollectionResult(E_OUTOFMEMORY);
+
+  MockAdminManager adminManager(&config);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  ASSERT_NE(ctx, nullptr);
+  // First load has no prior snippet — transient error keeps nullptr.
+  EXPECT_EQ(ctx->snippet, nullptr);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// get_Collection fails during config reload — existing snippet is preserved
+// so injection self-heals on the next successful reload.
+TEST(InjectionPipeline, GetCollectionFailurePreservesExistingConfig) {
+  // First: load config successfully.
+  MockRumConfigElement config(true, {{L"applicationId", L"test-app-id"},
+                                     {L"clientToken", L"test-client-token"},
+                                     {L"service", L"test-service"},
+                                     {L"sessionSampleRate", L"100"}});
+
+  MockAdminManager adminManager(&config);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+
+  MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  ASSERT_NE(ctx, nullptr);
+  ASSERT_NE(ctx->snippet, nullptr);
+  auto* original_snippet = ctx->snippet;
+
+  config.SetCollectionResult(E_OUTOFMEMORY);
+
+  MockConfigChangeProvider configChange(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  mod.global->OnGlobalConfigurationChange(&configChange);
+
+  // Existing snippet should be preserved — not cleared by the transient error.
+  EXPECT_EQ(ctx->snippet, original_snippet);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// 'enabled' attribute lookup fails on initial load — get_property cannot
+// distinguish a missing attribute from a COM failure, so the read is treated
+// as Error. With no prior snippet, snippet stays nullptr.
+TEST(InjectionPipeline, MissingEnabledAttributeOnFirstLoad) {
+  MockRumConfigElement config;
+  config.SetEnabledPropertyMissing(true);
+
+  MockAdminManager adminManager(&config);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  ASSERT_NE(ctx, nullptr);
+  EXPECT_EQ(ctx->snippet, nullptr);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// A reload whose config fails make_snippet validation must preserve the
+// previous valid snippet — operators rely on last-known-good injection
+// continuing while a broken deploy is investigated.
+TEST(InjectionPipeline, InvalidConfigOnReloadPreservesExistingSnippet) {
+  MockRumConfigElement valid;
+
+  MockAdminManager adminManager(&valid);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+
+  MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  ASSERT_NE(ctx, nullptr);
+  ASSERT_NE(ctx->snippet, nullptr);
+  auto* original_snippet = ctx->snippet;
+
+  // sessionSampleRate=200 is out of the 0..100 range → error_code 4.
+  MockRumConfigElement invalid(true, {{L"applicationId", L"test-app-id"},
+                                      {L"clientToken", L"test-client-token"},
+                                      {L"site", L"datadoghq.com"},
+                                      {L"service", L"test-service"},
+                                      {L"sessionSampleRate", L"200"}});
+  adminManager.SetConfig(&invalid);
+
+  MockConfigChangeProvider configChange(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  mod.global->OnGlobalConfigurationChange(&configChange);
+
+  EXPECT_EQ(ctx->snippet, original_snippet);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// Error semantics on the 'enabled' read must not wipe an active snippet.
+TEST(InjectionPipeline, MissingEnabledAttributePreservesExistingConfig) {
+  MockRumConfigElement config;
+
+  MockAdminManager adminManager(&config);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+
+  MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  ASSERT_NE(ctx, nullptr);
+  ASSERT_NE(ctx->snippet, nullptr);
+  auto* original_snippet = ctx->snippet;
+
+  config.SetEnabledPropertyMissing(true);
+
+  MockConfigChangeProvider configChange(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  mod.global->OnGlobalConfigurationChange(&configChange);
+
+  EXPECT_EQ(ctx->snippet, original_snippet);
 
   mod.factory->Terminate();
   mod.global->Terminate();

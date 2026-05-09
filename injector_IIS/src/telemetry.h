@@ -32,6 +32,6 @@ auto build_tags(T&&... specific_tags) {
 const extern datadog::telemetry::Counter injection_skipped;
 const extern datadog::telemetry::Counter injection_succeed;
 const extern datadog::telemetry::Counter injection_failed;
-const extern datadog::telemetry::Counter content_security_policy;
+const extern datadog::telemetry::Counter config_invalid;
 
 }  // namespace datadog::rum::telemetry

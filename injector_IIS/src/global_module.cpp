@@ -73,15 +73,28 @@ GlobalModule::OnGlobalApplicationStart(IHttpApplicationStartProvider* provider) 
   ctx->server = server_;
 
   auto* app = provider->GetApplication();
-  assert(app);
+  if (app == nullptr) {
+    logger_->error("Application is null in OnGlobalApplicationStart");
+    return GL_NOTIFICATION_CONTINUE;
+  }
 
   const auto* config_path = app->GetAppConfigPath();
+  if (!config_path) {
+    logger_->error("Application config path is null, cannot initialize RUM");
+    return GL_NOTIFICATION_CONTINUE;
+  }
+  const auto* app_id = app->GetApplicationId();
   logger_->info(std::format("Parsing configuration \"{}\" for app (id: {})",
                             wstring_to_utf8(config_path),
-                            wstring_to_utf8(app->GetApplicationId())));
+                            wstring_to_utf8(app_id ? app_id : L"(unknown)")));
 
   update_module_context(*ctx, *server_, config_path, *logger_);
-  auto hr = app->GetModuleContextContainer()->SetModuleContext(ctx.get(), g_module_id);
+  auto* app_container = app->GetModuleContextContainer();
+  if (!app_container) {
+    logger_->error("Module context container is null for application");
+    return GL_NOTIFICATION_CONTINUE;
+  }
+  auto hr = app_container->SetModuleContext(ctx.get(), g_module_id);
   if (FAILED(hr)) {
     logger_->error(
         std::format("Failed to set app module context: {}", std::system_category().message(hr)));
@@ -90,7 +103,7 @@ GlobalModule::OnGlobalApplicationStart(IHttpApplicationStartProvider* provider) 
 
   // NOTE(@dmehala): Keep a reference on the module context for
   // `OnGlobalConfigurationChange` event.
-  configurations_.emplace(config_path, ctx.release());
+  configurations_.insert_or_assign(config_path, ctx.release());
 
   return GL_NOTIFICATION_CONTINUE;
 }
@@ -135,23 +148,15 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
     update_server_log_level();
   }
 
-  // NOTE(@dmehala): There's a mismatch between the config path given in
-  // `OnGlobalApplicationStart` and the one here. This path is the common parent
-  // config, we need to ensure the update is sent to all applications that
-  // inherit from it.
-  for (const auto& [path, ctx] : configurations_) {
-    if (ctx == nullptr) {
-      // Application was stopped — the pointer was nulled in
-      // OnGlobalApplicationStop. Safe to skip.
-      // TODO(@dmehala): Report a telemetry log.
-      continue;
-    }
-
-    // NOTE: update_module_context disables injection when config is missing or
-    // invalid — this is intentional so that removing the datadogRum section
-    // actually stops injection rather than leaving stale config active.
-    if (std::wstring_view(path).starts_with(cfg_path)) {
-      update_module_context(*ctx, *server_, path.c_str(), *logger_);
+  // The change path is the common parent; iterate apps whose config path
+  // is rooted at it. configurations_ is std::map (sorted), so lower_bound
+  // skips unrelated leading entries.
+  // TODO(@dmehala): Report a telemetry log when ctx is null (stopped app).
+  std::wstring_view const change_path(cfg_path);
+  for (auto it = configurations_.lower_bound(std::wstring(change_path));
+       it != configurations_.end() && std::wstring_view(it->first).starts_with(change_path); ++it) {
+    if (it->second != nullptr) {
+      update_module_context(*it->second, *server_, it->first.c_str(), *logger_);
     }
   }
 

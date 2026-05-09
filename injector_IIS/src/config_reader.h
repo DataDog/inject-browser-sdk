@@ -18,10 +18,24 @@
 
 namespace datadog::rum {
 
-// NOLINTNEXTLINE(bugprone-exception-escape)
-struct RumConfig {
+struct RumConfig {  // NOLINT(bugprone-exception-escape)
   int version;
   std::unordered_map<std::string, std::string> sdk_options;
+};
+
+enum class ReadConfStatus {
+  Ok,      // Config read successfully.
+  Absent,  // Config missing or disabled — clear existing snippet.
+  Error,   // Transient error — keep existing snippet.
+};
+
+struct ReadConfResult {
+  static ReadConfResult ok(RumConfig config) { return {ReadConfStatus::Ok, std::move(config)}; }
+  static ReadConfResult absent() { return {ReadConfStatus::Absent}; }
+  static ReadConfResult error() { return {ReadConfStatus::Error}; }
+
+  ReadConfStatus status;
+  std::optional<RumConfig> config = std::nullopt;  // Set only when status == Ok.
 };
 
 struct ServerConfig {
@@ -30,10 +44,12 @@ struct ServerConfig {
 
 std::string wstring_to_utf8(const std::wstring& wstr);
 
-std::optional<RumConfig> read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& logger);
+ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& logger);
 
 std::optional<ServerConfig> read_server_conf(const IHttpServer& server, Logger& logger);
 
+// Error preserves ctx.snippet/tags so a transient COM read failure can
+// self-heal on the next OnGlobalConfigurationChange.
 void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR config_path,
                            Logger& logger);
 

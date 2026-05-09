@@ -8,8 +8,10 @@
 #include "defer.h"
 #include "injectbrowsersdk.h"
 #include "module_context.h"
+#include "telemetry.h"
 
 #include <cassert>
+#include <datadog/telemetry/telemetry.h>
 #include <format>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
@@ -161,11 +163,11 @@ std::optional<ServerConfig> read_server_conf(const IHttpServer& server, Logger& 
   return ServerConfig{log_level};
 }
 
-std::optional<RumConfig> read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& logger) {
+ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& logger) {
   auto* admin_manager = server.GetAdminManager();
   if (admin_manager == nullptr) {
     logger.debug("Admin manager is null, cannot read RUM config");
-    return std::nullopt;
+    return ReadConfResult::error();
   }
 
   IAppHostElement* cfg_root_elem = nullptr;
@@ -174,15 +176,17 @@ std::optional<RumConfig> read_conf(const IHttpServer& server, PCWSTR cfg_path, L
   if (res != S_OK) {
     logger.debug(std::format("datadogRum config section not found: {}",
                              std::system_category().message(res)));
-    return std::nullopt;
+    return ReadConfResult::absent();
   }
 
   const auto defer_root = defer([&] { cfg_root_elem->Release(); });
 
   IAppHostProperty* enabled_prop = get_property(*cfg_root_elem, L"enabled");
   if (enabled_prop == nullptr) {
-    // missing enabled attribute -> invalid format -> disabled
-    return std::nullopt;
+    // get_property conflates "attribute missing" with COM failure; treat as
+    // Error so a transient failure can't silently wipe injection.
+    logger.debug("Failed to read 'enabled' property");
+    return ReadConfResult::error();
   }
 
   const auto defer_enabled_prop = defer([&] { enabled_prop->Release(); });
@@ -191,11 +195,11 @@ std::optional<RumConfig> read_conf(const IHttpServer& server, PCWSTR cfg_path, L
   const auto defer_enabled_val = defer([&] { VariantClear(&enabled_val); });
   if (enabled_val.vt != VT_BOOL) {
     logger.debug("Failed to read 'enabled' property value");
-    return std::nullopt;
+    return ReadConfResult::error();
   }
   if (!enabled_val.boolVal) {
     logger.info("RUM injection disabled for this path");
-    return std::nullopt;
+    return ReadConfResult::absent();
   }
 
   int cfg_version = 6;
@@ -208,6 +212,11 @@ std::optional<RumConfig> read_conf(const IHttpServer& server, PCWSTR cfg_path, L
       cfg_version = version_val.lVal;
     } else if (version_val.vt == VT_I2) {
       cfg_version = version_val.iVal;
+    } else if (version_val.vt != VT_EMPTY) {
+      logger.info(
+          std::format("Unexpected version type (vt={}), "
+                      "using default version {}",
+                      version_val.vt, cfg_version));
     }
   }
 
@@ -215,7 +224,13 @@ std::optional<RumConfig> read_conf(const IHttpServer& server, PCWSTR cfg_path, L
   std::unordered_map<std::string, std::string> rum_sdk_opts;
 
   IAppHostElementCollection* col = nullptr;
-  if (cfg_root_elem->get_Collection(&col) == S_OK) {
+  HRESULT const hr_col = cfg_root_elem->get_Collection(&col);
+  if (FAILED(hr_col)) {
+    logger.error(std::format("Failed to read SDK options collection: {}",
+                             std::system_category().message(hr_col)));
+    return ReadConfResult::error();
+  }
+  if (col != nullptr) {
     const auto defer_col = defer([&] { col->Release(); });
 
     DWORD n_elem = 0;
@@ -223,7 +238,7 @@ std::optional<RumConfig> read_conf(const IHttpServer& server, PCWSTR cfg_path, L
     if (FAILED(hr_count)) {
       logger.error(std::format("Failed to read SDK option count: {}",
                                std::system_category().message(hr_count)));
-      return std::nullopt;
+      return ReadConfResult::error();
     }
 
     VARIANT item_idx;
@@ -288,13 +303,17 @@ std::optional<RumConfig> read_conf(const IHttpServer& server, PCWSTR cfg_path, L
     }
   }
 
-  return RumConfig{cfg_version, std::move(rum_sdk_opts)};
+  return ReadConfResult::ok(RumConfig{cfg_version, std::move(rum_sdk_opts)});
 }
 
 void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR config_path,
                            Logger& logger) {
-  auto config = read_conf(server, config_path, logger);
-  if (!config.has_value()) {
+  auto result = read_conf(server, config_path, logger);
+  if (result.status == ReadConfStatus::Error) {
+    logger.info("Keeping existing config after transient read error");
+    return;
+  }
+  if (result.status == ReadConfStatus::Absent) {
     if (ctx.snippet != nullptr) {
       snippet_cleanup(ctx.snippet);
       ctx.snippet = nullptr;
@@ -304,23 +323,27 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
     return;
   }
 
-  Snippet* snippet = make_snippet(config->version, config->sdk_options, logger);
+  auto& config = *result.config;
+  Snippet* snippet = make_snippet(config.version, config.sdk_options, logger);
+
+  // On make_snippet failure, preserve the existing snippet/tags. Operators
+  // prefer continued injection with the last-known-good config over going
+  // dark on a broken deploy; the next valid reload replaces it.
+  auto report_invalid = [&](std::string error_tag, const std::string& message) {
+    logger.error(message + "; keeping previous config");
+    datadog::telemetry::counter::increment(
+        telemetry::config_invalid,
+        telemetry::build_tags(std::move(error_tag), ctx.application_id_tag, ctx.remote_config_tag));
+  };
 
   if (snippet == nullptr) {
-    logger.error("Failed to create RUM snippet");
-    if (ctx.snippet != nullptr) {
-      snippet_cleanup(ctx.snippet);
-      ctx.snippet = nullptr;
-    }
+    report_invalid("error_code:alloc", "Failed to create RUM snippet");
     return;
   }
   if (snippet->error_code != 0) {
-    logger.error(std::format("Failed to create RUM snippet: {}", snippet->error_message));
+    report_invalid(std::format("error_code:{}", snippet->error_code),
+                   std::format("Failed to create RUM snippet: {}", snippet->error_message));
     snippet_cleanup(snippet);
-    if (ctx.snippet != nullptr) {
-      snippet_cleanup(ctx.snippet);
-      ctx.snippet = nullptr;
-    }
     return;
   }
 
@@ -331,12 +354,12 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
   ctx.snippet = snippet;
 
   ctx.application_id_tag.clear();
-  if (auto appIdIt = config->sdk_options.find("applicationId");
-      appIdIt != config->sdk_options.end()) {
+  if (auto appIdIt = config.sdk_options.find("applicationId");
+      appIdIt != config.sdk_options.end()) {
     ctx.application_id_tag = std::format("application_id:{}", appIdIt->second);
   }
 
-  auto rcUsed = config->sdk_options.count("remoteConfigurationId") > 0;
+  auto rcUsed = config.sdk_options.count("remoteConfigurationId") > 0;
   ctx.remote_config_tag = std::format("remote_config_used:{}", rcUsed);
 }
 

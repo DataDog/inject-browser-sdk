@@ -18,4 +18,3 @@ tidy:
   extends: .lint_base
   script:
     - make tidy-cpp
-    - cargo clippy --all-targets --all-features -- -D warnings

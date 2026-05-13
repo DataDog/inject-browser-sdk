@@ -1,20 +1,29 @@
-# DO NOT EDIT. Synced from DataDog/libdatadog-build by the
-# libdatadog-build devcontainer-bundle campaigner — edits here will be
+# DO NOT EDIT. Synced from DataDog/dd-repo-tools by the
+# dd-repo-tools devcontainer-bundle campaigner — edits here will be
 # overwritten on the next run.
-# Source of truth: https://github.com/DataDog/libdatadog-build/blob/main/repository-tools/devcontainer/devcontainer.mk
+# Source of truth: https://github.com/DataDog/dd-repo-tools/blob/main/shared/devcontainer/devcontainer.mk
 #
 # Inputs (set before `include`):
 #   DEV_CONTAINER_REPO_ROOT          Absolute path to the repo root.
 #   DEV_CONTAINER_IMAGE_NAME         Override image name. Defaults to
 #                                    registry.ddbuild.io/ci/<repo>/devcontainer.
 #   DEV_CONTAINER_REQUIRED_PATHS     Whitespace-separated paths that must exist
-#                                    (e.g. submodule checkouts). Missing ->
-#                                    $(error).
+#                                    (e.g. submodule checkouts). Checked at
+#                                    recipe time as a prereq of devcontainer-
+#                                    touching targets — missing paths fail
+#                                    that invocation, not parse time.
 #   DOCKER_BUILDX_FLAGS              Extra flags appended to the local build.
 #
 # This file is the single source of truth for staging + hashing. The
 # GitLab template (devcontainer.yml) calls into `make` so both paths
 # share the same code.
+
+# Recipes need bash + pipefail: the hash pipeline (find | sort | sha256sum |
+# cut) silently produces an empty tag on any pipe failure under POSIX sh,
+# which downstream becomes a malformed `image:` ref. Override after the
+# include if you need a different shell for your own recipes.
+SHELL := bash
+.SHELLFLAGS := -eu -o pipefail -c
 
 DEV_CONTAINER_REPO_ROOT ?= $(CURDIR)
 _DEV_CONTAINER_REPO_NAME := $(notdir $(patsubst %/,%,$(DEV_CONTAINER_REPO_ROOT)))
@@ -48,13 +57,10 @@ define _dev_container_stage_into_ctx
 if [ ! -f "$(_DEV_CONTAINER_CONTEXT_FILES)" ]; then \
   echo "ERROR: $(_DEV_CONTAINER_CONTEXT_FILES) not found" >&2; exit 1; \
 fi; \
-if [ -f "$(_DEV_CONTAINER_CONTEXT_FILTER)" ]; then \
-  grep -Ev '^[[:space:]]*(#|$$)' "$(_DEV_CONTAINER_CONTEXT_FILES)" | \
-    rsync -aR --files-from=- --filter="merge $(_DEV_CONTAINER_CONTEXT_FILTER)" "$(DEV_CONTAINER_REPO_ROOT)/" "$$ctx/"; \
-else \
-  grep -Ev '^[[:space:]]*(#|$$)' "$(_DEV_CONTAINER_CONTEXT_FILES)" | \
-    rsync -aR --files-from=- "$(DEV_CONTAINER_REPO_ROOT)/" "$$ctx/"; \
-fi; \
+filter_arg=; \
+[ -f "$(_DEV_CONTAINER_CONTEXT_FILTER)" ] && filter_arg="--filter=merge $(_DEV_CONTAINER_CONTEXT_FILTER)"; \
+grep -Ev '^[[:space:]]*(#|$$)' "$(_DEV_CONTAINER_CONTEXT_FILES)" | \
+  rsync -aR --files-from=- $$filter_arg "$(DEV_CONTAINER_REPO_ROOT)/" "$$ctx/"; \
 if [ ! -f "$$ctx/.devcontainer/Dockerfile" ]; then \
   echo "ERROR: .devcontainer/Dockerfile not staged; check .devcontainer/context.files" >&2; \
   exit 1; \
@@ -72,7 +78,8 @@ endef
 define _dev_container_compute_tag
 tag=$$(cd "$$ctx" && find . -type f | LC_ALL=C sort | \
   while IFS= read -r f; do printf -- '--- %s ---\n' "$$f"; cat "$$f"; done | \
-  sha256sum | cut -c1-12)
+  sha256sum | cut -c1-12); \
+[ -n "$$tag" ] || { echo "ERROR: hash pipeline produced empty tag (empty staged context?)" >&2; exit 1; }
 endef
 
 # Git-worktree support: when .git is a gitdir pointer, make the common dir
@@ -85,16 +92,25 @@ ifneq ($(_DEV_CONTAINER_GIT_COMMON_DIR),)
   endif
 endif
 
-# Precondition check for caller-declared required paths.
-ifneq ($(strip $(DEV_CONTAINER_REQUIRED_PATHS)),)
-  _DEV_CONTAINER_MISSING_PATHS := $(foreach p,$(DEV_CONTAINER_REQUIRED_PATHS),$(if $(wildcard $(DEV_CONTAINER_REPO_ROOT)/$(p)),,$(p)))
-  ifneq ($(strip $(_DEV_CONTAINER_MISSING_PATHS)),)
-    $(error Missing required paths (did you init submodules?): $(_DEV_CONTAINER_MISSING_PATHS))
-  endif
-endif
+# Precondition check for caller-declared required paths. Wired as a
+# phony prereq below so it fires only when a devcontainer-touching
+# target is actually built — not at parse time, which would block
+# unrelated `make` invocations (lint, format) and CI-entrypoint
+# targets whose own recipe initializes the submodules before
+# sub-making dev-image.
+.PHONY: _dev-container-check-required-paths
+_dev-container-check-required-paths:
+	@missing="$(strip $(foreach p,$(DEV_CONTAINER_REQUIRED_PATHS),$(if $(wildcard $(DEV_CONTAINER_REPO_ROOT)/$(p)),,$(p))))"; \
+	if [ -n "$$missing" ]; then \
+	  echo "Missing required paths (did you init submodules?): $$missing" >&2; \
+	  exit 1; \
+	fi
 
-.PHONY: dev-image dev-shell dev-image-tag \
+.PHONY: dev-image dev-image-x86_64 dev-shell dev-image-tag \
         .devcontainer-stage-context .devcontainer-image-hash
+
+dev-image dev-image-x86_64 dev-shell dev-image-tag \
+.devcontainer-stage-context .devcontainer-image-hash: _dev-container-check-required-paths
 
 # Stage the build context into a stable path under .devcontainer/.staged/.
 # Invoked from VS Code's initializeCommand (so build.context = `.staged`
@@ -145,10 +161,9 @@ IN_DEVCONTAINER ?= docker run --rm -i $(_DEV_CONTAINER_MOUNTS) \
 # for running cross-compiled x86_64 binaries (e.g. Windows test exes under
 # wine64) on any host. On Apple Silicon, Docker emulates via Rosetta. On
 # native amd64 the platform pin is a no-op and we reuse the regular image.
-# Targets that use this should depend on `dev-image-x86_64-cached`.
-_X86_64_IMAGE_REF_FILE := $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref-x86_64
+_DEV_CONTAINER_X86_64_IMAGE_REF_FILE := $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref-x86_64
 IN_DEVCONTAINER_X86_64 ?= docker run --rm -i --platform=linux/amd64 $(_DEV_CONTAINER_MOUNTS) \
-  $$(cat $(_X86_64_IMAGE_REF_FILE))
+  $$(cat $(_DEV_CONTAINER_X86_64_IMAGE_REF_FILE))
 
 ifeq ($(_DEV_CONTAINER_INSIDE),1)
   IN_DEVCONTAINER :=
@@ -190,10 +205,12 @@ dev-image:
 
 # Build the linux/amd64 variant. On amd64 hosts this reuses dev-image; on
 # arm64 hosts it produces a separate `:<tag>-x86_64` image so it doesn't
-# clobber the native one. Buildx caches per-platform so repeats are cheap.
+# clobber the native one — built locally only (CI doesn't publish the
+# `-x86_64` ref), so no docker pull attempt. Buildx caches per-platform
+# so repeats are cheap.
 ifeq ($(_DEV_CONTAINER_PLATFORM),linux/amd64)
 dev-image-x86_64: dev-image
-	@cp $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref $(_X86_64_IMAGE_REF_FILE)
+	@cp $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref $(_DEV_CONTAINER_X86_64_IMAGE_REF_FILE)
 else
 dev-image-x86_64:
 	@$(_dev_container_stage_context); \
@@ -206,11 +223,9 @@ dev-image-x86_64:
 	  $(DOCKER_BUILDX_FLAGS) \
 	  --load -t "$$ref" \
 	  "$$ctx"; \
-	echo "$$ref" > $(_X86_64_IMAGE_REF_FILE)
+	echo "$$ref" > $(_DEV_CONTAINER_X86_64_IMAGE_REF_FILE)
 endif
 
-# Interactive shell in the built image. Mirrors IN_DEVCONTAINER but with
-# `-it` for terminal handling.
 dev-shell: dev-image
 	@ref=$$(cat $(DEV_CONTAINER_REPO_ROOT)/.devcontainer/.image-ref); \
 	docker run --rm -it $(_DEV_CONTAINER_MOUNTS) "$$ref" /bin/sh

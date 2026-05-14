@@ -1,9 +1,9 @@
 ---
 variables:
-  WINDOWS_BUILD_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64:v105206457-cb3f8790
+  WINDOWS_BUILD_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64:v113129110-33018b2a
   # Make sure to update test-infra-definitions version in go.mod as well
   E2E_RUNNER_IMAGE: registry.ddbuild.io/ci/test-infra-definitions/runner:ef809e329658
-  IIS_AGENT_DEPLOY_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/gitlab_agent_deploy:v105206457-cb3f8790
+  IIS_AGENT_DEPLOY_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/gitlab_agent_deploy:v113129110-33018b2a
   ARTIFACTS_DIR: artifacts
 
 ########################################

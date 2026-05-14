@@ -8,7 +8,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::{configuration::Configuration, error::Error};
+use crate::{configuration::parse_site, configuration::Configuration, error::Error};
 
 /// Generates the Datadog RUM SDK JavaScript snippet based on the provided configuration.
 ///
@@ -41,10 +41,11 @@ window.DD_RUM.onReady(function() {
     );
 
     let mut rum_value =
-        serde_json::to_value(&configuration.rum).map_err(|e| Error::Json(e.to_string()))?;
+        serde_json::to_value(&configuration.rum).map_err(|e| return Error::Json(e.to_string()))?;
     // Deterministic key ordering, independent of serde_json's `preserve_order` feature.
     rum_value.sort_all_objects();
-    let json_string = serde_json::to_string(&rum_value).map_err(|e| Error::Json(e.to_string()))?;
+    let json_string =
+        serde_json::to_string(&rum_value).map_err(|e| return Error::Json(e.to_string()))?;
     for ch in json_string.chars() {
         if ch.is_ascii() {
             let mut buf = [0; 4];
@@ -64,28 +65,29 @@ window.DD_RUM.onReady(function() {
 "#,
     );
 
-    Ok(output)
+    return Ok(output);
 }
 
 fn format_cdn_url(major_version: u32, site: &str) -> Result<String, Error> {
-    if site == "ddog-gov.com" {
+    let parsed = parse_site(site).ok_or_else(|| return Error::UnsupportedSite(site.to_string()))?;
+
+    // US1-FED uses a flat URL without region prefix (per browser-sdk README)
+    #[cfg(feature = "support_gov_domain")]
+    if parsed.domain.starts_with("ddog-gov.") {
         return Ok(format!(
             "https://www.datadoghq-browser-agent.com/datadog-rum-v{major_version}.js"
         ));
     }
 
-    let region = match site {
-        "datadoghq.com" => "us1",
-        "us3.datadoghq.com" => "us3",
-        "us5.datadoghq.com" => "us5",
-        "datadoghq.eu" => "eu1",
-        "ap1.datadoghq.com" => "ap1",
-        _ => return Err(Error::UnsupportedSite(site.to_string())),
+    let region = match parsed.prefix {
+        Some(prefix) => prefix,
+        None if parsed.domain.ends_with(".eu") => "eu1",
+        None => "us1",
     };
 
-    Ok(format!(
+    return Ok(format!(
         "https://www.datadoghq-browser-agent.com/{region}/v{major_version}/datadog-rum.js"
-    ))
+    ));
 }
 
 #[cfg(test)]
@@ -244,11 +246,96 @@ window.DD_RUM.onReady(function() {
             "https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js"
         );
         assert_eq!(
+            format_cdn_url(5, "datadoghq.eu").unwrap(),
+            "https://www.datadoghq-browser-agent.com/eu1/v5/datadog-rum.js"
+        );
+        // explicit us1 prefix produces the same URL as bare datadoghq.com
+        assert_eq!(
+            format_cdn_url(5, "us1.datadoghq.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "us3.datadoghq.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/us3/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "us5.datadoghq.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/us5/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "ap1.datadoghq.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/ap1/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "ap2.datadoghq.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/ap2/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "eu2.datadoghq.eu").unwrap(),
+            "https://www.datadoghq-browser-agent.com/eu2/v5/datadog-rum.js"
+        );
+        // datad0g (staging) domains use the same CDN as production
+        assert_eq!(
+            format_cdn_url(5, "datad0g.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "datad0g.eu").unwrap(),
+            "https://www.datadoghq-browser-agent.com/eu1/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "us3.datad0g.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/us3/v5/datadog-rum.js"
+        );
+        // major version 6
+        assert_eq!(
+            format_cdn_url(6, "datadoghq.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/us1/v6/datadog-rum.js"
+        );
+        // rejected sites
+        assert_eq!(
             format_cdn_url(5, "foo.com").unwrap_err(),
             Error::UnsupportedSite(String::from("foo.com"))
         );
+    }
+
+    #[test]
+    fn test_generate_snippet_with_prefixed_site() {
+        let snippet = generate_snippet(&Configuration {
+            major_version: 5,
+            rum: RumConfiguration {
+                client_token: Some(String::from("tok")),
+                application_id: Some(String::from("app")),
+                site: Some(String::from("us5.datadoghq.com")),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let s = core::str::from_utf8(&snippet).unwrap();
+        assert!(
+            s.contains("datadoghq-browser-agent.com/us5/v5/datadog-rum.js"),
+            "expected us5 region in CDN URL"
+        );
+        assert!(
+            s.contains(r#""site":"us5.datadoghq.com""#),
+            "expected site in init config"
+        );
+    }
+
+    #[cfg(feature = "support_gov_domain")]
+    #[test]
+    fn test_format_cdn_url_gov() {
+        // US1-FED uses a flat URL without region prefix (per browser-sdk README)
         assert_eq!(
             format_cdn_url(5, "ddog-gov.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/datadog-rum-v5.js"
+        );
+        assert_eq!(
+            format_cdn_url(6, "ddog-gov.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/datadog-rum-v6.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "ddog-gov.mil").unwrap(),
             "https://www.datadoghq-browser-agent.com/datadog-rum-v5.js"
         );
     }

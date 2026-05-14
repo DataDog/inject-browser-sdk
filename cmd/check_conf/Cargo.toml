@@ -4,8 +4,11 @@ edition.workspace = true
 version.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
-inject-browser-sdk = { path = "../../lib/inject-browser-sdk" }
+inject-browser-sdk = { path = "../../lib/inject-browser-sdk", features = ["support_gov_domain"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 

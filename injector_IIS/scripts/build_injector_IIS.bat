@@ -20,7 +20,8 @@ popd
 dir %outdir%
 
 if not exist %BUILD_OUTDIR% (mkdir %BUILD_OUTDIR%)
-copy /y %outdir%\*.msi %BUILD_OUTDIR%
+copy /y %outdir%\*.msi %BUILD_OUTDIR% || exit /b 6
+copy /y %outdir%\*.dll %BUILD_OUTDIR% || exit /b 7
 
 goto :EOF
 

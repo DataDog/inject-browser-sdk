@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [features]
 std = ["serde/std", "serde_json/std"]
+support_gov_domain = []
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
@@ -18,6 +19,9 @@ libdd-library-config.workspace = true
 # uses std::fs. See the KNOWN RISK note in the root workspace Cargo.toml.
 [target.'cfg(windows)'.dependencies]
 libdd-library-config = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true
 
 [dev-dependencies]
 pretty_assertions = { version = "1.4.0", features = ["unstable"] }

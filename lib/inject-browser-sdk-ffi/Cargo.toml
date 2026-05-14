@@ -12,9 +12,10 @@ crate-type = ["staticlib", "cdylib", "lib"]
 [features]
 # a single workspace run/bin can only use one set of features for its dependencies
 # for now to make the `fuzz` project work correctly we need to set std feature the default
-default = ["std"]
+default = ["std", "support_gov_domain"]
 # default = []
 std = ["inject-browser-sdk/std", "serde/std", "serde_json/std"]
+support_gov_domain = ["inject-browser-sdk/support_gov_domain"]
 
 [dependencies]
 inject-browser-sdk = { path = "../inject-browser-sdk" }
@@ -30,6 +31,9 @@ rustix-dlmalloc = { version = "0.2.2", features = ["global"] }
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 dlmalloc = { version = "0.2", features = ["global"] }
 
+
+[lints]
+workspace = true
 
 [dev-dependencies]
 pretty_assertions = { version = "1.4.0", features = ["unstable"] }

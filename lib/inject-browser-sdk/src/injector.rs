@@ -27,21 +27,21 @@ pub struct Injector<'snippet> {
     ///
     /// Example: imagine we write the following chunks: `foo</he`, `ad>bar`.
     /// * When writing the first chunk, the injector will return `foo`, but buffer `</he`, as the
-    /// snippet might be injected after `foo`.
+    ///   snippet might be injected after `foo`.
     /// * When writing the second chunk, the injector will realize that `</he` was indeed the
-    /// beginning of the `</head>` tag, so it will emit the snippet, then the buffered data `</he`,
-    /// then the chunk `ad>bar`.
+    ///   beginning of the `</head>` tag, so it will emit the snippet, then the buffered data `</he`,
+    ///   then the chunk `ad>bar`.
     ///
     /// Second example: imagine we write the following chunks: `foo</he`, `ader>bar`.
     /// * Same as before, the injector will return `foo` and buffer `</he`
     /// * When writing the second chunk, the injector will realize that `</he` was not the start of
-    /// a `</head>` tag, so it will emit the buffered data `</he`, then the chunk `ader>bar`.
+    ///   a `</head>` tag, so it will emit the buffered data `</he`, then the chunk `ader>bar`.
     ///
     /// Third example: imagine we write the following chunks: `foo</he`, `ader>bar</`
     /// * Same as before, the injector will return `foo` and buffer `</he`
     /// * When writing the second chunk, the injector will realize that `</he` was not the start of
-    /// a `</head>` tag, so it will emit it, then emit `ader>bar`. But it will need to put `</` in
-    /// a second buffer, as it cannot tell yet if it is a valid injection point.
+    ///   a `</head>` tag, so it will emit it, then emit `ader>bar`. But it will need to put `</` in
+    ///   a second buffer, as it cannot tell yet if it is a valid injection point.
     incomplete_data: Vec<u8>,
     incomplete_data_public_ref: Vec<u8>,
 
@@ -52,7 +52,7 @@ pub struct Injector<'snippet> {
 
 impl<'snippet> Injector<'snippet> {
     pub fn new(snippet: &'snippet [u8]) -> Self {
-        Self {
+        return Self {
             snippet,
             locator: InjectionPointLocator::new(),
             injected: false,
@@ -60,7 +60,7 @@ impl<'snippet> Injector<'snippet> {
             padding_spaces: Vec::new(),
             incomplete_data: Vec::new(),
             incomplete_data_public_ref: Vec::new(),
-        }
+        };
     }
 
     pub fn write<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
@@ -71,35 +71,39 @@ impl<'snippet> Injector<'snippet> {
         match self.locator.scan(chunk) {
             Location::None => {
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                self.create_result(&[&self.incomplete_data_public_ref, chunk])
+                return self.create_result(&[&self.incomplete_data_public_ref, chunk]);
             }
 
             Location::PotentialFromPreviousChunk => {
                 self.incomplete_data.extend_from_slice(chunk);
-                self.create_result(&[])
+                return self.create_result(&[]);
             }
 
             Location::PotentialFromIndex(index) => {
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
                 self.incomplete_data.extend_from_slice(&chunk[index..]);
-                self.create_result(&[&self.incomplete_data_public_ref, &chunk[..index]])
+                return self.create_result(&[&self.incomplete_data_public_ref, &chunk[..index]]);
             }
 
             Location::MatchFromPreviousChunk => {
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
                 self.injected = true;
-                self.create_result(&[self.snippet, &self.incomplete_data_public_ref, chunk])
+                return self.create_result(&[
+                    self.snippet,
+                    &self.incomplete_data_public_ref,
+                    chunk,
+                ]);
             }
 
             Location::MatchFromIndex(index) => {
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
                 self.injected = true;
-                self.create_result(&[
+                return self.create_result(&[
                     &self.incomplete_data_public_ref,
                     &chunk[..index],
                     self.snippet,
                     &chunk[index..],
-                ])
+                ]);
             }
         }
     }
@@ -107,34 +111,34 @@ impl<'snippet> Injector<'snippet> {
     pub fn end(&mut self) -> Result<'_> {
         self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
         if self.injected {
-            self.create_result(&[&self.incomplete_data_public_ref])
+            return self.create_result(&[&self.incomplete_data_public_ref]);
         } else {
             self.padding_spaces = vec![b' '; self.snippet.len()];
-            self.create_result(&[&self.incomplete_data_public_ref, &self.padding_spaces])
+            return self.create_result(&[&self.incomplete_data_public_ref, &self.padding_spaces]);
         }
     }
 
     fn create_result<'a>(&'a self, slices: &[&'a [u8]]) -> Result<'a> {
         let mut length = 0;
-        let mut non_empty_slices = slices.iter().filter(|slice| !slice.is_empty());
+        let mut non_empty_slices = slices.iter().filter(|slice| return !slice.is_empty());
 
-        Result {
+        return Result {
             slices: core::array::from_fn(|_| match non_empty_slices.next() {
                 Some(slice) => {
                     length += 1;
-                    BytesSlice {
+                    return BytesSlice {
                         bytes: slice,
                         from_incoming_chunk: slice.as_ptr()
                             != self.incomplete_data_public_ref.as_ptr()
                             && slice.as_ptr() != self.padding_spaces.as_ptr()
                             && slice.as_ptr() != self.snippet.as_ptr(),
-                    }
+                    };
                 }
-                None => BytesSlice::default(),
+                None => return BytesSlice::default(),
             }),
             length,
             injected: self.injected,
-        }
+        };
     }
 }
 
@@ -241,7 +245,7 @@ mod tests {
 
         impl Part {
             fn new(string: &'static str, has_head: bool) -> Self {
-                Self { string, has_head }
+                return Self { string, has_head };
             }
         }
 
@@ -294,12 +298,12 @@ mod tests {
                 .sample_iter(Uniform::new(0usize, input.len() + 1).unwrap())
                 .scan(input.as_bytes(), |input, chunk_size| {
                     if input.is_empty() {
-                        None
+                        return None;
                     } else {
                         let chunk_size = chunk_size.min(input.len());
                         let chunk = &input[..chunk_size];
                         *input = &input[chunk_size..];
-                        Some(chunk)
+                        return Some(chunk);
                     }
                 });
 
@@ -349,7 +353,10 @@ mod tests {
 
                 if !injected {
                     // Look for the snippet in the slice
-                    injected = slice.bytes.windows(slice.bytes.len()).any(|w| w == snippet);
+                    injected = slice
+                        .bytes
+                        .windows(slice.bytes.len())
+                        .any(|w| return w == snippet);
                 }
                 output_slices.extend_from_slice(slice.bytes);
             }

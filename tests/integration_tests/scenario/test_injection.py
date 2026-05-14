@@ -135,19 +135,3 @@ def test_no_injection_header_set(upstream_server):
 
     assert r0.headers == r1.headers
     assert r0.content == r1.content
-
-
-# def test_injection_disabled():
-#     """
-#     Assess the browser SDK is not injected when the feature is turned off.
-#     """
-#     pass
-#
-#
-# def test_no_injection_status_code():
-#     """
-#     Assess the browser SDK is not injected for some status code.
-#     Only 4xx at the moment.
-#     """
-#     pass
-#

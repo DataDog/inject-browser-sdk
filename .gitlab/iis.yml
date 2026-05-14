@@ -137,10 +137,59 @@ injector_IIS_unit_test_linux_wine:
   script:
     - make test-iis
 
+# Shared script that extracts the pulumi plugin tarball produced by
+# go_e2e_deps into ~/.pulumi so e2e jobs can run `pulumi up` without
+# re-downloading providers (mirrors DataDog/datadog-operator's
+# `.retrieve_linux_pulumi_plugins`).
+.retrieve_linux_pulumi_plugins:
+  - mkdir -p ~/.pulumi && tar xJf pulumi_plugins.tar.xz -C ~/.pulumi
+  - rm -f pulumi_plugins.tar.xz
+
+# Pre-fetch the Pulumi providers used by the e2e scenarios once per pipeline.
+# The plugins are cached on go.mod and shared with downstream e2e jobs as an
+# artifact, so the generic datadog-agent-buildimages/linux image only pays the
+# download cost on a cache miss (mirrors DataDog/datadog-operator's
+# `go_e2e_deps`).
+.go_e2e_deps_template:
+  stage: deps_fetch
+  image: $E2E_LINUX_IMAGE
+  tags: ["arch:amd64"]
+  needs: []
+  variables:
+    KUBERNETES_CPU_REQUEST: 4
+  script:
+    - |
+      if [ ! -f pulumi_plugins.tar.xz ]; then
+        pushd injector_IIS/test/e2e_tests
+        GOWORK=off PULUMI_CONFIG_PASSPHRASE=dummy pulumi --non-interactive plugin install
+        popd
+        tar c -I "xz -T${KUBERNETES_CPU_REQUEST}" -f $CI_PROJECT_DIR/pulumi_plugins.tar.xz -C ~/.pulumi plugins
+      fi
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - $CI_PROJECT_DIR/pulumi_plugins.tar.xz
+  cache:
+    - key:
+        files:
+          - injector_IIS/test/e2e_tests/go.mod
+          - .gitlab/iis.yml
+        prefix: "pulumi_plugins"
+      paths:
+        - pulumi_plugins.tar.xz
+
+go_e2e_deps:
+  extends:
+    - .go_e2e_deps_template
+    - .IIS_build_when
+
+manual_go_e2e_deps:
+  extends: .go_e2e_deps_template
+  when: manual
+
 .injector_IIS_e2e_test_template:
   stage: test
   tags: ["arch:amd64"]
-  needs: []
   retry:
     max: 2
     when:
@@ -153,24 +202,9 @@ injector_IIS_unit_test_linux_wine:
     KUBERNETES_MEMORY_LIMIT: 16Gi
     E2E_OUTPUT_DIR: $CI_PROJECT_DIR/e2e-output
     PULUMI_CONFIG_PASSPHRASE: dummy
-    # Keep pulumi state inside the workspace so GitLab can cache it between
-    # jobs (the bespoke test-infra-definitions runner image used to ship the
-    # plugins pre-baked; we need to download them ourselves now and avoid
-    # GitHub release-API rate limits on every job).
-    PULUMI_HOME: $CI_PROJECT_DIR/.pulumi-home
-  cache:
-    key:
-      files:
-        - injector_IIS/test/e2e_tests/go.mod
-    paths:
-      - .pulumi-home/plugins/
   before_script:
-    # Pre-fetch the Pulumi providers used by the e2e scenarios. Pulumi itself
-    # is provided by the datadog-agent-buildimages/linux image; only the
-    # provider plugins need to be installed per-job. The GitLab cache above
-    # keeps them across jobs once they've been downloaded once for a given
-    # go.mod.
-    - (cd injector_IIS/test/e2e_tests && pulumi --non-interactive plugin install)
+    # Extract the pulumi plugins produced by go_e2e_deps into ~/.pulumi
+    - !reference [.retrieve_linux_pulumi_plugins]
     # Read AWS config for agent-qa role from ddbuild's SSM, and then assume agent-qa role
     - mkdir -p ~/.aws
     - aws ssm get-parameter --region us-east-1 --name "${AWS_SSM_PREFIX}agent-qa-profile" --with-decryption --query "Parameter.Value" --out text >> ~/.aws/config
@@ -205,15 +239,12 @@ injector_IIS_e2e_test:
   extends:
     - .injector_IIS_e2e_test_template
     - .IIS_build_when
-  needs: ["injector_IIS_build"]
-  # Temporarily disabled; re-enable once PR #87 lands.
-  rules:
-    - when: never
+  needs: ["injector_IIS_build", "go_e2e_deps"]
 
 manual_injector_IIS_e2e_test:
   extends: .injector_IIS_e2e_test_template
   when: manual
-  needs: ["manual_injector_IIS_build"]
+  needs: ["manual_injector_IIS_build", "manual_go_e2e_deps"]
 
 .injector_IIS_release:
   stage: release

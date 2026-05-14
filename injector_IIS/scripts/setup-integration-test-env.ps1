@@ -68,8 +68,26 @@ Write-Host "RepoRoot : $RepoRoot"
 if ($DllPath) { Write-Host "DllPath  : $DllPath" }
 if ($MsiPath) { Write-Host "MsiPath  : $MsiPath" }
 
+# Pinned third-party artifacts. Update version + hash together when bumping.
+$UvVersion           = "0.11.14"
+$UvInstallerSha256   = "876568F96D76F8812002FAEC712E222AAF14ADAEF4FCC3FB8C44CDAAF826A1B7"
+$UrlRewriteMsiSha256 = "37342FF2F585F263F34F48E9DE59EB1051D61015A8E967DBDE4075716230A32A"
+$ArrMsiSha256        = "FB61FDB7101795A34D5129CB37EEE43AB675C7ED76BA3A3B23B039D8C90C2A4B"
+
 function Assert-LastExitCode {
     if ($LASTEXITCODE -ne 0) { throw "Command failed with exit code $LASTEXITCODE" }
+}
+
+function Assert-FileSha256 {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$ExpectedHash,
+        [Parameter(Mandatory)] [string]$Description
+    )
+    $actual = (Get-FileHash -Path $Path -Algorithm SHA256).Hash
+    if ($actual -ne $ExpectedHash.ToUpperInvariant()) {
+        throw "$Description SHA256 mismatch. Expected $ExpectedHash, got $actual (file: $Path)."
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -81,10 +99,11 @@ function Ensure-Uv {
         return
     }
 
-    Write-Host "Installing uv..."
+    Write-Host "Installing uv $UvVersion..."
     $env:UV_INSTALL_DIR = "$env:ProgramFiles\uv"
     $installScript = Join-Path $env:TEMP "uv-install.ps1"
-    Invoke-WebRequest -Uri "https://astral.sh/uv/install.ps1" -OutFile $installScript -UseBasicParsing
+    Invoke-WebRequest -Uri "https://astral.sh/uv/$UvVersion/install.ps1" -OutFile $installScript -UseBasicParsing
+    Assert-FileSha256 -Path $installScript -ExpectedHash $UvInstallerSha256 -Description "uv installer"
     & $installScript
 
     # Persist to the user PATH so subsequent processes (e.g. run-integration-tests.ps1)
@@ -129,6 +148,7 @@ function Install-IisPrerequisites {
         Write-Host "Installing URL Rewrite 2.1..."
         $msi = "$env:TEMP\urlrewrite.msi"
         Invoke-WebRequest -Uri "https://download.microsoft.com/download/1/2/8/128E2E22-C1B9-44A4-BE2A-5859ED1D4592/rewrite_amd64_en-US.msi" -OutFile $msi -UseBasicParsing
+        Assert-FileSha256 -Path $msi -ExpectedHash $UrlRewriteMsiSha256 -Description "URL Rewrite MSI"
         $proc = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn" -Wait -PassThru -NoNewWindow
         if ($proc.ExitCode -ne 0) { throw "URL Rewrite installation failed with exit code $($proc.ExitCode)" }
     } else {
@@ -141,6 +161,7 @@ function Install-IisPrerequisites {
         Write-Host "Installing Application Request Routing 3.0..."
         $msi = "$env:TEMP\arr.msi"
         Invoke-WebRequest -Uri "https://download.microsoft.com/download/E/9/8/E9849D6A-020E-47E4-9FD0-A023E99B54EB/requestRouter_amd64.msi" -OutFile $msi -UseBasicParsing
+        Assert-FileSha256 -Path $msi -ExpectedHash $ArrMsiSha256 -Description "Application Request Routing MSI"
         $proc = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn" -Wait -PassThru -NoNewWindow
         if ($proc.ExitCode -ne 0) { throw "Application Request Routing installation failed with exit code $($proc.ExitCode)" }
     } else {

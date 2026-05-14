@@ -27,7 +27,11 @@ $RepoRoot  = Split-Path (Split-Path $ScriptDir -Parent) -Parent
 [System.Environment]::SetEnvironmentVariable("WEBSERVER-FLAVOR", "iis", "Process")
 
 Write-Host "Running integration tests (upstream server started automatically by conftest.py)..."
-uv run --project "$RepoRoot\tests\integration_tests" `
+# `--frozen` installs from the committed uv.lock without re-resolving against
+# pyproject.toml. We avoid `--locked` because uv has a known false-positive on
+# Windows where it reports the lockfile as stale even when `uv lock` produces no
+# changes (astral-sh/uv issues #13614, #10683).
+uv run --frozen --project "$RepoRoot\tests\integration_tests" `
     pytest "$RepoRoot\tests\integration_tests\scenario" -v
 
 exit $LASTEXITCODE

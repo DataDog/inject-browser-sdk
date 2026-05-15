@@ -222,7 +222,7 @@ manual_go_e2e_deps:
     - export E2E_PROFILE="ci"
     - export CI_SECRET_PREFIX=$AWS_SSM_PREFIX
     - export E2E_KEY_PAIR_NAME=$KEY_PAIR_NAME
-    - export E2E_PUBLIC_KEY_PATH="/root/.ssh/${KEY_PAIR_NAME}.pub"
+    - export E2E_AWS_PUBLIC_KEY_PATH="/root/.ssh/${KEY_PAIR_NAME}.pub"
   script:
     - mkdir -p injector_IIS/test/e2e_tests/test_assets
     ## the msi will have a version-specific name, but there should be only one.

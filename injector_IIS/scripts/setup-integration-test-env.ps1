@@ -329,6 +329,40 @@ function New-TestSites {
     Add-RewriteProxyRule -SiteName $site2Name
     # Intentionally no RUM configuration on this site
 
+    # Site 3: RUM with per-location overrides (port 8082) -- per-path config tests
+    $site3Name = "TestRumLocation"
+    $site3Root = "$env:SystemDrive\$site3Name"
+
+    if (-not (Get-Website -Name $site3Name -ErrorAction SilentlyContinue)) {
+        Write-Host "Creating site '$site3Name'..."
+        New-Item -ItemType Directory -Force -Path $site3Root | Out-Null
+        if (Test-Path $staticSrc) {
+            Copy-Item "$staticSrc\*" $site3Root -Recurse -Force
+        }
+        New-Website -Name $site3Name -Port 8082 -PhysicalPath $site3Root -ApplicationPool $appPool -Force
+    } else {
+        Write-Host "Site '$site3Name' already exists."
+        Set-ItemProperty "IIS:\Sites\$site3Name" -Name applicationPool -Value $appPool
+    }
+
+    Add-RewriteProxyRule -SiteName $site3Name
+
+    New-Datadog-RUMConfiguration `
+        -IISSite              $site3Name `
+        -ApplicationId        "foo" `
+        -ClientToken          "bar" `
+        -DatadogSite          "datadoghq.eu" `
+        -SessionSampleRate       100 `
+        -SessionReplaySampleRate 100 `
+        -Service              "location-root"
+
+    # Disable RUM for the /api sub-path via <location path="api"> override
+    Set-WebConfigurationProperty `
+        -PSPath "MACHINE/WEBROOT/APPHOST/$site3Name" `
+        -Location "api" `
+        -Filter "system.webServer/datadogRum" `
+        -Name "enabled" -Value "false"
+
     Write-Host "Restarting IIS to apply all changes..."
     iisreset /restart
     Assert-LastExitCode

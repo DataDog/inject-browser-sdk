@@ -135,3 +135,38 @@ def test_no_injection_header_set(upstream_server):
 
     assert r0.headers == r1.headers
     assert r0.content == r1.content
+
+
+def test_per_path_root_injects(upstream_server):
+    """
+    Verify RUM is injected at the root path of a site that uses per-location
+    config overrides.  The root has RUM enabled with service="location-root".
+    """
+
+    async def upstream_handler(request):
+        request.app["ctx"]["last_request"] = request
+        return web.Response(body=SIMPLE_HTML, content_type="text/html")
+
+    upstream_server.add_route("/location-root", upstream_handler)
+
+    r = requests.get("http://localhost:8082/location-root")
+    assert r.status_code == 200
+    __assert_rum_injection(r.headers, r.content)
+    assert "location-root" in r.content.decode()
+
+
+def test_per_path_api_no_injection(upstream_server):
+    """
+    Verify RUM is NOT injected for the /api sub-path where it is disabled
+    via a <location path="api"> override.
+    """
+
+    async def upstream_handler(_):
+        return web.Response(body=SIMPLE_HTML, content_type="text/html")
+
+    upstream_server.add_route("/api/data", upstream_handler)
+
+    r = requests.get("http://localhost:8082/api/data")
+    assert r.status_code == 200
+    assert "x-datadog-rum-injected" not in r.headers
+    assert "datadog-rum.js" not in r.content.decode()

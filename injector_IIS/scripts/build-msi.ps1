@@ -20,17 +20,17 @@
 .PARAMETER MinVer
     Minor version number (default: 1).
 
-.PARAMETER PatchVer
-    Patch version number (default: 0).
+.PARAMETER BuildVer
+    Build number (default: 0). In CI this is the GitLab CI_PIPELINE_IID.
 
 .EXAMPLE
     .\build-msi.ps1
-    .\build-msi.ps1 -MajVer 1 -MinVer 2 -PatchVer 3
+    .\build-msi.ps1 -MajVer 1 -MinVer 3 -BuildVer 2100
 #>
 param(
     [int]$MajVer   = 0,
     [int]$MinVer   = 1,
-    [int]$PatchVer = 0
+    [int]$BuildVer = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -104,7 +104,7 @@ try {
     }
     $wixproj    = ".\injector_IIS_installer\injector_IIS_installer.wixproj"
 
-    Write-Host "Building MSI (v$MajVer.$MinVer.$PatchVer)..."
+    Write-Host "Building MSI (v$MajVer.$MinVer.$BuildVer)..."
     msbuild $wixproj `
         /p:Configuration=Release `
         /p:Platform=x64 `
@@ -113,7 +113,7 @@ try {
         /p:InjectorDll="$dllPath" `
         /p:MAJ_VER=$MajVer `
         /p:MIN_VER=$MinVer `
-        /p:PATCH_VER=$PatchVer `
+        /p:BUILD_VER=$BuildVer `
         /p:WixTargetsPath="$wixTargets" `
         /nologo /v:minimal
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

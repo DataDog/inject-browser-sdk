@@ -18,13 +18,17 @@ from .utils import parse_version
 
 def do_get_build_env(ctx, vstudio_root=None):
     numeric, pre = parse_version()
-    build_maj, build_min, build_patch = numeric.split(".")
-    fullver = f"{numeric}-{pre}" if pre else numeric
+    build_maj, build_min = numeric.split(".")
+    # IIS_BUILD_NUMBER lets a developer reproduce a specific CI build's
+    # version locally; otherwise BUILD comes from GitLab's per-project IID.
+    build_num = os.environ.get("IIS_BUILD_NUMBER") or os.environ.get("CI_PIPELINE_IID", "0")
+    full_numeric = f"{build_maj}.{build_min}.{build_num}"
+    fullver = f"{full_numeric}-{pre}" if pre else full_numeric
 
     env = {
         "MAJ_VER": build_maj,
         "MIN_VER": build_min,
-        "PATCH_VER": build_patch,
+        "BUILD_VER": build_num,
         "VERSION_PRE": pre,
     }
 

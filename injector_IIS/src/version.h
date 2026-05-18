@@ -10,16 +10,17 @@
 #include <string_view>
 #endif
 
-// MAJ_VER, MIN_VER, PATCH_VER, and VERSION_PRE are always provided by CMake
-// compiler defines (derived from injector_IIS/VERSION).
+// MAJ_VER, MIN_VER, BUILD_VER, and VERSION_PRE are always provided by CMake
+// compiler defines. MAJ/MIN come from injector_IIS/VERSION; BUILD is the
+// GitLab CI_PIPELINE_IID (or 0 for local builds).
 
-#define RC_FILE_VERSION MAJ_VER, MIN_VER, PATCH_VER, 0
+#define RC_FILE_VERSION MAJ_VER, MIN_VER, BUILD_VER, 0
 
 #define STRINGIFY(x) #x
 #define TO_STRING(x) STRINGIFY(x)
 
-#define FILE_VERSION_STRING TO_STRING(MAJ_VER.MIN_VER.PATCH_VER.0)
-#define SHORT_VERSION_STRING TO_STRING(MAJ_VER.MIN_VER.PATCH_VER)
+#define FILE_VERSION_STRING TO_STRING(MAJ_VER.MIN_VER.BUILD_VER.0)
+#define SHORT_VERSION_STRING TO_STRING(MAJ_VER.MIN_VER.BUILD_VER)
 
 extern "C" {
 extern const std::string_view datadog_rum_injector_version;

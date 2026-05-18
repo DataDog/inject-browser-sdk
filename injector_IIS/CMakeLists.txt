@@ -7,19 +7,29 @@
 
 cmake_minimum_required(VERSION 3.24)
 
-# IIS injector version from its own VERSION file (independent of Cargo.toml)
+# IIS injector version from its own VERSION file (independent of Cargo.toml).
+# VERSION holds MAJ.MIN (+ optional -PRE); the BUILD component comes from CI
+# (CI_PIPELINE_IID) so every CI build is monotonically newer than the previous.
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" _IIS_VERSION_RAW)
 string(STRIP "${_IIS_VERSION_RAW}" _IIS_VERSION_RAW)
-if(_IIS_VERSION_RAW MATCHES "([0-9]+)\\.([0-9]+)\\.([0-9]+)(-(.+))?")
-  set(IIS_INJECTOR_VERSION_MAJ   "${CMAKE_MATCH_1}")
-  set(IIS_INJECTOR_VERSION_MIN   "${CMAKE_MATCH_2}")
-  set(IIS_INJECTOR_VERSION_PATCH "${CMAKE_MATCH_3}")
-  set(IIS_INJECTOR_VERSION_PRE   "${CMAKE_MATCH_5}")
-  set(IIS_INJECTOR_VERSION       "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
+if(_IIS_VERSION_RAW MATCHES "([0-9]+)\\.([0-9]+)(-(.+))?")
+  set(IIS_INJECTOR_VERSION_MAJ "${CMAKE_MATCH_1}")
+  set(IIS_INJECTOR_VERSION_MIN "${CMAKE_MATCH_2}")
+  set(IIS_INJECTOR_VERSION_PRE "${CMAKE_MATCH_4}")
 else()
   message(FATAL_ERROR "Could not parse version from injector_IIS/VERSION: '${_IIS_VERSION_RAW}'")
 endif()
 unset(_IIS_VERSION_RAW)
+
+if(DEFINED ENV{IIS_BUILD_NUMBER} AND NOT "$ENV{IIS_BUILD_NUMBER}" STREQUAL "")
+  set(IIS_INJECTOR_VERSION_BUILD "$ENV{IIS_BUILD_NUMBER}")
+elseif(DEFINED ENV{CI_PIPELINE_IID} AND NOT "$ENV{CI_PIPELINE_IID}" STREQUAL "")
+  set(IIS_INJECTOR_VERSION_BUILD "$ENV{CI_PIPELINE_IID}")
+else()
+  set(IIS_INJECTOR_VERSION_BUILD "0")
+endif()
+
+set(IIS_INJECTOR_VERSION "${IIS_INJECTOR_VERSION_MAJ}.${IIS_INJECTOR_VERSION_MIN}.${IIS_INJECTOR_VERSION_BUILD}")
 
 project(iis-injector LANGUAGES CXX VERSION ${IIS_INJECTOR_VERSION})
 
@@ -166,7 +176,7 @@ target_compile_options(iis_injector-objects
     /D_WIN32_WINNT=${win_ver}
     /DMAJ_VER=${IIS_INJECTOR_VERSION_MAJ}
     /DMIN_VER=${IIS_INJECTOR_VERSION_MIN}
-    /DPATCH_VER=${IIS_INJECTOR_VERSION_PATCH}
+    /DBUILD_VER=${IIS_INJECTOR_VERSION_BUILD}
     /DVERSION_PRE="${IIS_INJECTOR_VERSION_PRE}"
 )
 

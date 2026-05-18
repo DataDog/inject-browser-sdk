@@ -46,6 +46,8 @@ variables:
       -e CI=true
       -e CI_JOB_ID=${CI_JOB_ID}
       -e CI_PROJECT_NAME=${CI_PROJECT_NAME}
+      -e CI_PIPELINE_IID=${CI_PIPELINE_IID}
+      -e IIS_RELEASE_BUILD=${IIS_RELEASE_BUILD}
       ${WINDOWS_BUILD_IMAGE}
       c:\mnt\injector_IIS\scripts\build_injector_IIS.bat
     # Copy output files to artifacts dir for use in later jobs

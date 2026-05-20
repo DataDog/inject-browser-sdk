@@ -177,7 +177,7 @@ injector_IIS_integration_test_msi:
 # the job fails (see policy at .github/chainguard/self.gitlab.iis-e2e-deps).
 .go_e2e_deps_template:
   stage: deps_fetch
-  image: registry.ddbuild.io/images/dd-octo-sts-ci-base:latest
+  image: registry.ddbuild.io/images/dd-octo-sts-ci-base:2026.04-2
   tags: ["arch:amd64"]
   needs: []
   id_tokens:

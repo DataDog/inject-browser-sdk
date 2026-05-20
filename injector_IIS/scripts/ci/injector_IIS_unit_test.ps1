@@ -31,3 +31,4 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $testExe = Join-Path $BuildDir "test\unittests\iis_injector_tests.exe"
 & $testExe
+exit $LASTEXITCODE

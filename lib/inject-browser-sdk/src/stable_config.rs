@@ -35,7 +35,7 @@ pub fn snippet_from_stable_config(
 ) -> Result<Vec<u8>, Error> {
     let (configs, logs) =
         crate::platform::read_stable_configs(language, debug_logs).map_err(Error::StableConfig)?;
-    build_snippet_from_configs(configs, logs, overlay)
+    return build_snippet_from_configs(configs, logs, overlay);
 }
 
 /// Variant of [`snippet_from_stable_config`] that accepts a caller-supplied
@@ -51,7 +51,7 @@ pub(crate) fn snippet_from_stable_config_with_reader<R: ConfigRead>(
     let (configs, logs) =
         crate::platform::read_stable_configs_with_reader(reader, language, debug_logs)
             .map_err(Error::StableConfig)?;
-    build_snippet_from_configs(configs, logs, overlay)
+    return build_snippet_from_configs(configs, logs, overlay);
 }
 
 fn build_snippet_from_configs(
@@ -81,17 +81,17 @@ fn build_snippet_from_configs(
     }
 
     let mut config = Configuration::from_lookup(|key| {
-        configs
+        return configs
             .iter()
-            .find(|c| c.name == key)
-            .map(|c| c.value.as_str())
+            .find(|c| return c.name == key)
+            .map(|c| return c.value.as_str());
     })?;
 
     if let Some(o) = overlay {
         config.overlay(o);
     }
 
-    generate_snippet(&config)
+    return generate_snippet(&config);
 }
 
 #[cfg(test)]
@@ -114,7 +114,7 @@ mod tests {
             .find(");")
             .expect("DD_RUM.init(...) must be terminated")
             + start;
-        serde_json::from_str(&text[start..end]).expect("init arg must be JSON")
+        return serde_json::from_str(&text[start..end]).expect("init arg must be JSON");
     }
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
             _path: &str,
         ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
         {
-            Err(libdd_library_config::ConfigReadError::TooLarge)
+            return Err(libdd_library_config::ConfigReadError::TooLarge);
         }
     }
 

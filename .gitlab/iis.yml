@@ -1,11 +1,11 @@
 ---
 variables:
-  WINDOWS_BUILD_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64:v105206457-cb3f8790
+  WINDOWS_BUILD_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64:v113129110-33018b2a
   # Generic Linux build image; the e2e job installs Pulumi + plugins itself
   # rather than relying on a bespoke test-infra-definitions runner image
   # (mirrors DataDog/datadog-agent#42832).
-  E2E_LINUX_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/linux:v105206457-cb3f8790
-  IIS_AGENT_DEPLOY_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/gitlab_agent_deploy:v105206457-cb3f8790
+  E2E_LINUX_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/linux:v113129110-33018b2a
+  IIS_AGENT_DEPLOY_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/gitlab_agent_deploy:v113129110-33018b2a
   ARTIFACTS_DIR: artifacts
 
 ########################################
@@ -136,6 +136,26 @@ injector_IIS_unit_test_linux_wine:
     GIT_SUBMODULE_STRATEGY: recursive
   script:
     - make test-iis
+
+injector_IIS_integration_test:
+  stage: test
+  tags: ["windows-v2:2022"]
+  extends: .IIS_build_when
+  needs: ["injector_IIS_build"]
+  script:
+    - .\injector_IIS\scripts\setup-integration-test-env.ps1 -DllPath ".\${ARTIFACTS_DIR}\injector_IIS.dll" -RepoRoot "."
+    - .\injector_IIS\scripts\run-integration-tests.ps1
+
+injector_IIS_integration_test_msi:
+  stage: test
+  tags: ["windows-v2:2022"]
+  extends: .IIS_build_when
+  needs: ["injector_IIS_build"]
+  script:
+    - $msi = (Get-ChildItem ".\${ARTIFACTS_DIR}\*.msi" | Select-Object -First 1).FullName
+    - if (-not $msi) { throw "No MSI found in ${ARTIFACTS_DIR} -- did the build job succeed?" }
+    - .\injector_IIS\scripts\setup-integration-test-env.ps1 -MsiPath "$msi" -RepoRoot "."
+    - .\injector_IIS\scripts\run-integration-tests.ps1
 
 # Shared script that extracts the pulumi plugin tarball produced by
 # go_e2e_deps into ~/.pulumi so e2e jobs can run `pulumi up` without

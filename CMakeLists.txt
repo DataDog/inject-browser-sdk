@@ -87,6 +87,10 @@ set(_inject_sdk_import_args
 
 if(INJECT_BROWSER_SDK_NO_DEFAULT_FEATURES)
   list(APPEND _inject_sdk_import_args NO_DEFAULT_FEATURES)
+  # When defaults are disabled, the FFI crate's default `support_gov_domain`
+  # feature is dropped, which would reject `ddog-gov.{com,mil}` at validation
+  # time. Re-enable it explicitly so shipped artifacts keep accepting gov sites.
+  list(APPEND _inject_sdk_import_args FEATURES support_gov_domain)
 endif()
 
 corrosion_import_crate(${_inject_sdk_import_args})

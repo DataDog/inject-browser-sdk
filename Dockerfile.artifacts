@@ -36,9 +36,9 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
         GNU_TARGET="x86_64-unknown-linux-gnu"; \
     fi && \
     # Build static library (musl) \
-    cargo build --release --no-default-features -p inject-browser-sdk-ffi --target $MUSL_TARGET && \
+    cargo build --release --no-default-features --features support_gov_domain -p inject-browser-sdk-ffi --target $MUSL_TARGET && \
     # Build shared library (gnu/glibc) \
-    cargo build --release --no-default-features -p inject-browser-sdk-ffi --target $GNU_TARGET && \
+    cargo build --release --no-default-features --features support_gov_domain -p inject-browser-sdk-ffi --target $GNU_TARGET && \
     # Collect artifacts \
     mkdir -p /out && \
     cp /src/target/$MUSL_TARGET/release/libinject_browser_sdk_ffi.a /out/libinjectbrowsersdk.a && \

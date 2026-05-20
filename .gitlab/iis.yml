@@ -170,13 +170,31 @@ injector_IIS_integration_test_msi:
 # artifact, so the generic datadog-agent-buildimages/linux image only pays the
 # download cost on a cache miss (mirrors DataDog/datadog-operator's
 # `go_e2e_deps`).
+#
+# Runs on the dd-octo-sts CI base image so we can mint a short-lived GitHub
+# installation token for `pulumi plugin install`; without it, downloads from
+# pulumi/* GitHub releases hit the 60 req/h/IP unauthenticated rate limit and
+# the job fails (see policy at .github/chainguard/self.gitlab.iis-e2e-deps).
 .go_e2e_deps_template:
   stage: deps_fetch
-  image: $E2E_LINUX_IMAGE
+  image: registry.ddbuild.io/images/dd-octo-sts-ci-base:latest
   tags: ["arch:amd64"]
   needs: []
+  id_tokens:
+    DDOCTOSTS_ID_TOKEN:
+      aud: dd-octo-sts
   variables:
     KUBERNETES_CPU_REQUEST: 4
+    GO_VERSION: "1.25.6"
+  before_script:
+    # dd-octo-sts-ci-base ships dd-octo-sts but not go/pulumi — install them.
+    - curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /usr/local
+    - export PATH="/usr/local/go/bin:$PATH"
+    - curl -fsSL https://get.pulumi.com | sh
+    - export PATH="$HOME/.pulumi/bin:$PATH"
+    # Mint a short-lived GitHub token for pulumi's authenticated API calls.
+    - dd-octo-sts token --scope DataDog/inject-browser-sdk --policy self.gitlab.iis-e2e-deps > token.txt
+    - export GITHUB_TOKEN=$(cat token.txt)
   script:
     - |
       if [ ! -f pulumi_plugins.tar.xz ]; then
@@ -185,6 +203,8 @@ injector_IIS_integration_test_msi:
         popd
         tar c -I "xz -T${KUBERNETES_CPU_REQUEST}" -f $CI_PROJECT_DIR/pulumi_plugins.tar.xz -C ~/.pulumi plugins
       fi
+  after_script:
+    - if [ -f token.txt ]; then dd-octo-sts revoke -t "$(cat token.txt)" || true; fi
   artifacts:
     expire_in: 1 day
     paths:

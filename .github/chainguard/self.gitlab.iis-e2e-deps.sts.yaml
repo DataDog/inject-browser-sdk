@@ -1,0 +1,16 @@
+# Policy for: .gitlab/iis.yml `go_e2e_deps` job in DataDog/inject-browser-sdk.
+# Mints a short-lived GitHub installation token so `pulumi plugin install` can
+# make authenticated GitHub API calls and avoid the unauthenticated rate limit
+# (60 req/h/IP) when downloading provider plugins from pulumi/* releases.
+issuer: https://gitlab.ddbuild.io
+
+subject_pattern: project_path:DataDog/inject-browser-sdk:ref_type:branch:ref:.*
+
+claim_pattern:
+  ci_config_ref_uri: gitlab\.ddbuild\.io/DataDog/inject-browser-sdk//\.gitlab-ci\.yml@refs/heads/.*
+  pipeline_source: push
+  project_path: DataDog/inject-browser-sdk
+  ref_type: branch
+
+permissions:
+  contents: read

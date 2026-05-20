@@ -2,6 +2,8 @@ module github.com/DataDog/inject-browser-sdk/injector_IIS/test/e2e_tests
 
 go 1.25.6
 
+toolchain go1.26.2
+
 require (
 	github.com/DataDog/datadog-agent/test/e2e-framework v0.80.0-devel
 	github.com/DataDog/datadog-agent/test/new-e2e v0.80.0-devel.0.20260504091800-0b7fc922665d

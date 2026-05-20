@@ -185,25 +185,29 @@ injector_IIS_integration_test_msi:
       aud: dd-octo-sts
   variables:
     KUBERNETES_CPU_REQUEST: 4
-    GO_VERSION: "1.25.6"
-  before_script:
-    # dd-octo-sts-ci-base ships dd-octo-sts but not go/pulumi, and runs as a
-    # non-root user, so install both under $HOME.
-    - mkdir -p $HOME/go-sdk
-    - curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C $HOME/go-sdk
-    - export PATH="$HOME/go-sdk/go/bin:$PATH"
-    - curl -fsSL https://get.pulumi.com | sh
-    - export PATH="$HOME/.pulumi/bin:$PATH"
-    # Mint a short-lived GitHub token for pulumi's authenticated API calls.
-    - dd-octo-sts token --scope DataDog/inject-browser-sdk --policy self.gitlab.iis-e2e-deps > token.txt
-    - export GITHUB_TOKEN=$(cat token.txt)
+    PULUMI_VERSION: "v3.225.0"
   script:
     - |
       if [ ! -f pulumi_plugins.tar.gz ]; then
+        # dd-octo-sts-ci-base ships dd-octo-sts but not go/pulumi, and runs
+        # as a non-root user, so install both under $HOME. Go version comes
+        # from go.mod to stay in sync with the e2e tests.
+        go_version=$(awk '/^go [0-9]/ {print $2}' injector_IIS/test/e2e_tests/go.mod)
+        curl -fsSL "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz" | tar -xz -C "$HOME"
+        export PATH="$HOME/go/bin:$PATH"
+        curl -fsSL https://get.pulumi.com | sh -s -- --version "$PULUMI_VERSION"
+        export PATH="$HOME/.pulumi/bin:$PATH"
+
+        # Short-lived GitHub token so pulumi's plugin downloads authenticate
+        # and bypass the 60 req/h/IP unauthenticated rate limit.
+        dd-octo-sts token --scope DataDog/inject-browser-sdk --policy self.gitlab.iis-e2e-deps > token.txt
+        chmod 600 token.txt
+        export GITHUB_TOKEN=$(cat token.txt)
+
         pushd injector_IIS/test/e2e_tests
         GOWORK=off PULUMI_CONFIG_PASSPHRASE=dummy pulumi --non-interactive plugin install
         popd
-        tar czf $CI_PROJECT_DIR/pulumi_plugins.tar.gz -C ~/.pulumi plugins
+        tar czf "$CI_PROJECT_DIR/pulumi_plugins.tar.gz" -C "$HOME/.pulumi" plugins
       fi
   after_script:
     - if [ -f token.txt ]; then dd-octo-sts revoke -t "$(cat token.txt)" || true; fi

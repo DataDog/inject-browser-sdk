@@ -187,9 +187,11 @@ injector_IIS_integration_test_msi:
     KUBERNETES_CPU_REQUEST: 4
     GO_VERSION: "1.25.6"
   before_script:
-    # dd-octo-sts-ci-base ships dd-octo-sts but not go/pulumi — install them.
-    - curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /usr/local
-    - export PATH="/usr/local/go/bin:$PATH"
+    # dd-octo-sts-ci-base ships dd-octo-sts but not go/pulumi, and runs as a
+    # non-root user, so install both under $HOME.
+    - mkdir -p $HOME/go-sdk
+    - curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C $HOME/go-sdk
+    - export PATH="$HOME/go-sdk/go/bin:$PATH"
     - curl -fsSL https://get.pulumi.com | sh
     - export PATH="$HOME/.pulumi/bin:$PATH"
     # Mint a short-lived GitHub token for pulumi's authenticated API calls.

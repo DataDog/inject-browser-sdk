@@ -184,7 +184,6 @@ injector_IIS_integration_test_msi:
     DDOCTOSTS_ID_TOKEN:
       aud: dd-octo-sts
   variables:
-    KUBERNETES_CPU_REQUEST: 4
     PULUMI_VERSION: "v3.225.0"
   script:
     - |
@@ -192,7 +191,7 @@ injector_IIS_integration_test_msi:
         # dd-octo-sts-ci-base ships dd-octo-sts but not go/pulumi, and runs
         # as a non-root user, so install both under $HOME. Go version comes
         # from go.mod to stay in sync with the e2e tests.
-        go_version=$(awk '/^go [0-9]/ {print $2}' injector_IIS/test/e2e_tests/go.mod)
+        go_version=$(awk '$1=="go" && $2 ~ /^[0-9]/ {print $2; exit}' injector_IIS/test/e2e_tests/go.mod)
         curl -fsSL "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz" | tar -xz -C "$HOME"
         export PATH="$HOME/go/bin:$PATH"
         curl -fsSL https://get.pulumi.com | sh -s -- --version "$PULUMI_VERSION"
@@ -219,7 +218,6 @@ injector_IIS_integration_test_msi:
     - key:
         files:
           - injector_IIS/test/e2e_tests/go.mod
-          - .gitlab/iis.yml
         prefix: "pulumi_plugins"
       paths:
         - pulumi_plugins.tar.gz

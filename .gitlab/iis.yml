@@ -162,8 +162,8 @@ injector_IIS_integration_test_msi:
 # re-downloading providers (mirrors DataDog/datadog-operator's
 # `.retrieve_linux_pulumi_plugins`).
 .retrieve_linux_pulumi_plugins:
-  - mkdir -p ~/.pulumi && tar xJf pulumi_plugins.tar.xz -C ~/.pulumi
-  - rm -f pulumi_plugins.tar.xz
+  - mkdir -p ~/.pulumi && tar xzf pulumi_plugins.tar.gz -C ~/.pulumi
+  - rm -f pulumi_plugins.tar.gz
 
 # Pre-fetch the Pulumi providers used by the e2e scenarios once per pipeline.
 # The plugins are cached on go.mod and shared with downstream e2e jobs as an
@@ -199,18 +199,18 @@ injector_IIS_integration_test_msi:
     - export GITHUB_TOKEN=$(cat token.txt)
   script:
     - |
-      if [ ! -f pulumi_plugins.tar.xz ]; then
+      if [ ! -f pulumi_plugins.tar.gz ]; then
         pushd injector_IIS/test/e2e_tests
         GOWORK=off PULUMI_CONFIG_PASSPHRASE=dummy pulumi --non-interactive plugin install
         popd
-        tar c -I "xz -T${KUBERNETES_CPU_REQUEST}" -f $CI_PROJECT_DIR/pulumi_plugins.tar.xz -C ~/.pulumi plugins
+        tar czf $CI_PROJECT_DIR/pulumi_plugins.tar.gz -C ~/.pulumi plugins
       fi
   after_script:
     - if [ -f token.txt ]; then dd-octo-sts revoke -t "$(cat token.txt)" || true; fi
   artifacts:
     expire_in: 1 day
     paths:
-      - $CI_PROJECT_DIR/pulumi_plugins.tar.xz
+      - $CI_PROJECT_DIR/pulumi_plugins.tar.gz
   cache:
     - key:
         files:
@@ -218,7 +218,7 @@ injector_IIS_integration_test_msi:
           - .gitlab/iis.yml
         prefix: "pulumi_plugins"
       paths:
-        - pulumi_plugins.tar.xz
+        - pulumi_plugins.tar.gz
 
 go_e2e_deps:
   extends:

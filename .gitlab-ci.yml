@@ -11,5 +11,6 @@ include:
 
 stages:
   - build
+  - deps_fetch
   - test
   - release

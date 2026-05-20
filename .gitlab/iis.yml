@@ -1,8 +1,10 @@
 ---
 variables:
   WINDOWS_BUILD_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64:v113129110-33018b2a
-  # Make sure to update test-infra-definitions version in go.mod as well
-  E2E_RUNNER_IMAGE: registry.ddbuild.io/ci/test-infra-definitions/runner:ef809e329658
+  # Generic Linux build image; the e2e job installs Pulumi + plugins itself
+  # rather than relying on a bespoke test-infra-definitions runner image
+  # (mirrors DataDog/datadog-agent#42832).
+  E2E_LINUX_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/linux:v113129110-33018b2a
   IIS_AGENT_DEPLOY_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/gitlab_agent_deploy:v113129110-33018b2a
   ARTIFACTS_DIR: artifacts
 
@@ -155,22 +157,94 @@ injector_IIS_integration_test_msi:
     - .\injector_IIS\scripts\setup-integration-test-env.ps1 -MsiPath "$msi" -RepoRoot "."
     - .\injector_IIS\scripts\run-integration-tests.ps1
 
+# Shared script that extracts the pulumi plugin tarball produced by
+# go_e2e_deps into ~/.pulumi so e2e jobs can run `pulumi up` without
+# re-downloading providers (mirrors DataDog/datadog-operator's
+# `.retrieve_linux_pulumi_plugins`).
+.retrieve_linux_pulumi_plugins:
+  - mkdir -p ~/.pulumi && tar xJf pulumi_plugins.tar.xz -C ~/.pulumi
+  - rm -f pulumi_plugins.tar.xz
+
+# Pre-fetch the Pulumi providers used by the e2e scenarios once per pipeline.
+# The plugins are cached on go.mod and shared with downstream e2e jobs as an
+# artifact, so the generic datadog-agent-buildimages/linux image only pays the
+# download cost on a cache miss (mirrors DataDog/datadog-operator's
+# `go_e2e_deps`).
+#
+# Runs on the dd-octo-sts CI base image so we can mint a short-lived GitHub
+# installation token for `pulumi plugin install`; without it, downloads from
+# pulumi/* GitHub releases hit the 60 req/h/IP unauthenticated rate limit and
+# the job fails (see policy at .github/chainguard/self.gitlab.iis-e2e-deps).
+.go_e2e_deps_template:
+  stage: deps_fetch
+  image: registry.ddbuild.io/images/dd-octo-sts-ci-base:latest
+  tags: ["arch:amd64"]
+  needs: []
+  id_tokens:
+    DDOCTOSTS_ID_TOKEN:
+      aud: dd-octo-sts
+  variables:
+    KUBERNETES_CPU_REQUEST: 4
+    GO_VERSION: "1.25.6"
+  before_script:
+    # dd-octo-sts-ci-base ships dd-octo-sts but not go/pulumi — install them.
+    - curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /usr/local
+    - export PATH="/usr/local/go/bin:$PATH"
+    - curl -fsSL https://get.pulumi.com | sh
+    - export PATH="$HOME/.pulumi/bin:$PATH"
+    # Mint a short-lived GitHub token for pulumi's authenticated API calls.
+    - dd-octo-sts token --scope DataDog/inject-browser-sdk --policy self.gitlab.iis-e2e-deps > token.txt
+    - export GITHUB_TOKEN=$(cat token.txt)
+  script:
+    - |
+      if [ ! -f pulumi_plugins.tar.xz ]; then
+        pushd injector_IIS/test/e2e_tests
+        GOWORK=off PULUMI_CONFIG_PASSPHRASE=dummy pulumi --non-interactive plugin install
+        popd
+        tar c -I "xz -T${KUBERNETES_CPU_REQUEST}" -f $CI_PROJECT_DIR/pulumi_plugins.tar.xz -C ~/.pulumi plugins
+      fi
+  after_script:
+    - if [ -f token.txt ]; then dd-octo-sts revoke -t "$(cat token.txt)" || true; fi
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - $CI_PROJECT_DIR/pulumi_plugins.tar.xz
+  cache:
+    - key:
+        files:
+          - injector_IIS/test/e2e_tests/go.mod
+          - .gitlab/iis.yml
+        prefix: "pulumi_plugins"
+      paths:
+        - pulumi_plugins.tar.xz
+
+go_e2e_deps:
+  extends:
+    - .go_e2e_deps_template
+    - .IIS_build_when
+
+manual_go_e2e_deps:
+  extends: .go_e2e_deps_template
+  when: manual
+
 .injector_IIS_e2e_test_template:
   stage: test
   tags: ["arch:amd64"]
-  needs: []
   retry:
     max: 2
     when:
       - script_failure
-  image: $E2E_RUNNER_IMAGE
+  image: $E2E_LINUX_IMAGE
   variables:
     AWS_SSM_PREFIX: "ci.inject-browser-sdk."
     KEY_PAIR_NAME: "ci.inject-browser-sdk"
     KUBERNETES_MEMORY_REQUEST: 12Gi
     KUBERNETES_MEMORY_LIMIT: 16Gi
     E2E_OUTPUT_DIR: $CI_PROJECT_DIR/e2e-output
+    PULUMI_CONFIG_PASSPHRASE: dummy
   before_script:
+    # Extract the pulumi plugins produced by go_e2e_deps into ~/.pulumi
+    - !reference [.retrieve_linux_pulumi_plugins]
     # Read AWS config for agent-qa role from ddbuild's SSM, and then assume agent-qa role
     - mkdir -p ~/.aws
     - aws ssm get-parameter --region us-east-1 --name "${AWS_SSM_PREFIX}agent-qa-profile" --with-decryption --query "Parameter.Value" --out text >> ~/.aws/config
@@ -188,7 +262,7 @@ injector_IIS_integration_test_msi:
     - export E2E_PROFILE="ci"
     - export CI_SECRET_PREFIX=$AWS_SSM_PREFIX
     - export E2E_KEY_PAIR_NAME=$KEY_PAIR_NAME
-    - export E2E_PUBLIC_KEY_PATH="/root/.ssh/${KEY_PAIR_NAME}.pub"
+    - export E2E_AWS_PUBLIC_KEY_PATH="/root/.ssh/${KEY_PAIR_NAME}.pub"
   script:
     - mkdir -p injector_IIS/test/e2e_tests/test_assets
     ## the msi will have a version-specific name, but there should be only one.
@@ -205,15 +279,12 @@ injector_IIS_e2e_test:
   extends:
     - .injector_IIS_e2e_test_template
     - .IIS_build_when
-  needs: ["injector_IIS_build"]
-  # Temporarily disabled; re-enable once PR #87 lands.
-  rules:
-    - when: never
+  needs: ["injector_IIS_build", "go_e2e_deps"]
 
 manual_injector_IIS_e2e_test:
   extends: .injector_IIS_e2e_test_template
   when: manual
-  needs: ["manual_injector_IIS_build"]
+  needs: ["manual_injector_IIS_build", "manual_go_e2e_deps"]
 
 .injector_IIS_release:
   stage: release

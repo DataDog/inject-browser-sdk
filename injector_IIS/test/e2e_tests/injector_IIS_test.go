@@ -15,9 +15,9 @@ import (
   "strings"
   "testing"
 
-  "github.com/DataDog/datadog-agent/test/new-e2e/pkg/e2e"
-  "github.com/DataDog/datadog-agent/test/new-e2e/pkg/environments"
-  awsHostWindows "github.com/DataDog/datadog-agent/test/new-e2e/pkg/environments/aws/host/windows"
+  "github.com/DataDog/datadog-agent/test/e2e-framework/testing/e2e"
+  "github.com/DataDog/datadog-agent/test/e2e-framework/testing/environments"
+  awsHostWindows "github.com/DataDog/datadog-agent/test/e2e-framework/testing/provisioners/aws/host/windows"
   "github.com/DataDog/datadog-agent/test/new-e2e/tests/windows"
   windowsCommon "github.com/DataDog/datadog-agent/test/new-e2e/tests/windows/common"
   commonAgent "github.com/DataDog/datadog-agent/test/new-e2e/tests/windows/common/agent"
@@ -203,12 +203,23 @@ func (v *rumvmSuite) SetupSuite() {
   vm.Execute("iisreset /restart")
 }
 
-// requireRun is an additional wrapper so that the test fails immediately on failure 
+// requireRun is an additional wrapper so that the test fails immediately on failure
 // of a subtest function, rather than continuing on.
 func (v *rumvmSuite) requireRun(desc string, f func ()) {
   if !v.Run(desc, f) {
     v.FailNow("Failed to successfully run subtest %s", desc)
   }
+}
+
+// createTestOutputDir replaces the now-removed e2e.BaseSuite.CreateTestOutputDir.
+// e2e-framework only exposes SessionOutputDir; build the per-test subdirectory
+// ourselves so install logs from each test stay separate.
+func (v *rumvmSuite) createTestOutputDir() (string, error) {
+  dir := filepath.Join(v.SessionOutputDir(), v.T().Name())
+  if err := runneros.MkdirAll(dir, 0o755); err != nil {
+    return "", err
+  }
+  return dir, nil
 }
 func (v *rumInstallSuite) TestInjectorIISInstall() {
 
@@ -249,7 +260,7 @@ func (v *rumvmSuite) installOldVersionForUpgrade() {
     // because oldVersionForUpgrade is constructed at runtime, we have to convert it to a windows path if the test runner is linux
     oldVersionForUpgrade = strings.ReplaceAll(oldVersionForUpgrade, "/", "\\")
   }
-  outputDir, err := v.CreateTestOutputDir()
+  outputDir, err := v.createTestOutputDir()
   v.Require().NoError(err)
   err = windowsCommon.InstallMSI(vm, oldVersionForUpgrade, "IISRESTART=true", filepath.Join(outputDir, "install.log"))
   v.Require().NoError(err)
@@ -280,7 +291,7 @@ func (v *rumvmSuite) doTestInstall(remoteFilePath string, expectedVersion string
     // because remoteFilePath is constructed at runtime, we have to convert it to a windows path if the test runner is linux
     remoteFilePath = strings.Replace(remoteFilePath, "/", "\\", -1)
   }
-  outputDir, err := v.CreateTestOutputDir()
+  outputDir, err := v.createTestOutputDir()
   v.Require().NoError(err)
   err = windowsCommon.InstallMSI(vm, remoteFilePath, "IISRESTART=true", filepath.Join(outputDir, "install.log"))
   v.Require().NoError(err)
@@ -363,7 +374,7 @@ func (v *rumvmSuite) testUninstall() {
   vm := v.Env().RemoteHost
 
   // Uninstall the injector
-  outputDir, err := v.CreateTestOutputDir()
+  outputDir, err := v.createTestOutputDir()
   v.Require().NoError(err)
 
   remotePath := filepath.Join(remoteInstallerPath, installerName)

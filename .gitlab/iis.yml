@@ -184,7 +184,7 @@ injector_IIS_integration_test_msi:
     DDOCTOSTS_ID_TOKEN:
       aud: dd-octo-sts
   variables:
-    PULUMI_VERSION: "v3.225.0"
+    PULUMI_VERSION: "3.225.0"
   script:
     - |
       set -euo pipefail

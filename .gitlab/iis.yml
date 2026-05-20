@@ -187,13 +187,16 @@ injector_IIS_integration_test_msi:
     PULUMI_VERSION: "v3.225.0"
   script:
     - |
+      set -euo pipefail
       if [ ! -f pulumi_plugins.tar.gz ]; then
         # dd-octo-sts-ci-base ships dd-octo-sts but not go/pulumi, and runs
-        # as a non-root user, so install both under $HOME. Go version comes
-        # from go.mod to stay in sync with the e2e tests.
+        # as a non-root user, so install both under $HOME. Go goes into
+        # $HOME/sdk to keep the toolchain separate from the default
+        # GOPATH=$HOME/go. Go version comes from go.mod.
         go_version=$(awk '$1=="go" && $2 ~ /^[0-9]/ {print $2; exit}' injector_IIS/test/e2e_tests/go.mod)
-        curl -fsSL "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz" | tar -xz -C "$HOME"
-        export PATH="$HOME/go/bin:$PATH"
+        mkdir -p "$HOME/sdk"
+        curl -fsSL "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz" | tar -xz -C "$HOME/sdk"
+        export PATH="$HOME/sdk/go/bin:$PATH"
         curl -fsSL https://get.pulumi.com | sh -s -- --version "$PULUMI_VERSION"
         export PATH="$HOME/.pulumi/bin:$PATH"
 

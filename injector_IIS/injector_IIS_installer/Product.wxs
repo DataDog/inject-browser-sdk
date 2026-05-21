@@ -352,17 +352,13 @@
                         ElementPath='AppHostSectionElement' Sequence='12' Name='overrideModeDefault' Value='Deny' />
         
         <!-- uninstall -->
-        <!-- NOTE(@dmehala): might also need to remove all datadogRum nodes in system.webServer and location (regardless of the path) -->
-        <util:XmlConfig Id='ApplicationHostSectionElementRemove' On='uninstall' Action='delete'
-                        File='[InetsrvDir]config\applicationHost.config' Node='element'
-                        ElementPath="/configuration/configSections/sectionGroup[\[]@name='system.webServer'[\]]" Sequence='103'
-                        VerifyPath="/configuration/configSections/sectionGroup[\[]@name='system.webServer'[\]]/section[\[]@name='datadogRum'[\]]" />
-        
-        <!-- Remove system.applicationHost datadogRumServer section -->
-        <util:XmlConfig Id='AppHostSectionElementRemove' On='uninstall' Action='delete'
-                        File='[InetsrvDir]config\applicationHost.config' Node='element'
-                        ElementPath="/configuration/configSections/sectionGroup[\[]@name='system.applicationHost'[\]]" Sequence='104'
-                        VerifyPath="/configuration/configSections/sectionGroup[\[]@name='system.applicationHost'[\]]/section[\[]@name='datadogRumServer'[\]]" />
+        <!-- Intentionally leave the datadogRum / datadogRumServer section
+             declarations in applicationHost.config on uninstall. IIS validates
+             unknown sections under <location> strictly (returns 500.19), so
+             removing the schema would break any site whose web.config still
+             carries a <location><datadogRum> block after the module is gone.
+             With the schema kept, the config is a parseable no-op once the
+             module is uninstalled. -->
 
 		  <!-- Remove the actual datadogRumServer configuration element -->
 		  <util:XmlConfig Id='DatadogRumServerElementRemove' On='uninstall' Action='delete'

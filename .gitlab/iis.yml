@@ -162,8 +162,8 @@ injector_IIS_integration_test_msi:
 # re-downloading providers (mirrors DataDog/datadog-operator's
 # `.retrieve_linux_pulumi_plugins`).
 .retrieve_linux_pulumi_plugins:
-  - mkdir -p ~/.pulumi && tar xJf pulumi_plugins.tar.xz -C ~/.pulumi
-  - rm -f pulumi_plugins.tar.xz
+  - mkdir -p ~/.pulumi && tar xf pulumi_plugins.tar.gz -C ~/.pulumi
+  - rm -f pulumi_plugins.tar.gz
 
 # Pre-fetch the Pulumi providers used by the e2e scenarios once per pipeline.
 # The plugins are cached on go.mod and shared with downstream e2e jobs as an
@@ -177,46 +177,53 @@ injector_IIS_integration_test_msi:
 # the job fails (see policy at .github/chainguard/self.gitlab.iis-e2e-deps).
 .go_e2e_deps_template:
   stage: deps_fetch
-  image: registry.ddbuild.io/images/dd-octo-sts-ci-base:latest
+  image: registry.ddbuild.io/images/dd-octo-sts-ci-base:2026.04-2
   tags: ["arch:amd64"]
   needs: []
   id_tokens:
     DDOCTOSTS_ID_TOKEN:
       aud: dd-octo-sts
   variables:
-    KUBERNETES_CPU_REQUEST: 4
-    GO_VERSION: "1.25.6"
-  before_script:
-    # dd-octo-sts-ci-base ships dd-octo-sts but not go/pulumi — install them.
-    - curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /usr/local
-    - export PATH="/usr/local/go/bin:$PATH"
-    - curl -fsSL https://get.pulumi.com | sh
-    - export PATH="$HOME/.pulumi/bin:$PATH"
-    # Mint a short-lived GitHub token for pulumi's authenticated API calls.
-    - dd-octo-sts token --scope DataDog/inject-browser-sdk --policy self.gitlab.iis-e2e-deps > token.txt
-    - export GITHUB_TOKEN=$(cat token.txt)
+    PULUMI_VERSION: "3.225.0"
   script:
     - |
-      if [ ! -f pulumi_plugins.tar.xz ]; then
+      set -euo pipefail
+      if [ ! -f pulumi_plugins.tar.gz ]; then
+        # dd-octo-sts-ci-base ships dd-octo-sts but not go/pulumi, and runs
+        # as a non-root user, so install both under $HOME. Go goes into
+        # $HOME/sdk to keep the toolchain separate from the default
+        # GOPATH=$HOME/go. Go version comes from go.mod.
+        go_version=$(awk '$1=="go" && $2 ~ /^[0-9]/ {print $2; exit}' injector_IIS/test/e2e_tests/go.mod)
+        mkdir -p "$HOME/sdk"
+        curl -fsSL "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz" | tar -x -C "$HOME/sdk"
+        export PATH="$HOME/sdk/go/bin:$PATH"
+        curl -fsSL https://get.pulumi.com | sh -s -- --version "$PULUMI_VERSION"
+        export PATH="$HOME/.pulumi/bin:$PATH"
+
+        # Short-lived GitHub token so pulumi's plugin downloads authenticate
+        # and bypass the 60 req/h/IP unauthenticated rate limit.
+        dd-octo-sts token --scope DataDog/inject-browser-sdk --policy self.gitlab.iis-e2e-deps > "$HOME/token.txt"
+        chmod 600 "$HOME/token.txt"
+        export GITHUB_TOKEN=$(cat "$HOME/token.txt")
+
         pushd injector_IIS/test/e2e_tests
         GOWORK=off PULUMI_CONFIG_PASSPHRASE=dummy pulumi --non-interactive plugin install
         popd
-        tar c -I "xz -T${KUBERNETES_CPU_REQUEST}" -f $CI_PROJECT_DIR/pulumi_plugins.tar.xz -C ~/.pulumi plugins
+        tar czf "$CI_PROJECT_DIR/pulumi_plugins.tar.gz" -C "$HOME/.pulumi" plugins
       fi
   after_script:
-    - if [ -f token.txt ]; then dd-octo-sts revoke -t "$(cat token.txt)" || true; fi
+    - if [ -f "$HOME/token.txt" ]; then dd-octo-sts revoke -t "$(cat "$HOME/token.txt")" || true; fi
   artifacts:
     expire_in: 1 day
     paths:
-      - $CI_PROJECT_DIR/pulumi_plugins.tar.xz
+      - $CI_PROJECT_DIR/pulumi_plugins.tar.gz
   cache:
     - key:
         files:
           - injector_IIS/test/e2e_tests/go.mod
-          - .gitlab/iis.yml
         prefix: "pulumi_plugins"
       paths:
-        - pulumi_plugins.tar.xz
+        - pulumi_plugins.tar.gz
 
 go_e2e_deps:
   extends:

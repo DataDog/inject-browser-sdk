@@ -1,4 +1,4 @@
 requests==2.34.2
-pytest==8.4.2
+pytest==9.1.0
 aiohttp==3.14.1
 licensecheck==2024.3

@@ -1,0 +1,38 @@
+repos:
+  - repo: local
+    hooks:
+      - id: clang-format
+        name: clang-format
+        entry: bash -c 'make format-cpp FORMAT_FILES="$*"' bash
+        language: system
+        pass_filenames: true
+        files: '\.(cpp|h|c)$'
+
+      - id: clang-tidy
+        name: clang-tidy
+        entry: bash -c 'make tidy-cpp TIDY_FILES="$*"' bash
+        language: system
+        pass_filenames: true
+        stages: [pre-push]
+        files: '\.cpp$'
+
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        pass_filenames: false
+        files: '(\.rs|Cargo\.toml)$'
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets --all-features
+        language: system
+        pass_filenames: false
+        files: '(\.rs|Cargo\.toml)$'
+
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test
+        language: system
+        pass_filenames: false
+        files: '(\.rs|Cargo\.toml)$'

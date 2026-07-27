@@ -1,21 +1,12 @@
 ---
 variables:
-  WINDOWS_BUILD_IMAGE: datadog-agent-buildimages/windows_ltsc2022_x64
-  CI_IMAGE_WIN_LTSC2022_X64_SUFFIX: ""
-  CI_IMAGE_WIN_LTSC2022_X64: v47979770-a5a4cfd0
-  E2E_RUNNER_IMAGE: test-infra-definitions/runner
-  #E2E_RUNNER_IMAGE_VERSION: dfdd12299b97
-  # To use images from test-infra-definitions dev branches, set the SUFFIX variable to -dev
-  # and check the job creating the image to make sure you have the right SHA prefix
-  TEST_INFRA_DEFINITIONS_BUILDIMAGES_SUFFIX: ""
-  # Make sure to update test-infra-definitions version in go.mod as well
-  TEST_INFRA_DEFINITIONS_BUILDIMAGES: e79f06b7fce3
-  AGENT_DEPLOY_IMAGE: datadog-agent-buildimages/gitlab_agent_deploy
-  CI_IMAGE_AGENT_DEPLOY_SUFFIX: ""
-  CI_IMAGE_AGENT_DEPLOY: v47979770-a5a4cfd0
+  WINDOWS_BUILD_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64:v113129110-33018b2a
+  # Generic Linux build image; the e2e job installs Pulumi + plugins itself
+  # rather than relying on a bespoke test-infra-definitions runner image
+  # (mirrors DataDog/datadog-agent#42832).
+  E2E_LINUX_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/linux:v113129110-33018b2a
+  IIS_AGENT_DEPLOY_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/gitlab_agent_deploy:v113129110-33018b2a
   ARTIFACTS_DIR: artifacts
-  REGISTRY: registry.ddbuild.io
-  OLD_REGISTRY: 486234852809.dkr.ecr.us-east-1.amazonaws.com
 
 ########################################
 # IIS build and test jobs
@@ -31,6 +22,17 @@ variables:
     GIT_DEPTH: 500 #Default is 20
     GIT_SUBMODULE_STRATEGY: recursive
   script:
+    - |
+      $image = "${WINDOWS_BUILD_IMAGE}"
+      $cached = docker images -q $image
+      if ($cached) {
+        Write-Host "Image $image is already cached on this runner."
+      } else {
+        Write-Host "Image $image is not cached — pulling. This can take ~12 minutes."
+        Write-Host "The runner AMI pre-pulls the latest tag. After a tag bump, new AMIs"
+        Write-Host "need to be built and runners recycled before the cache is warm again."
+      }
+      docker pull $image
     - if (Test-Path build-out) { remove-item -recurse -force build-out }
     - >
       docker run --rm
@@ -43,7 +45,10 @@ variables:
       -e WINDOWS_BUILDER=true
       -e SIGN_WINDOWS_DD_WCS=true
       -e AWS_NETWORKING=true
-      ${REGISTRY}/ci/${WINDOWS_BUILD_IMAGE}${CI_IMAGE_WIN_LTSC2022_X64_SUFFIX}:${CI_IMAGE_WIN_LTSC2022_X64}
+      -e CI=true
+      -e CI_JOB_ID=${CI_JOB_ID}
+      -e CI_PROJECT_NAME=${CI_PROJECT_NAME}
+      ${WINDOWS_BUILD_IMAGE}
       c:\mnt\injector_IIS\scripts\build_injector_IIS.bat
     # Copy output files to artifacts dir for use in later jobs
     - if (Test-Path $ARTIFACTS_DIR) { remove-item -recurse -force $ARTIFACTS_DIR }
@@ -56,13 +61,27 @@ variables:
 
 .IIS_build_when:
   rules:
-    - changes:
-      - scheduled
+    - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      changes:
+        compare_to: refs/heads/main
+        paths:
+          - injector_IIS/**/*
+          - lib/**/*
+          - Cargo.toml
+          - Cargo.lock
+          - .gitlab-ci.yml
+          - .gitlab/iis.yml
     - changes:
         - injector_IIS/**/*
         - lib/**/*
+        - Cargo.toml
+        - Cargo.lock
         - .gitlab-ci.yml
+        - .gitlab/iis.yml
+
+
 
 injector_IIS_build:
   extends:
@@ -73,18 +92,166 @@ manual_injector_IIS_build:
   extends: .IIS_build
   when: manual
 
+injector_IIS_unit_test:
+  stage: test
+  extends: .IIS_build_when
+  tags: ["windows-v2:2022"]
+  needs: []
+  script:
+    - >
+      docker run --rm
+      -m 4096M
+      -v "$(Get-Location):c:\mnt"
+      ${WINDOWS_BUILD_IMAGE}
+      powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
+    - If ($lastExitCode -ne 0) { exit $lastExitCode }
+
+injector_IIS_unit_test_asan:
+  stage: test
+  extends: .IIS_build_when
+  tags: ["windows-v2:2022"]
+  needs: []
+  allow_failure: true
+  script:
+    - >
+      docker run --rm
+      -m 4096M
+      -v "$(Get-Location):c:\mnt"
+      ${WINDOWS_BUILD_IMAGE}
+      powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
+      -Preset ci-native-asan -BuildDir build-asan -BuildType Debug
+    - If ($lastExitCode -ne 0) { exit $lastExitCode }
+
+# Cross-compile + wine64 mirror of injector_IIS_unit_test, run on a Linux
+# runner inside the devcontainer image. Same gtest binary the local
+# `make test-iis` produces. Faster feedback than the Windows-container path.
+injector_IIS_unit_test_linux_wine:
+  stage: test
+  extends: .IIS_build_when
+  tags: ["arch:amd64"]
+  image: $DEVCONTAINER_IMAGE
+  needs:
+    - devcontainer_image
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+  script:
+    - make test-iis
+
+injector_IIS_integration_test:
+  stage: test
+  tags: ["windows-v2:2022"]
+  extends: .IIS_build_when
+  needs: ["injector_IIS_build"]
+  script:
+    - .\injector_IIS\scripts\setup-integration-test-env.ps1 -DllPath ".\${ARTIFACTS_DIR}\injector_IIS.dll" -RepoRoot "."
+    - .\injector_IIS\scripts\run-integration-tests.ps1
+
+injector_IIS_integration_test_msi:
+  stage: test
+  tags: ["windows-v2:2022"]
+  extends: .IIS_build_when
+  needs: ["injector_IIS_build"]
+  script:
+    - $msi = (Get-ChildItem ".\${ARTIFACTS_DIR}\*.msi" | Select-Object -First 1).FullName
+    - if (-not $msi) { throw "No MSI found in ${ARTIFACTS_DIR} -- did the build job succeed?" }
+    - .\injector_IIS\scripts\setup-integration-test-env.ps1 -MsiPath "$msi" -RepoRoot "."
+    - .\injector_IIS\scripts\run-integration-tests.ps1
+
+# Shared script that extracts the pulumi plugin tarball produced by
+# go_e2e_deps into ~/.pulumi so e2e jobs can run `pulumi up` without
+# re-downloading providers (mirrors DataDog/datadog-operator's
+# `.retrieve_linux_pulumi_plugins`).
+.retrieve_linux_pulumi_plugins:
+  - mkdir -p ~/.pulumi && tar xf pulumi_plugins.tar.gz -C ~/.pulumi
+  - rm -f pulumi_plugins.tar.gz
+
+# Pre-fetch the Pulumi providers used by the e2e scenarios once per pipeline.
+# The plugins are cached on go.mod and shared with downstream e2e jobs as an
+# artifact, so the generic datadog-agent-buildimages/linux image only pays the
+# download cost on a cache miss (mirrors DataDog/datadog-operator's
+# `go_e2e_deps`).
+#
+# Runs on the dd-octo-sts CI base image so we can mint a short-lived GitHub
+# installation token for `pulumi plugin install`; without it, downloads from
+# pulumi/* GitHub releases hit the 60 req/h/IP unauthenticated rate limit and
+# the job fails (see policy at .github/chainguard/self.gitlab.iis-e2e-deps).
+.go_e2e_deps_template:
+  stage: deps_fetch
+  image: registry.ddbuild.io/images/dd-octo-sts-ci-base:2026.04-2
+  tags: ["arch:amd64"]
+  needs: []
+  id_tokens:
+    DDOCTOSTS_ID_TOKEN:
+      aud: dd-octo-sts
+  variables:
+    PULUMI_VERSION: "3.225.0"
+  script:
+    - |
+      set -euo pipefail
+      if [ ! -f pulumi_plugins.tar.gz ]; then
+        # dd-octo-sts-ci-base ships dd-octo-sts but not go/pulumi, and runs
+        # as a non-root user, so install both under $HOME. Go goes into
+        # $HOME/sdk to keep the toolchain separate from the default
+        # GOPATH=$HOME/go. Go version comes from go.mod.
+        go_version=$(awk '$1=="go" && $2 ~ /^[0-9]/ {print $2; exit}' injector_IIS/test/e2e_tests/go.mod)
+        mkdir -p "$HOME/sdk"
+        curl -fsSL "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz" | tar -x -C "$HOME/sdk"
+        export PATH="$HOME/sdk/go/bin:$PATH"
+        curl -fsSL https://get.pulumi.com | sh -s -- --version "$PULUMI_VERSION"
+        export PATH="$HOME/.pulumi/bin:$PATH"
+
+        # Short-lived GitHub token so pulumi's plugin downloads authenticate
+        # and bypass the 60 req/h/IP unauthenticated rate limit.
+        dd-octo-sts token --scope DataDog/inject-browser-sdk --policy self.gitlab.iis-e2e-deps > "$HOME/token.txt"
+        chmod 600 "$HOME/token.txt"
+        export GITHUB_TOKEN=$(cat "$HOME/token.txt")
+
+        pushd injector_IIS/test/e2e_tests
+        GOWORK=off PULUMI_CONFIG_PASSPHRASE=dummy pulumi --non-interactive plugin install
+        popd
+        tar czf "$CI_PROJECT_DIR/pulumi_plugins.tar.gz" -C "$HOME/.pulumi" plugins
+      fi
+  after_script:
+    - if [ -f "$HOME/token.txt" ]; then dd-octo-sts revoke -t "$(cat "$HOME/token.txt")" || true; fi
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - $CI_PROJECT_DIR/pulumi_plugins.tar.gz
+  cache:
+    - key:
+        files:
+          - injector_IIS/test/e2e_tests/go.mod
+        prefix: "pulumi_plugins"
+      paths:
+        - pulumi_plugins.tar.gz
+
+go_e2e_deps:
+  extends:
+    - .go_e2e_deps_template
+    - .IIS_build_when
+
+manual_go_e2e_deps:
+  extends: .go_e2e_deps_template
+  when: manual
+
 .injector_IIS_e2e_test_template:
   stage: test
   tags: ["arch:amd64"]
-  needs: []
-  image: ${OLD_REGISTRY}/ci/${E2E_RUNNER_IMAGE}${TEST_INFRA_DEFINITIONS_BUILDIMAGES_SUFFIX}:${TEST_INFRA_DEFINITIONS_BUILDIMAGES}
+  retry:
+    max: 2
+    when:
+      - script_failure
+  image: $E2E_LINUX_IMAGE
   variables:
     AWS_SSM_PREFIX: "ci.inject-browser-sdk."
     KEY_PAIR_NAME: "ci.inject-browser-sdk"
     KUBERNETES_MEMORY_REQUEST: 12Gi
     KUBERNETES_MEMORY_LIMIT: 16Gi
     E2E_OUTPUT_DIR: $CI_PROJECT_DIR/e2e-output
+    PULUMI_CONFIG_PASSPHRASE: dummy
   before_script:
+    # Extract the pulumi plugins produced by go_e2e_deps into ~/.pulumi
+    - !reference [.retrieve_linux_pulumi_plugins]
     # Read AWS config for agent-qa role from ddbuild's SSM, and then assume agent-qa role
     - mkdir -p ~/.aws
     - aws ssm get-parameter --region us-east-1 --name "${AWS_SSM_PREFIX}agent-qa-profile" --with-decryption --query "Parameter.Value" --out text >> ~/.aws/config
@@ -102,7 +269,7 @@ manual_injector_IIS_build:
     - export E2E_PROFILE="ci"
     - export CI_SECRET_PREFIX=$AWS_SSM_PREFIX
     - export E2E_KEY_PAIR_NAME=$KEY_PAIR_NAME
-    - export E2E_PUBLIC_KEY_PATH="/root/.ssh/${KEY_PAIR_NAME}.pub"
+    - export E2E_AWS_PUBLIC_KEY_PATH="/root/.ssh/${KEY_PAIR_NAME}.pub"
   script:
     - mkdir -p injector_IIS/test/e2e_tests/test_assets
     ## the msi will have a version-specific name, but there should be only one.
@@ -119,18 +286,18 @@ injector_IIS_e2e_test:
   extends:
     - .injector_IIS_e2e_test_template
     - .IIS_build_when
-  needs: ["injector_IIS_build"]
+  needs: ["injector_IIS_build", "go_e2e_deps"]
 
 manual_injector_IIS_e2e_test:
   extends: .injector_IIS_e2e_test_template
   when: manual
-  needs: ["manual_injector_IIS_build"]
+  needs: ["manual_injector_IIS_build", "manual_go_e2e_deps"]
 
 .injector_IIS_release:
   stage: release
   tags: ["arch:amd64"]
   needs: []
-  image: ${REGISTRY}/ci/$AGENT_DEPLOY_IMAGE$CI_IMAGE_AGENT_DEPLOY_SUFFIX:$CI_IMAGE_AGENT_DEPLOY
+  image: $IIS_AGENT_DEPLOY_IMAGE
   when: manual
   allow_failure: false
   script:
@@ -161,10 +328,11 @@ manual_injector_IIS_release:
     BUILD_CONFIGURATION: Release
     ARCH: x64
 
+
 promote_injector_IIS_release_candidate:
   stage: release
   tags: ["arch:amd64"]
-  image: ${REGISTRY}/ci/$AGENT_DEPLOY_IMAGE$CI_IMAGE_AGENT_DEPLOY_SUFFIX:$CI_IMAGE_AGENT_DEPLOY
+  image: $IIS_AGENT_DEPLOY_IMAGE
   when: manual
   variables:
     RC_COMMIT: ""

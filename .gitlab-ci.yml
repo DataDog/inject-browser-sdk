@@ -1,10 +1,16 @@
 include:
+  - local: .gitlab/devcontainer.yml
+  - local: .adms/go/gitlab.yaml
+  - local: .adms/python/gitlab.yaml
+  - local: .gitlab/images.yml
   - local: .gitlab/iis.yml
   - local: .gitlab/java.yml
   - local: .gitlab/installer.yml
+  - local: .gitlab/cmake.yml
+  - local: .gitlab/lint.yml
 
 stages:
   - build
+  - deps_fetch
   - test
   - release
-

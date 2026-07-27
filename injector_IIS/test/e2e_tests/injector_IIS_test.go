@@ -15,9 +15,9 @@ import (
   "strings"
   "testing"
 
-  "github.com/DataDog/datadog-agent/test/new-e2e/pkg/e2e"
-  "github.com/DataDog/datadog-agent/test/new-e2e/pkg/environments"
-  awsHostWindows "github.com/DataDog/datadog-agent/test/new-e2e/pkg/environments/aws/host/windows"
+  "github.com/DataDog/datadog-agent/test/e2e-framework/testing/e2e"
+  "github.com/DataDog/datadog-agent/test/e2e-framework/testing/environments"
+  awsHostWindows "github.com/DataDog/datadog-agent/test/e2e-framework/testing/provisioners/aws/host/windows"
   "github.com/DataDog/datadog-agent/test/new-e2e/tests/windows"
   windowsCommon "github.com/DataDog/datadog-agent/test/new-e2e/tests/windows/common"
   commonAgent "github.com/DataDog/datadog-agent/test/new-e2e/tests/windows/common/agent"
@@ -76,44 +76,71 @@ var sitesToTest = []windows.IISSiteDefinition{
       },
     },
   },
+  {
+    Name: "location_site", // tests <location> override disabling RUM for a sub-path
+    BindingPort: "*:8083:",
+  },
 }
 type injectionTest struct {
   url string
   injectionService string
   title string
+  allowedTracingUrls []string
 }
 var expected_results = []injectionTest {
   {
     url: "http://localhost:8080",
     injectionService: `"service":"my-web-application"`,
     title: "simple injection test, default_site",
+    allowedTracingUrls: []string{
+      "https://first.myapp.com",
+      "https://second.myapp.com",
+    },
   },
   {
     url: "http://localhost:8081",
     injectionService: `"service":"my-web-application"`,
     title: "large file injection test, large_site",
+    allowedTracingUrls: nil,
   },
   {
     url: "http://localhost:8082",
     injectionService: "",  // no injection set up on this site
     title: "no injection test, sitewithapps",
+    allowedTracingUrls: nil,
   },
   {
     url: "http://localhost:8082/site1/app1",
     injectionService: `"service":"app1"`,
     title: "simple app injection test, sitewithapps/app1",
+    allowedTracingUrls: nil,
   },
   {
     url: "http://localhost:8082/site1/app2",
     injectionService: `"service":"app2"`,
     title: "simple app injection test, sitewithapps/app2",
+    allowedTracingUrls: nil,
   },
   {
     url: "http://localhost:8082/site1/app2/nested",
     injectionService: `"service":"nested"`,
-    title: "deep app injection test, sitewithapps/app2/nested", 
+    title: "deep app injection test, sitewithapps/app2/nested",
+    allowedTracingUrls: nil,
+  },
+  {
+    url: "http://localhost:8083",
+    injectionService: `"service":"location-test"`,
+    title: "location override test, root path should inject",
+    allowedTracingUrls: nil,
+  },
+  {
+    url: "http://localhost:8083/api/",
+    injectionService: "",  // disabled via <location path="api">
+    title: "location override test, /api path should NOT inject",
+    allowedTracingUrls: nil,
   },
 }
+
 func TestRUMInstallSuite(t *testing.T) {
   suiteParams := []e2e.SuiteOption{e2e.WithProvisioner(awsHostWindows.ProvisionerNoAgentNoFakeIntake())}
 
@@ -176,12 +203,23 @@ func (v *rumvmSuite) SetupSuite() {
   vm.Execute("iisreset /restart")
 }
 
-// requireRun is an additional wrapper so that the test fails immediately on failure 
+// requireRun is an additional wrapper so that the test fails immediately on failure
 // of a subtest function, rather than continuing on.
 func (v *rumvmSuite) requireRun(desc string, f func ()) {
   if !v.Run(desc, f) {
     v.FailNow("Failed to successfully run subtest %s", desc)
   }
+}
+
+// createTestOutputDir replaces the now-removed e2e.BaseSuite.CreateTestOutputDir.
+// e2e-framework only exposes SessionOutputDir; build the per-test subdirectory
+// ourselves so install logs from each test stay separate.
+func (v *rumvmSuite) createTestOutputDir() (string, error) {
+  dir := filepath.Join(v.SessionOutputDir(), v.T().Name())
+  if err := runneros.MkdirAll(dir, 0o755); err != nil {
+    return "", err
+  }
+  return dir, nil
 }
 func (v *rumInstallSuite) TestInjectorIISInstall() {
 
@@ -211,7 +249,7 @@ func (v *rumvmSuite) testInstall() {
     v.T().Logf("Found %s", iname)
   }
   vm.CopyFile(iname, remoteFilePath)
-  v.doTestInstall(remoteFilePath, "1.1.2", false)
+  v.doTestInstall(remoteFilePath, "1.2.1", false)
 }
 
 func (v *rumvmSuite) installOldVersionForUpgrade() {
@@ -222,7 +260,7 @@ func (v *rumvmSuite) installOldVersionForUpgrade() {
     // because oldVersionForUpgrade is constructed at runtime, we have to convert it to a windows path if the test runner is linux
     oldVersionForUpgrade = strings.ReplaceAll(oldVersionForUpgrade, "/", "\\")
   }
-  outputDir, err := v.CreateTestOutputDir()
+  outputDir, err := v.createTestOutputDir()
   v.Require().NoError(err)
   err = windowsCommon.InstallMSI(vm, oldVersionForUpgrade, "IISRESTART=true", filepath.Join(outputDir, "install.log"))
   v.Require().NoError(err)
@@ -253,7 +291,7 @@ func (v *rumvmSuite) doTestInstall(remoteFilePath string, expectedVersion string
     // because remoteFilePath is constructed at runtime, we have to convert it to a windows path if the test runner is linux
     remoteFilePath = strings.Replace(remoteFilePath, "/", "\\", -1)
   }
-  outputDir, err := v.CreateTestOutputDir()
+  outputDir, err := v.createTestOutputDir()
   v.Require().NoError(err)
   err = windowsCommon.InstallMSI(vm, remoteFilePath, "IISRESTART=true", filepath.Join(outputDir, "install.log"))
   v.Require().NoError(err)
@@ -313,6 +351,17 @@ func (v *rumvmSuite) testSuccessfulInjection(tests []injectionTest) {
       if test.injectionService != "" {
         v.Assert().Contains(responseHeaders, "x-datadog-rum-injected")
         v.Assert().Contains(response, test.injectionService)
+
+        if test.allowedTracingUrls != nil && len(test.allowedTracingUrls) > 0 {
+          quotedUrls := make([]string, len(test.allowedTracingUrls))
+          for i, url := range test.allowedTracingUrls {
+            quotedUrls[i] = fmt.Sprintf(`"%s"`, url)
+          }
+          expectedAllowedTracingUrls := fmt.Sprintf(`"allowedTracingUrls":[%s]`, strings.Join(quotedUrls, ","))
+
+          v.Assert().Contains(response, expectedAllowedTracingUrls)
+          v.T().Logf("Verified allowedTracingUrls in injection: %s", expectedAllowedTracingUrls)
+        }
       } else {
         v.Assert().NotContains(responseHeaders, "x-datadog-rum-injected")
         v.Assert().NotContains(response, `"service":`)
@@ -325,7 +374,7 @@ func (v *rumvmSuite) testUninstall() {
   vm := v.Env().RemoteHost
 
   // Uninstall the injector
-  outputDir, err := v.CreateTestOutputDir()
+  outputDir, err := v.createTestOutputDir()
   v.Require().NoError(err)
 
   remotePath := filepath.Join(remoteInstallerPath, installerName)

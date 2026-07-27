@@ -4,43 +4,69 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-#[derive(Debug, PartialEq)]
+use alloc::string::String;
+use core::fmt;
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     Json(String),
     UnsupportedMajorVersion(u32),
     UnsupportedSite(String),
-    OutOfRangeRate(String, f32),
+    OutOfRangeRate(String, f64),
     EmptyMandatoryConf(String),
+    StableConfig(String),
+    /// No stable-configuration entries were found: the files are absent, or
+    /// none of their rules matched this process. Distinct from
+    /// [`Error::StableConfig`], which means a file was there but could not be
+    /// read or parsed. Callers that treat missing stable configuration as the
+    /// ordinary case need to tell the two apart so a broken file is still
+    /// reported.
+    StableConfigAbsent(String),
+    /// Caller supplied a NULL pointer for a required FFI argument.
+    FfiNullPointer(String),
+    /// Caller supplied a non-UTF-8 byte sequence for an FFI argument that
+    /// required a UTF-8 string.
+    FfiInvalidUtf8(String),
 }
 
 impl Error {
     pub fn code(&self) -> u8 {
         match self {
-            Error::Json(_) => 1,
-            Error::UnsupportedMajorVersion(_) => 2,
-            Error::UnsupportedSite(_) => 3,
-            Error::OutOfRangeRate(_, _) => 4,
-            Error::EmptyMandatoryConf(_) => 5,
+            Error::Json(_) => return 1,
+            Error::UnsupportedMajorVersion(_) => return 2,
+            Error::UnsupportedSite(_) => return 3,
+            Error::OutOfRangeRate(_, _) => return 4,
+            Error::EmptyMandatoryConf(_) => return 5,
+            Error::StableConfig(_) => return 6,
+            Error::FfiNullPointer(_) => return 7,
+            Error::FfiInvalidUtf8(_) => return 8,
+            Error::StableConfigAbsent(_) => return 10,
         }
     }
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Json(cause) => write!(f, "JSON error: {cause}"),
+            Error::Json(cause) => return write!(f, "JSON error: {cause}"),
             Error::UnsupportedMajorVersion(version) => {
-                write!(f, "Validation error: The major version '{version}' is not supported. Supported RUM SDK versions: [5, 6]")
+                return write!(f, "Validation error: The major version '{version}' is not supported. Supported RUM SDK versions: [5, 6]")
             }
             Error::UnsupportedSite(site) => {
-                write!(f, "Validation error: The site '{site}' is not a valid Datadog site. Examples of valid Datadog sites: 'datadoghq.com', 'datadoghq.eu', 'ddog-gov.com'.")
+                return write!(f, "Validation error: The site '{site}' is not a valid Datadog site. Examples of valid Datadog sites: 'datadoghq.com', 'us5.datadoghq.com', 'datadoghq.eu', 'ddog-gov.com'.")
             }
             Error::OutOfRangeRate(key, value) => {
-                write!(f, "Validation error: The provided {key} is invalid. It must be between 0.0 and 100.0. However, the received value was '{value}'.")
+                return write!(f, "Validation error: The provided {key} is invalid. It must be between 0.0 and 100.0. However, the received value was '{value}'.")
             }
             Error::EmptyMandatoryConf(key) => {
-                write!(f, "Validation error: Mandatory field '{key}' is empty.")
+                return write!(f, "Validation error: Mandatory field '{key}' is empty.")
             }
+            Error::StableConfig(cause) => return write!(f, "Stable config error: {cause}"),
+            Error::StableConfigAbsent(cause) => {
+                return write!(f, "Stable config error: {cause}")
+            }
+            Error::FfiNullPointer(field) => return write!(f, "FFI error: {field} is NULL"),
+            Error::FfiInvalidUtf8(field) => return write!(f, "FFI error: {field} is not valid UTF-8"),
         }
     }
 }

@@ -3,6 +3,10 @@
 // Datadog (https://www.datadoghq.com/).
 //
 // Copyright 2024-Present Datadog, Inc.
+
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::injection_point_locator::InjectionPointLocator;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -23,13 +27,12 @@ pub struct Injector<'snippet> {
     snippet: &'snippet [u8],
 
     /// Tracks the current state of the injection process.
-    /// Can be WaitingForMoreData (still buffering), Injected (successfully injected),
-    /// or InjectionPointNotFound (no valid injection point found).
     injector_state: InjectorState,
 
-    /// Buffers incoming HTML data up to DOCUMENT_CHARSET_SCAN_LIMIT (1024) bytes before attempting injection.
-    /// This buffer is used to search for valid injection points (like <head> or <meta charset='...'> tags)
-    /// within the first 1024 bytes of the document, as per HTML spec requirements (https://html.spec.whatwg.org/multipage/semantics.html#the-meta-element).
+    /// Buffers incoming HTML data up to DOCUMENT_CHARSET_SCAN_LIMIT (1024) bytes before attempting
+    /// injection. This buffer is used to search for valid injection points (like `<head>` or
+    /// `<meta charset='...'>` tags) within the first 1024 bytes of the document, as per HTML spec
+    /// requirements (<https://html.spec.whatwg.org/multipage/semantics.html#the-meta-element>).
     buffer: Vec<u8>,
 
     /// If we don't find any injection point, we need to pad the document with spaces, so the
@@ -39,12 +42,12 @@ pub struct Injector<'snippet> {
 
 impl<'snippet> Injector<'snippet> {
     pub fn new(snippet: &'snippet [u8]) -> Self {
-        Self {
+        return Self {
             snippet,
             injector_state: InjectorState::Buffering,
             padding_spaces: Vec::new(),
             buffer: Vec::new(),
-        }
+        };
     }
 
     pub fn write<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
@@ -63,16 +66,16 @@ impl<'snippet> Injector<'snippet> {
             return self.try_inject(None, false);
         }
 
-        self.create_result(&[])
+        return self.create_result(&[]);
     }
 
     pub fn end(&mut self) -> Result<'_> {
         match self.injector_state {
-            InjectorState::Buffering => self.try_inject(None, true),
-            InjectorState::SnippetInjected => self.create_result(&[]),
+            InjectorState::Buffering => return self.try_inject(None, true),
+            InjectorState::SnippetInjected => return self.create_result(&[]),
             InjectorState::NoValidInjectionPoint => {
                 self.padding_spaces = vec![b' '; self.snippet.len()];
-                self.create_result(&[BytesSlice::new(&self.padding_spaces, false)])
+                return self.create_result(&[BytesSlice::new(&self.padding_spaces, false)]);
             }
         }
     }
@@ -85,20 +88,20 @@ impl<'snippet> Injector<'snippet> {
 
         if let Some(point) = InjectionPointLocator::find(slice) {
             self.injector_state = InjectorState::SnippetInjected;
-            self.create_result(&[
+            return self.create_result(&[
                 BytesSlice::new(&chunk[..point], from_incoming_chunk),
                 BytesSlice::new(self.snippet, false),
                 BytesSlice::new(&chunk[point..], from_incoming_chunk),
-            ])
+            ]);
         } else {
             self.injector_state = InjectorState::NoValidInjectionPoint;
             if eof {
                 self.padding_spaces = vec![b' '; self.snippet.len()];
             }
-            self.create_result(&[
+            return self.create_result(&[
                 BytesSlice::new(chunk, from_incoming_chunk),
                 BytesSlice::new(&self.padding_spaces, false),
-            ])
+            ]);
         }
     }
 
@@ -106,16 +109,16 @@ impl<'snippet> Injector<'snippet> {
         let mut result_slices = [BytesSlice::default(); 4];
         let mut length = 0;
 
-        for slice in slices.iter().filter(|s| !s.bytes.is_empty()).take(4) {
+        for slice in slices.iter().filter(|s| return !s.bytes.is_empty()).take(4) {
             result_slices[length] = *slice;
             length += 1;
         }
 
-        Result {
+        return Result {
             slices: result_slices,
             length,
             injected: self.injector_state == InjectorState::SnippetInjected,
-        }
+        };
     }
 }
 
@@ -127,10 +130,10 @@ pub struct BytesSlice<'a> {
 
 impl<'a> BytesSlice<'a> {
     pub fn new(bytes: &'a [u8], from_incoming_chunk: bool) -> Self {
-        Self {
+        return Self {
             bytes,
             from_incoming_chunk,
-        }
+        };
     }
 }
 
@@ -150,8 +153,12 @@ impl<'a> Result<'a> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::format;
+    use alloc::string::String;
     use pretty_assertions::assert_eq;
-    use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng};
+    use rand::distr::Uniform;
+    use rand::prelude::IndexedRandom;
+    use rand::RngExt;
 
     use super::*;
 
@@ -211,7 +218,7 @@ mod tests {
 
         impl Part {
             fn new(string: &'static str, has_head: bool) -> Self {
-                Self { string, has_head }
+                return Self { string, has_head };
             }
         }
 
@@ -234,7 +241,7 @@ mod tests {
             Part::new("网络", false),
         ];
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..1000 {
             // Build a random input from 'parts'
@@ -242,7 +249,7 @@ mod tests {
             let mut expected = String::new();
             let mut has_head = false;
 
-            let parts_count = Uniform::new(0, 20).sample(&mut rng);
+            let parts_count = rng.random_range(0usize..20);
             for part in parts.choose_multiple(&mut rng, parts_count) {
                 input.push_str(part.string);
                 expected.push_str(part.string);
@@ -260,15 +267,15 @@ mod tests {
             // character boundary, we need to use &[u8] chunks instead of &str.
             let chunks = rng
                 .clone()
-                .sample_iter(Uniform::new(0, input.len() + 1))
+                .sample_iter(Uniform::new(0usize, input.len() + 1).unwrap())
                 .scan(input.as_bytes(), |input, chunk_size| {
                     if input.is_empty() {
-                        None
+                        return None;
                     } else {
                         let chunk_size = chunk_size.min(input.len());
                         let chunk = &input[..chunk_size];
                         *input = &input[chunk_size..];
-                        Some(chunk)
+                        return Some(chunk);
                     }
                 });
 
@@ -276,7 +283,7 @@ mod tests {
         }
     }
 
-    fn test_injector<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn test_injector<T: AsRef<[u8]> + core::fmt::Debug>(
         input_chunks: impl IntoIterator<Item = T>,
         expected: &str,
     ) {
@@ -318,7 +325,10 @@ mod tests {
 
                 if !injected {
                     // Look for the snippet in the slice
-                    injected = slice.bytes.windows(slice.bytes.len()).any(|w| w == snippet);
+                    injected = slice
+                        .bytes
+                        .windows(slice.bytes.len())
+                        .any(|w| return w == snippet);
                 }
                 output_slices.extend_from_slice(slice.bytes);
             }

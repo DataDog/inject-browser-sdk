@@ -1,6 +1,21 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache 2.0 License. This product includes software developed at
+// Datadog (https://www.datadoghq.com/).
+//
+// Copyright 2024-Present Datadog, Inc.
+
+/// Stateless helper used to locate the "injection point", in other words where we should inject the
+/// snippet in an HTML document.
+///
+/// The current implementation looks for the earliest valid position within the `<head>` tag:
+/// * right after the open `<head>` tag,
+/// * or right after a `<meta charset=...>` / `<meta http-equiv=...>` tag, as those must not be
+///   preceded by the snippet.
 pub struct InjectionPointLocator;
 
 impl InjectionPointLocator {
+    /// Returns the index at which the snippet should be inserted, or `None` if no valid injection
+    /// point was found within `buffer`.
     pub fn find(buffer: &[u8]) -> Option<usize> {
         let mut head_tag_point: Option<usize> = None;
         let mut offset = 0;
@@ -11,7 +26,7 @@ impl InjectionPointLocator {
                     head_tag_point = Some(tag_end);
                 }
                 TagName::Meta if has_encoding_attributes(&buffer[tag_start..tag_end]) => {
-                    return Some(tag_end)
+                    return Some(tag_end);
                 }
                 _ => {
                     // Skip unknown tags, continue scanning
@@ -19,7 +34,8 @@ impl InjectionPointLocator {
             }
             offset += tag_end;
         }
-        head_tag_point
+
+        return head_tag_point;
     }
 }
 
@@ -43,13 +59,13 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
         let rest = &input[tag_start + 1..];
 
         // find end of tag
-        let tag_close: usize = rest.iter().position(|&b| b == b'>')?;
+        let tag_close: usize = rest.iter().position(|&b| return b == b'>')?;
         let tag_end = tag_start + tag_close + 2;
 
         // extract tag name
         let name_end = rest
             .iter()
-            .position(|&b| b.is_ascii_whitespace() || b == b'>')?;
+            .position(|&b| return b.is_ascii_whitespace() || b == b'>')?;
 
         if let Some(relevant_tag_name) = parse_tag_name(&rest[..name_end]) {
             return Some((relevant_tag_name, tag_start, tag_end));
@@ -58,41 +74,45 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
         i = tag_end;
     }
 
-    None
+    return None;
 }
 
 fn parse_tag_name(input: &[u8]) -> Option<TagName> {
     if compare_case_insensitive(input, b"meta") {
-        Some(TagName::Meta)
+        return Some(TagName::Meta);
     } else if compare_case_insensitive(input, b"head") {
-        Some(TagName::Head)
+        return Some(TagName::Head);
     } else {
-        None
+        return None;
     }
 }
 
 fn has_encoding_attributes(buffer: &[u8]) -> bool {
-    find_case_insensitive(buffer, b"charset=") || find_case_insensitive(buffer, b"http-equiv=")
+    return find_case_insensitive(buffer, b"charset=")
+        || find_case_insensitive(buffer, b"http-equiv=");
 }
 
 fn compare_case_insensitive(a: &[u8], b_lower_case: &[u8]) -> bool {
     if a.len() != b_lower_case.len() {
         return false;
     }
-    a.iter()
+    return a
+        .iter()
         .zip(b_lower_case)
-        .all(|(a, &b_lower_case)| a.to_ascii_lowercase() == b_lower_case)
+        .all(|(a, &b_lower_case)| return a.to_ascii_lowercase() == b_lower_case);
 }
 
 fn find_case_insensitive(input: &[u8], pattern: &[u8]) -> bool {
-    input
+    return input
         .windows(pattern.len())
-        .any(|window| compare_case_insensitive(window, pattern))
+        .any(|window| return compare_case_insensitive(window, pattern));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::String;
+    use alloc::vec::Vec;
 
     #[test]
     fn meta_with_charset() {
@@ -193,7 +213,7 @@ mod tests {
     }
 
     fn test_injector(input: &str, expected: &str) {
-        let mut input_bytes = input.as_bytes().to_vec();
+        let mut input_bytes: Vec<u8> = input.as_bytes().to_vec();
         if let Some(index) = InjectionPointLocator::find(&input_bytes) {
             input_bytes.splice(index..index, b"{{SNIPPET}}".iter().copied());
         }

@@ -3,3 +3,5 @@
 
 # Default owners, overridden by file/directory specific owners below
 * @DataDog/squad-rum-injection
+
+/.adms/ @DataDog/dependency-management

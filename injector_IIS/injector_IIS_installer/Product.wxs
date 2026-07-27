@@ -10,25 +10,30 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
 	 xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
 
-	 <!-- This section will allow us to set the msi version based on values set on the command
-	      line (which in turn would be derived from the git version).  Use a default value so
-		  that dev building still functions -->
+	 <!-- Version is derived from injector_IIS/VERSION via the build system.
+	      MAJ_VER, MIN_VER, PATCH_VER, VERSION_PRE are passed from MSBuild. -->
 	<?if $(var.MAJ_VER) and $(var.MAJ_VER) != "" ?>
 		<?define VERSION_MAJOR = $(var.MAJ_VER) ?>
 		<?define VERSION_MINOR = $(var.MIN_VER) ?>
 		<?define VERSION_PATCH = $(var.PATCH_VER) ?>
 		<?define VERSION_NUMBER = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH).0 ?>
-		<?else ?>
-		<?define VERSION_MAJOR =0 ?>
-		<?define VERSION_MINOR =97 ?>
-		<?define VERSION_PATCH =1 ?>
-		<?define VERSION_NUMBER = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH).0 ?>
-    <?endif ?>
+	<?else ?>
+		<?define VERSION_MAJOR = 0 ?>
+		<?define VERSION_MINOR = 0 ?>
+		<?define VERSION_PATCH = 0 ?>
+		<?define VERSION_NUMBER = 0.0.0.0 ?>
+	<?endif ?>
+
+	<?if $(var.VERSION_PRE) and $(var.VERSION_PRE) != "" ?>
+		<?define VERSION_DISPLAY = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH)-$(var.VERSION_PRE) ?>
+	<?else ?>
+		<?define VERSION_DISPLAY = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH) ?>
+	<?endif ?>
+
 	<?define UPGRADE_CODE=A5E2C93A-4340-4D15-BA17-F3CA858D09CA?>
 	<!-- Define the product details -->
-	<!--compiler generates-->
 	<Product Id="*"
-             Name="!(loc.ProductName)"
+             Name="!(loc.ProductName) $(var.VERSION_DISPLAY)"
              Language="!(loc.LANG)"
              Version="$(var.VERSION_NUMBER)"
              Manufacturer="!(loc.ManufacturerName)"
@@ -37,7 +42,7 @@
 		<Package Id="*"
              Keywords="Installer"
              Comments="!(loc.InstallerComment)"
-             Description="!(loc.ProductName) $(var.VERSION_NUMBER)"
+             Description="!(loc.ProductName) $(var.VERSION_DISPLAY)"
              Manufacturer="!(loc.ManufacturerName)"
              InstallScope="perMachine"
              InstallerVersion="400"
@@ -64,7 +69,7 @@
 			DllEntry="WixQuietExec64"
 			Execute="deferred"
 			Return="check"
-			Impersonate="yes" />
+			Impersonate="no" />
 
 		<CustomAction Id="RunMigrationScript_Cmd"
 			Property="RunMigrationScript"
@@ -323,6 +328,8 @@
 			
       <Component Id="InjectorConfiguration" Guid="{8F1996EE-7046-468F-94F1-DC9526F3F965}" Directory="InetsrvSchemaDir">
         <File Id="InjectorSchema" Name="RUM_schema.xml" Source="..\resources\RUM_schema.xml" />
+        
+        <!-- system.webServer datadogRum section -->
         <util:XmlConfig Id='ApplicationHostSectionElement' On='install' Action='create'
                         File='[InetsrvDir]config\applicationHost.config' Node='element'
                         ElementPath="/configuration/configSections/sectionGroup[\[]@name='system.webServer'[\]]" Name="section" Sequence="6"
@@ -331,12 +338,33 @@
                         ElementPath='ApplicationHostSectionElement' Sequence='7' Name='name' Value='datadogRum' />
         <util:XmlConfig Id='ApplicationHostSectionOverrideAttrib' File='[InetsrvDir]config\applicationHost.config'
                         ElementPath='ApplicationHostSectionElement' Sequence='8' Name='overrideModeDefault' Value='Allow' />
-        <!-- uninstall -->
-        <!-- NOTE(@dmehala): might also need to remove all datadogRum nodes in system.webServer and location (regardless of the path) -->
-        <util:XmlConfig Id='ApplicationHostSectionElementRemove' On='uninstall' Action='delete'
+        
+        <!-- system.applicationHost datadogRumServer section -->
+        <util:XmlConfig Id='AppHostSectionElement' On='install' Action='create'
                         File='[InetsrvDir]config\applicationHost.config' Node='element'
-                        ElementPath="/configuration/configSections/sectionGroup[\[]@name='system.webServer'[\]]" Sequence='103'
-                        VerifyPath="/configuration/configSections/sectionGroup[\[]@name='system.webServer'[\]]/section[\[]@name='datadogRum'[\]]" />
+                        ElementPath="/configuration/configSections/sectionGroup[\[]@name='system.applicationHost'[\]]" Name="section" Sequence="9"
+                        VerifyPath="/configuration/configSections/sectionGroup[\[]@name='system.applicationHost'[\]]/section[\[]@name='datadogRumServer'[\]]" />
+        <util:XmlConfig Id='AppHostSectionNameAttrib' File='[InetsrvDir]config\applicationHost.config'
+                        ElementPath='AppHostSectionElement' Sequence='10' Name='name' Value='datadogRumServer' />
+        <util:XmlConfig Id='AppHostSectionAllowDefAttrib' File='[InetsrvDir]config\applicationHost.config'
+                        ElementPath='AppHostSectionElement' Sequence='11' Name='allowDefinition' Value='AppHostOnly' />
+        <util:XmlConfig Id='AppHostSectionOverrideAttrib' File='[InetsrvDir]config\applicationHost.config'
+                        ElementPath='AppHostSectionElement' Sequence='12' Name='overrideModeDefault' Value='Deny' />
+        
+        <!-- uninstall -->
+        <!-- Intentionally leave the datadogRum / datadogRumServer section
+             declarations in applicationHost.config on uninstall. IIS validates
+             unknown sections under <location> strictly (returns 500.19), so
+             removing the schema would break any site whose web.config still
+             carries a <location><datadogRum> block after the module is gone.
+             With the schema kept, the config is a parseable no-op once the
+             module is uninstalled. -->
+
+		  <!-- Remove the actual datadogRumServer configuration element -->
+		  <util:XmlConfig Id='DatadogRumServerElementRemove' On='uninstall' Action='delete'
+						  File='[InetsrvDir]config\applicationHost.config' Node='element'
+						  ElementPath="/configuration/system.applicationHost" Sequence='105'
+						  VerifyPath="/configuration/system.applicationHost/datadogRumServer" />
       </Component>
 		</Fragment>
 </Wix>

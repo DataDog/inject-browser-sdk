@@ -15,12 +15,29 @@
         }
       },
       {
+        "name": "ci-xcomp-lint",
+        "displayName": "CI Cross-Compilation (devcontainer lint)",
+        "description": "Used by `make lint-configure` to run clang-tidy in the devcontainer. TOOLCHAIN_ROOT must match LLVM_VERSION in .devcontainer/Dockerfile.",
+        "inherits": "ci-xcomp",
+        "cacheVariables": {
+          "TOOLCHAIN_ROOT": "/usr/lib/llvm-20/bin/"
+        }
+      },
+      {
         "name": "ci-native",
         "displayName": "CI Native",
         "generator": "Ninja",
         "cacheVariables": {
           "IIS_INJECTOR_STATIC_CRT": "1",
           "IIS_BUILD_TESTS": "1"
+        }
+      },
+      {
+        "name": "ci-native-asan",
+        "displayName": "CI Native with AddressSanitizer",
+        "inherits": "ci-native",
+        "cacheVariables": {
+          "IIS_ENABLE_ASAN": "ON"
         }
       }
     ]

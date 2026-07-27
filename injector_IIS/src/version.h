@@ -10,17 +10,8 @@
 #include <string_view>
 #endif
 
-#ifndef MAJ_VER
-#define MAJ_VER 1
-#endif
-
-#ifndef MIN_VER
-#define MIN_VER 1
-#endif
-
-#ifndef PATCH_VER
-#define PATCH_VER 2
-#endif
+// MAJ_VER, MIN_VER, PATCH_VER, and VERSION_PRE are always provided by CMake
+// compiler defines (derived from injector_IIS/VERSION).
 
 #define RC_FILE_VERSION MAJ_VER, MIN_VER, PATCH_VER, 0
 

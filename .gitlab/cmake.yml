@@ -1,0 +1,54 @@
+---
+.cmake_test_base:
+  image: registry.ddbuild.io/images/mirror/ubuntu:22.04
+  tags: ["arch:amd64"]
+  needs: []
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends build-essential cmake git curl ca-certificates
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.94.1
+    - . "$HOME/.cargo/env"
+    - rustup toolchain install nightly
+    - rustup component add rust-src --toolchain nightly
+    - cargo install --locked cbindgen --version 0.26.0
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - changes:
+        - CMakeLists.txt
+        - cbindgen.toml
+        - lib/**/*
+        - Cargo.toml
+        - Cargo.lock
+        - .gitlab/cmake.yml
+        - ci/cmake-consumer-test/**
+
+########################################
+# Standalone build — cmake from repo root
+########################################
+cmake_standalone_build:
+  stage: build
+  extends: .cmake_test_base
+  script:
+    - cmake -B build -DCMAKE_BUILD_TYPE=Release
+    - cmake --build build
+    - test -f build/libinject_browser_sdk_ffi.a
+
+########################################
+# FetchContent consumer test
+########################################
+cmake_fetchcontent_test:
+  stage: test
+  extends: .cmake_test_base
+  script:
+    - mkdir -p /tmp/cmake-consumer
+    - cp ci/cmake-consumer-test/CMakeLists.txt ci/cmake-consumer-test/main.cpp ci/cmake-consumer-test/validate_version.c /tmp/cmake-consumer/
+    - ln -s "$CI_PROJECT_DIR" /tmp/cmake-consumer/sdk
+    - export RUSTFLAGS="-Zsanitizer=address"
+    - export RUSTUP_TOOLCHAIN=nightly
+    - cmake -B /tmp/cmake-consumer/build -S /tmp/cmake-consumer
+      -DCMAKE_BUILD_TYPE=Debug
+      -DENABLE_ASAN=ON
+      -DCMAKE_CXX_COMPILER=g++
+    - cmake --build /tmp/cmake-consumer/build
+    - /tmp/cmake-consumer/build/consumer_test
+    - ctest --test-dir /tmp/cmake-consumer/build -R validate_version --output-on-failure

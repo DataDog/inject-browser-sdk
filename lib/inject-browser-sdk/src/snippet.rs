@@ -4,111 +4,100 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-use serde::Serialize;
-use std::io::{self, Write};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
-use crate::{configuration::validate_configuration, configuration::Configuration, error::Error};
+use crate::{configuration::parse_site, configuration::Configuration, error::Error};
 
 /// Generates the Datadog RUM SDK JavaScript snippet based on the provided configuration.
 ///
 /// This function creates a JavaScript snippet that can be injected into your web application
 /// to enable RUM. The snippet is generated using the provided `configuration`.
 pub fn generate_snippet(configuration: &Configuration) -> Result<Vec<u8>, Error> {
-    validate_configuration(configuration)?;
+    configuration.validate()?;
 
     let site = configuration.rum.site.as_deref().unwrap_or("datadoghq.com");
     let url = format_cdn_url(configuration.major_version, site)?;
 
     let mut output = Vec::new();
 
-    output
-        .write_all(
-            br#"
+    output.extend_from_slice(
+        br#"
 <script>
 (function(h,o,u,n,d) {
   h=h[d]=h[d]||{q:[],onReady:function(c){h.q.push(c)}}
   d=o.createElement(u);d.async=1;d.src=n
   n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
 })(window,document,'script','"#,
-        )
-        .unwrap();
+    );
 
-    output.write_all(url.as_bytes()).unwrap();
+    output.extend_from_slice(url.as_bytes());
 
-    output
-        .write_all(
-            br#"','DD_RUM')
+    output.extend_from_slice(
+        br#"','DD_RUM')
 window.DD_RUM.onReady(function() {
   window.DD_RUM.init("#,
-        )
-        .unwrap();
+    );
 
-    let mut serializer = serde_json::Serializer::with_formatter(&mut output, EscapeNonAscii);
-    configuration.rum.serialize(&mut serializer).unwrap();
+    let mut rum_value =
+        serde_json::to_value(&configuration.rum).map_err(|e| return Error::Json(e.to_string()))?;
+    // Deterministic key ordering, independent of serde_json's `preserve_order` feature.
+    rum_value.sort_all_objects();
+    let json_string =
+        serde_json::to_string(&rum_value).map_err(|e| return Error::Json(e.to_string()))?;
+    for ch in json_string.chars() {
+        if ch.is_ascii() {
+            let mut buf = [0; 4];
+            output.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+        } else {
+            let mut buf = [0; 2];
+            for escape in ch.encode_utf16(&mut buf) {
+                output.extend_from_slice(format!("\\u{:04x}", escape).as_bytes());
+            }
+        }
+    }
 
-    output
-        .write_all(
-            br#");
+    output.extend_from_slice(
+        br#");
 });
 </script>
 "#,
-        )
-        .unwrap();
+    );
 
-    Ok(output)
+    return Ok(output);
 }
 
 fn format_cdn_url(major_version: u32, site: &str) -> Result<String, Error> {
-    if site == "ddog-gov.com" {
+    let parsed = parse_site(site).ok_or_else(|| return Error::UnsupportedSite(site.to_string()))?;
+
+    // US1-FED uses a flat URL without region prefix (per browser-sdk README)
+    #[cfg(feature = "support_gov_domain")]
+    if parsed.domain.starts_with("ddog-gov.") {
         return Ok(format!(
             "https://www.datadoghq-browser-agent.com/datadog-rum-v{major_version}.js"
         ));
     }
 
-    let region = match site {
-        "datadoghq.com" => "us1",
-        "us3.datadoghq.com" => "us3",
-        "us5.datadoghq.com" => "us5",
-        "datadoghq.eu" => "eu1",
-        "ap1.datadoghq.com" => "ap1",
-        _ => return Err(Error::UnsupportedSite(site.to_string())),
+    let region = match parsed.prefix {
+        Some(prefix) => prefix,
+        None if parsed.domain.ends_with(".eu") => "eu1",
+        None => "us1",
     };
 
-    Ok(format!(
+    return Ok(format!(
         "https://www.datadoghq-browser-agent.com/{region}/v{major_version}/datadog-rum.js"
-    ))
-}
-
-/// JSON Formatter that escapes all non-ASCII characters.
-/// Based on `<https://github.com/serde-rs/json/issues/907#issuecomment-1179882369>`
-struct EscapeNonAscii;
-
-impl serde_json::ser::Formatter for EscapeNonAscii {
-    fn write_string_fragment<W: ?Sized + Write>(
-        &mut self,
-        writer: &mut W,
-        fragment: &str,
-    ) -> io::Result<()> {
-        for ch in fragment.chars() {
-            if ch.is_ascii() {
-                writer.write_all(ch.encode_utf8(&mut [0; 4]).as_bytes())?;
-            } else {
-                for escape in ch.encode_utf16(&mut [0; 2]) {
-                    write!(writer, "\\u{:04x}", escape)?;
-                }
-            }
-        }
-        Ok(())
-    }
+    ));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{configuration::PrivacyLevel, configuration::RumConfiguration};
+    use crate::configuration::RumConfiguration;
+    use alloc::boxed::Box;
+    use alloc::collections::BTreeMap;
     use pretty_assertions::assert_eq;
     use serde_json::json;
-    use std::collections::BTreeMap;
 
     #[test]
     fn test_generate_snippet_with_minimal_configuration() {
@@ -126,14 +115,14 @@ window.DD_RUM.onReady(function() {
 "#;
 
         assert_eq!(
-            std::str::from_utf8(
+            core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
                     rum: RumConfiguration {
-                        client_token: Box::from("foo"),
-                        application_id: Box::from("bar"),
+                        application_id: Some(String::from("bar")),
+                        client_token: Some(String::from("foo")),
                         ..Default::default()
-                    }
+                    },
                 })
                 .unwrap()
             )
@@ -152,24 +141,24 @@ window.DD_RUM.onReady(function() {
   n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
 })(window,document,'script','https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js','DD_RUM')
 window.DD_RUM.onReady(function() {
-  window.DD_RUM.init({"applicationId":"bar","clientToken":"foo","site":"datadoghq.com","trackResources":true,"defaultPrivacyLevel":"mask","sessionSampleRate":42.42});
+  window.DD_RUM.init({"applicationId":"bar","clientToken":"foo","defaultPrivacyLevel":"mask","sessionSampleRate":42.42,"site":"datadoghq.com","trackResources":true});
 });
 </script>
 "#;
 
         assert_eq!(
-            std::str::from_utf8(
+            core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
                     rum: RumConfiguration {
-                        client_token: Box::from("foo"),
-                        application_id: Box::from("bar"),
-                        site: Some(Box::from("datadoghq.com")),
-                        default_privacy_level: Some(PrivacyLevel::Mask),
+                        application_id: Some(String::from("bar")),
+                        client_token: Some(String::from("foo")),
+                        site: Some(String::from("datadoghq.com")),
+                        default_privacy_level: Some(String::from("mask")),
                         track_resources: Some(true),
                         session_sample_rate: Some(42.42),
                         ..Default::default()
-                    }
+                    },
                 })
                 .unwrap()
             )
@@ -196,15 +185,15 @@ window.DD_RUM.onReady(function() {
 "#;
 
         assert_eq!(
-            std::str::from_utf8(
+            core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
                     rum: RumConfiguration {
-                        client_token: Box::from("foo"),
-                        application_id: Box::from("☺ € é"),
-                        site: Some(Box::from("datadoghq.com")),
+                        application_id: Some(String::from("☺ € é")),
+                        client_token: Some(String::from("foo")),
+                        site: Some(String::from("datadoghq.com")),
                         ..Default::default()
-                    }
+                    },
                 })
                 .unwrap()
             )
@@ -223,25 +212,25 @@ window.DD_RUM.onReady(function() {
   n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
 })(window,document,'script','https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js','DD_RUM')
 window.DD_RUM.onReady(function() {
-  window.DD_RUM.init({"applicationId":"foo","clientToken":"bar","site":"datadoghq.com","newopt":"value","newopt2":true});
+  window.DD_RUM.init({"applicationId":"foo","clientToken":"bar","newopt":"value","newopt2":true,"site":"datadoghq.com"});
 });
 </script>
 "#;
 
         assert_eq!(
-            std::str::from_utf8(
+            core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
                     rum: RumConfiguration {
-                        application_id: Box::from("foo"),
-                        client_token: Box::from("bar"),
-                        site: Some(Box::from("datadoghq.com")),
+                        application_id: Some(String::from("foo")),
+                        client_token: Some(String::from("bar")),
+                        site: Some(String::from("datadoghq.com")),
                         other: BTreeMap::from([
                             (Box::from("newopt"), json!("value")),
                             (Box::from("newopt2"), json!(true)),
                         ]),
                         ..Default::default()
-                    }
+                    },
                 })
                 .unwrap()
             )
@@ -257,11 +246,96 @@ window.DD_RUM.onReady(function() {
             "https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js"
         );
         assert_eq!(
+            format_cdn_url(5, "datadoghq.eu").unwrap(),
+            "https://www.datadoghq-browser-agent.com/eu1/v5/datadog-rum.js"
+        );
+        // explicit us1 prefix produces the same URL as bare datadoghq.com
+        assert_eq!(
+            format_cdn_url(5, "us1.datadoghq.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "us3.datadoghq.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/us3/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "us5.datadoghq.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/us5/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "ap1.datadoghq.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/ap1/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "ap2.datadoghq.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/ap2/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "eu2.datadoghq.eu").unwrap(),
+            "https://www.datadoghq-browser-agent.com/eu2/v5/datadog-rum.js"
+        );
+        // datad0g (staging) domains use the same CDN as production
+        assert_eq!(
+            format_cdn_url(5, "datad0g.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "datad0g.eu").unwrap(),
+            "https://www.datadoghq-browser-agent.com/eu1/v5/datadog-rum.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "us3.datad0g.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/us3/v5/datadog-rum.js"
+        );
+        // major version 6
+        assert_eq!(
+            format_cdn_url(6, "datadoghq.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/us1/v6/datadog-rum.js"
+        );
+        // rejected sites
+        assert_eq!(
             format_cdn_url(5, "foo.com").unwrap_err(),
             Error::UnsupportedSite(String::from("foo.com"))
         );
+    }
+
+    #[test]
+    fn test_generate_snippet_with_prefixed_site() {
+        let snippet = generate_snippet(&Configuration {
+            major_version: 5,
+            rum: RumConfiguration {
+                client_token: Some(String::from("tok")),
+                application_id: Some(String::from("app")),
+                site: Some(String::from("us5.datadoghq.com")),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let s = core::str::from_utf8(&snippet).unwrap();
+        assert!(
+            s.contains("datadoghq-browser-agent.com/us5/v5/datadog-rum.js"),
+            "expected us5 region in CDN URL"
+        );
+        assert!(
+            s.contains(r#""site":"us5.datadoghq.com""#),
+            "expected site in init config"
+        );
+    }
+
+    #[cfg(feature = "support_gov_domain")]
+    #[test]
+    fn test_format_cdn_url_gov() {
+        // US1-FED uses a flat URL without region prefix (per browser-sdk README)
         assert_eq!(
             format_cdn_url(5, "ddog-gov.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/datadog-rum-v5.js"
+        );
+        assert_eq!(
+            format_cdn_url(6, "ddog-gov.com").unwrap(),
+            "https://www.datadoghq-browser-agent.com/datadog-rum-v6.js"
+        );
+        assert_eq!(
+            format_cdn_url(5, "ddog-gov.mil").unwrap(),
             "https://www.datadoghq-browser-agent.com/datadog-rum-v5.js"
         );
     }

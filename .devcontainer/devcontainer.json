@@ -1,0 +1,10 @@
+{
+  "name": "inject-browser-sdk",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "..",
+    "options": ["--build-context", "repo=."]
+  },
+  "workspaceFolder": "/src",
+  "remoteUser": "dog"
+}

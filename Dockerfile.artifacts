@@ -1,0 +1,52 @@
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache 2.0 License. This product includes software developed at
+# Datadog (https://www.datadoghq.com/).
+#
+# Copyright 2024-Present Datadog, Inc.
+
+# Self-contained builder for FFI artifacts - no external toolchain dependencies
+FROM rust:1.94-slim-bookworm AS builder
+
+ARG TARGETARCH
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    musl-tools \
+    gcc \
+    libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install cbindgen for C header generation
+RUN cargo install --locked cbindgen --version 0.26.0
+
+# Add targets for compilation
+RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
+    x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+
+# Copy source
+COPY . /src
+WORKDIR /src
+
+# Build artifacts for target platform
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        MUSL_TARGET="aarch64-unknown-linux-musl"; \
+        GNU_TARGET="aarch64-unknown-linux-gnu"; \
+    else \
+        MUSL_TARGET="x86_64-unknown-linux-musl"; \
+        GNU_TARGET="x86_64-unknown-linux-gnu"; \
+    fi && \
+    # Build static library (musl) \
+    cargo build --release --no-default-features --features support_gov_domain -p inject-browser-sdk-ffi --target $MUSL_TARGET && \
+    # Build shared library (gnu/glibc) \
+    cargo build --release --no-default-features --features support_gov_domain -p inject-browser-sdk-ffi --target $GNU_TARGET && \
+    # Collect artifacts \
+    mkdir -p /out && \
+    cp /src/target/$MUSL_TARGET/release/libinject_browser_sdk_ffi.a /out/libinjectbrowsersdk.a && \
+    cp /src/target/$GNU_TARGET/release/libinject_browser_sdk_ffi.so /out/libinjectbrowsersdk.so && \
+    cbindgen --config injector_IIS/cbindgen.toml \
+        --crate inject-browser-sdk-ffi \
+        --output /out/injectbrowsersdk.h
+
+# Export artifacts only
+FROM scratch AS artifacts
+COPY --from=builder /out/ /

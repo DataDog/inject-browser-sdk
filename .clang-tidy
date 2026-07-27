@@ -1,0 +1,27 @@
+Checks: >
+  -*,
+  bugprone-*,
+  cppcoreguidelines-init-variables,
+  misc-const-correctness,
+  misc-unused-using-decls,
+  modernize-make-shared,
+  modernize-make-unique,
+  modernize-return-braced-init-list,
+  modernize-use-auto,
+  modernize-use-emplace,
+  modernize-use-nullptr,
+  modernize-use-override,
+  performance-for-range-copy,
+  performance-move-const-arg,
+  performance-no-automatic-move,
+  performance-unnecessary-copy-initialization,
+  performance-unnecessary-value-param,
+  readability-avoid-return-with-void-value,
+  readability-container-size-empty,
+  readability-else-after-return,
+  readability-qualified-auto,
+  readability-redundant-smartptr-get,
+  readability-simplify-boolean-expr,
+
+WarningsAsErrors: ''
+HeaderFilterRegex: 'injector_IIS/src/.*'

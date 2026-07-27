@@ -24,12 +24,12 @@
 //! This library has two mains concepts:
 //!
 //! * [`Snippet`], created by [`snippet_create_from_json`] by providing a configuration
-//! formatted as JSON. `Snippet` are generally created once at the start of the process. Multiple
-//! instances can be created if multiple configuration are being used.
+//!   formatted as JSON. `Snippet` are generally created once at the start of the process. Multiple
+//!   instances can be created if multiple configuration are being used.
 //!
 //! * [`Injector`], created by [`injector_create`] by providing a `Snippet` instance. One
-//! [Injector] instance is usually created for each HTTP response where we want to inject the
-//! snippet.
+//!   [Injector] instance is usually created for each HTTP response where we want to inject the
+//!   snippet.
 //!
 //! A typical usage of this library consists in the following steps:
 //!
@@ -77,10 +77,55 @@
 //!
 //!
 
-#![warn(missing_docs)]
 #![allow(deprecated)] // allow internal usage of deprecated things
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+mod no_std_support {
+    #[cfg(target_os = "linux")]
+    #[global_allocator]
+    static ALLOC: rustix_dlmalloc::GlobalDlmalloc = rustix_dlmalloc::GlobalDlmalloc;
+
+    #[cfg(not(target_os = "linux"))]
+    #[global_allocator]
+    static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[panic_handler]
+    fn panic(info: &core::panic::PanicInfo) -> ! {
+        unsafe {
+            let _ = rustix::io::write(
+                rustix::stdio::stderr(),
+                alloc::format!("Panic: {}\n", info).as_bytes(),
+            );
+        }
+        loop {}
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[panic_handler]
+    fn panic(_info: &core::panic::PanicInfo) -> ! {
+        loop {}
+    }
+
+    #[cfg(not(test))]
+    #[no_mangle]
+    pub extern "C" fn rust_eh_personality() {}
+}
+
 mod injector;
 mod snippet;
+mod stable_config;
 
 pub use injector::*;
 pub use snippet::*;
+pub use stable_config::*;
+
+#[cfg(test)]
+pub(crate) mod test_utils {
+    pub fn cstr_ptr(bytes: &[u8]) -> *const i8 {
+        return bytes.as_ptr() as *const i8;
+    }
+}

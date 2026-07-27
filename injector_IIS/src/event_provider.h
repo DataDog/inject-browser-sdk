@@ -1,6 +1,7 @@
- // Define events consumed by the event viewer <https://learn.microsoft.com/en-us/windows/win32/eventlog/reporting-an-event>.
- // Header
- // Categories
+// Define events consumed by the event viewer
+// <https://learn.microsoft.com/en-us/windows/win32/eventlog/reporting-an-event>.
+// Header
+// Categories
 //
 //  Values are 32 bit values laid out as follows:
 //
@@ -31,11 +32,9 @@
 // Define the facility codes
 //
 
-
 //
 // Define the severity codes
 //
-
 
 //
 // MessageId: INJECTOR_CATEGORY
@@ -44,7 +43,7 @@
 //
 // Injection Events
 //
-#define INJECTOR_CATEGORY                ((WORD)0x00000001L)
+#define INJECTOR_CATEGORY ((WORD)0x00000001L)
 
 //
 // MessageId: TRACER_CATEGORY
@@ -53,9 +52,9 @@
 //
 // Tracer Events
 //
-#define TRACER_CATEGORY                  ((WORD)0x00000002L)
+#define TRACER_CATEGORY ((WORD)0x00000002L)
 
- // Messages
+// Messages
 //
 // MessageId: MSG_GENERIC_INFO
 //
@@ -63,7 +62,7 @@
 //
 // %1
 //
-#define MSG_GENERIC_INFO                 ((DWORD)0x40000100L)
+#define MSG_GENERIC_INFO ((DWORD)0x40000100L)
 
 //
 // MessageId: MSG_GENERIC_ERROR
@@ -72,7 +71,7 @@
 //
 // %1
 //
-#define MSG_GENERIC_ERROR                ((DWORD)0xC0000101L)
+#define MSG_GENERIC_ERROR ((DWORD)0xC0000101L)
 
 //
 // MessageId: MSG_GENERIC_DEBUG
@@ -81,5 +80,4 @@
 //
 // debug: %1
 //
-#define MSG_GENERIC_DEBUG                ((DWORD)0x40000102L)
-
+#define MSG_GENERIC_DEBUG ((DWORD)0x40000102L)

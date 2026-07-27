@@ -11,7 +11,11 @@ This script automates the release process for the installer.
 Usage:
 ======
 To release the installer:
-./release.py --ci-token <CI_TOKEN> --gitlab-token <GITLAB_TOKEN> --version-tag installer-0.1.3 <CI_RELEASE_WORKFLOW_ID>
+./installer-release.py --github-token <GH_TOKEN> --gitlab-token <GITLAB_TOKEN> --version-tag installer-0.1.3 <GH_ACTIONS_RUN_ID>
+
+The run id is the GitHub Actions workflow run that produced the installer
+artifacts (the `installer` workflow). Find it in the run URL, e.g.
+https://github.com/DataDog/inject-browser-sdk/actions/runs/<RUN_ID>.
 """
 
 import re
@@ -27,8 +31,11 @@ import sys
 import tempfile
 import urllib.request
 import tarfile
+import zipfile
 
 project_id = "DataDog%2Finject-browser-sdk" # DataDog/inject-browser-sdk
+gh_repo = "DataDog/inject-browser-sdk"
+gh_api_url = "https://api.github.com"
 
 class VerboseDict(dict):
     """This makes debugging a little easier."""
@@ -67,80 +74,85 @@ def run(command, *args, **kwargs):
     print("+", shlex.join(command), file=sys.stderr)
     return subprocess.run(command, *args, **kwargs)
 
-def send_ci_request(path, payload=None, method=None):
-    headers = {"Circle-Token": ci_api_token}
-    if payload is not None:
-        headers["Content-Type"] = "application/json; charset=utf-8"
-        payload = json.dumps(payload).encode("utf8")
-
-    API_URL = "https://circleci.com/api/v2"
-    url = f"{API_URL}{path}"
-    request = urllib.request.Request(url,
-                                     data=payload,
-                                     headers=headers,
-                                     method=method)
-    print("+", request.get_method(), request.full_url, request.data or "")
-
+def gh_request(url, method="GET", accept="application/vnd.github+json"):
+    if not url.startswith("http"):
+        url = f"{gh_api_url}{url}"
+    request = urllib.request.Request(
+        url,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {github_token}",
+            "Accept": accept,
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "inject-browser-sdk-release-script",
+        },
+    )
+    print("+", request.get_method(), request.full_url)
     try:
-        response = urllib.request.urlopen(request)
-        status = response.status
+        return urllib.request.urlopen(request)
     except urllib.error.HTTPError as error:
-        response = error
-        status = error.code
+        body = error.read().decode("utf-8", errors="replace")
+        rate_remaining = error.headers.get("X-RateLimit-Remaining")
+        rate_reset = error.headers.get("X-RateLimit-Reset")
+        raise Exception(
+            f"GitHub API {method} {url} failed: HTTP {error.code} {error.reason}. "
+            f"Body: {body}. "
+            f"RateLimit-Remaining={rate_remaining} Reset={rate_reset}."
+        ) from error
 
-    try:
-        response_body = json.load(response, object_hook=VerboseDict)
-    except Exception as error:
-        print(
-            f"Unable to parse response body from response with status {status}."
+
+def gh_request_json(url):
+    response = gh_request(url)
+    return response, json.load(response, object_hook=VerboseDict)
+
+
+def list_run_artifacts(run_id: str):
+    artifacts = []
+    url = f"/repos/{gh_repo}/actions/runs/{run_id}/artifacts?per_page=100"
+    while url:
+        response, body = gh_request_json(url)
+        artifacts.extend(body["artifacts"])
+        link = response.headers.get("Link", "")
+        next_match = re.search(r'<([^>]+)>;\s*rel="next"', link)
+        url = next_match.group(1) if next_match else None
+    return artifacts
+
+
+def verify_run_successful(run_id: str):
+    _, run = gh_request_json(f"/repos/{gh_repo}/actions/runs/{run_id}")
+    if run["status"] != "completed" or run["conclusion"] != "success":
+        raise Exception(
+            f'Run {run_id} must have status=completed and conclusion=success '
+            f'(got status={run["status"]}, conclusion={run["conclusion"]}).'
         )
-        raise
-
-    if status < 200 or status > 299:
-        raise Exception(f"HTTP error response {status}: {response_body}")
-
-    return status, response_body
 
 
-def send_ci_request_paged(path, payload=None, method=None):
-    items = []
-    query = ""
-    while True:
-        _, response = send_ci_request(f"{path}{query}",
-                                      payload=payload,
-                                      method=method)
-        items += response["items"]
+def download_artifact(artifact, destination_dir: Path):
+    """Download and extract a GitHub Actions artifact zip into destination_dir.
 
-        next_page = response.get("next_page_token")
-        if next_page is None:
-            break
-        query = f"?page-token={next_page}"
-
-    return items
-
-
-def get_workflow_jobs(workflow_id: str):
-    jobs = send_ci_request_paged(f"/workflow/{workflow_id}/job")
-
-    # Make sure all jobs run successfully
-    for job in jobs:
-        if job["status"] != "success":
-            print("Found unsuccessful jobs")
-            return None
-
-    return jobs
-
-
-def download_file(url, destination):
-    print(f"Downloading {url} to {destination}")
-
-    headers = {"Circle-Token": ci_api_token}
-    request = urllib.request.Request(url,
-                                     headers=headers)
-    response = urllib.request.urlopen(request)
-
-    with open(destination, "wb") as output:
+    Returns the list of files extracted. Rejects any zip member whose path
+    resolves outside destination_dir (zip-slip guard).
+    """
+    archive_url = artifact["archive_download_url"]
+    zip_path = destination_dir / f"{artifact['name']}.zip"
+    print(f"Downloading {archive_url} to {zip_path}")
+    with gh_request(archive_url) as response, open(zip_path, "wb") as output:
         shutil.copyfileobj(response, output)
+
+    dest_root = destination_dir.resolve()
+    extracted = []
+    with zipfile.ZipFile(zip_path) as archive:
+        for member in archive.namelist():
+            target = (destination_dir / member).resolve()
+            if dest_root not in target.parents and target != dest_root:
+                raise Exception(
+                    f"Refusing to extract {member!r} from artifact "
+                    f"'{artifact['name']}': path escapes {dest_root}."
+                )
+            archive.extract(member, destination_dir)
+            extracted.append(destination_dir / member)
+    zip_path.unlink()
+    return extracted
 
 
 def package(files, out):
@@ -228,35 +240,25 @@ def create_gitlab_release(version_tag: str, package_urls: set):
         raise Exception(f"Failed to create GitLab release: {response.read()}")
 
 
-def prepare_installer_release_artifact(work_dir, build_job_number, arch):
-    artifacts = send_ci_request_paged(
-        f"/project/gh/DataDog/inject-browser-sdk/{build_job_number}/artifacts")
-    module_url = None
-    script_url = None
-    for artifact in artifacts:
-        name = artifact["path"]
-        if name == "proxy-configurator":
-            module_url = artifact["url"]
-        elif name == "install-proxy-datadog.sh":
-            script_url = artifact["url"]
+def prepare_installer_release_artifact(work_dir: Path, arch: str,
+                                       module_artifact, script_artifact):
+    arch_dir = work_dir / arch
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    module_files = download_artifact(module_artifact, arch_dir)
+    script_files = download_artifact(script_artifact, work_dir)
 
-    if module_url is None:
+    module_path = next((f for f in module_files if f.name == "proxy-configurator"), None)
+    script_path = next((f for f in script_files if f.name == "install-proxy-datadog.sh"), None)
+
+    if module_path is None:
         raise Exception(
-            f"Job number {build_job_number} doesn't have a 'proxy-configurator' build artifact."
+            f"Artifact '{module_artifact['name']}' does not contain a 'proxy-configurator' file."
+        )
+    if script_path is None:
+        raise Exception(
+            f"Artifact '{script_artifact['name']}' does not contain an 'install-proxy-datadog.sh' file."
         )
 
-    if script_url is None:
-        raise Exception(
-            f"Job number {build_job_number} doesn't have an 'install-proxy-datadog.sh' build artifact."
-        )
-
-    module_path = work_dir / "proxy-configurator"
-    download_file(module_url, module_path)
-
-    script_path = work_dir / "install-proxy-datadog.sh"
-    download_file(script_url, script_path)
-
-    # Package and sign
     tarball_path = work_dir / f"proxy-configurator-{arch}.tgz"
     package(module_path, out=tarball_path)
     sign_package(tarball_path)
@@ -271,40 +273,49 @@ def release_installer(args) -> int:
     Requirements:
         - You must be logged into the GitHub CLI (gh) to authenticate and publish the release.
         - You must have a GitLab access token with appropriate permissions
+        - You must have a GitHub token with `actions:read` scope on DataDog/inject-browser-sdk
     """
-    jobs = get_workflow_jobs(args.workflow_id)
-    if not jobs:
-        return 1
+    verify_run_successful(args.run_id)
+    all_artifacts = list_run_artifacts(args.run_id)
+    artifacts_by_name = {a["name"]: a for a in all_artifacts}
 
     package_urls = []
-    with tempfile.TemporaryDirectory() as work_dir:
-        for job in jobs:
-            if job["name"].startswith("build installer "):
-                # name should be something like "build installer on arm64"
-                match = re.match(r"build installer on (amd64|arm64)",
-                                 job["name"])
-                if match is None:
-                    raise Exception(
-                        f'Job name does not match regex "{re}": {job}')
-                arch = match.groups()[0]
-                tar_path, script_path = prepare_installer_release_artifact(
-                    Path(work_dir), job["job_number"], arch)
+    with tempfile.TemporaryDirectory() as work_dir_str:
+        work_dir = Path(work_dir_str)
+        for arch in ("amd64", "arm64"):
+            module_name = f"proxy-configurator-{arch}"
+            script_name = f"install-proxy-datadog-{arch}"
+            if module_name not in artifacts_by_name:
+                raise Exception(
+                    f"Run {args.run_id} is missing expected artifact '{module_name}'."
+                )
+            if script_name not in artifacts_by_name:
+                raise Exception(
+                    f"Run {args.run_id} is missing expected artifact '{script_name}'."
+                )
 
-                download_url = upload_to_package_registry(str(tar_path), "proxy-configurator",
-                                                          args.version_tag)
-                package_urls.append(download_url)
+            tar_path, script_path = prepare_installer_release_artifact(
+                work_dir,
+                arch,
+                artifacts_by_name[module_name],
+                artifacts_by_name[script_name],
+            )
 
-                download_url = upload_to_package_registry(str(script_path), "proxy-configurator",
-                                                          args.version_tag)
-                package_urls.append(download_url)
+            download_url = upload_to_package_registry(str(tar_path), "proxy-configurator",
+                                                      args.version_tag)
+            package_urls.append(download_url)
 
-                sig_path = str(tar_path) + ".asc"
-                if not os.path.exists(sig_path):
-                    raise Exception(f'Could not find signature file "{sig_path}"')
+            download_url = upload_to_package_registry(str(script_path), "proxy-configurator",
+                                                      args.version_tag)
+            package_urls.append(download_url)
 
-                download_url = upload_to_package_registry(sig_path, "proxy-configurator",
-                                                          args.version_tag)
-                package_urls.append(download_url)
+            sig_path = str(tar_path) + ".asc"
+            if not os.path.exists(sig_path):
+                raise Exception(f'Could not find signature file "{sig_path}"')
+
+            download_url = upload_to_package_registry(sig_path, "proxy-configurator",
+                                                      args.version_tag)
+            package_urls.append(download_url)
 
         pubkey_file = os.path.join(work_dir, "pubkey.gpg")
         run([gpg_exe, "--output", pubkey_file, "--armor", "--export"],
@@ -329,10 +340,10 @@ def release_installer(args) -> int:
             "--prerelease",
             "--draft",
             "--title",
-            options.version_tag,
+            args.version_tag,
             "--notes",
             "TODO",
-            options.version_tag,
+            args.version_tag,
             *release_files,
         ]
         run(command, check=True)
@@ -348,19 +359,23 @@ if __name__ == "__main__":
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--version-tag", )
-    parser.add_argument("--ci-token", help="Circle CI Token", required=True)
+    parser.add_argument(
+        "--github-token",
+        help="GitHub API token with actions:read scope (defaults to `gh auth token`)",
+        default=None,
+    )
     parser.add_argument("--gitlab-token", help="GitLab API Token", required=True)
     parser.add_argument(
-        "workflow_id",
+        "run_id",
         type=str,
         help=
-        "ID of the release workflow. Find in job url. Example: https://app.circleci.com/pipelines/github/DataDog/inject-browser-sdk/542/workflows/<WORKFLOW_ID>",
+        "ID of the GitHub Actions workflow run that produced the installer artifacts. "
+        "Example: https://github.com/DataDog/inject-browser-sdk/actions/runs/<RUN_ID>",
     )
 
     parser.set_defaults(func=release_installer)
     options = parser.parse_args()
 
-    ci_api_token = options.ci_token
     gitlab_token = options.gitlab_token
     try:
         gh_exe = get_gh()
@@ -369,10 +384,14 @@ if __name__ == "__main__":
         print(str(error), file=sys.stderr)
         sys.exit(1)
 
+    github_token = options.github_token
+    if github_token is None:
+        result = subprocess.run([gh_exe, "auth", "token"],
+                                capture_output=True, text=True, check=True)
+        github_token = result.stdout.strip()
+
     print({
         "gh": gh_exe,
-        "ci_token": ci_api_token,
-        "gitlab_token": gitlab_token,
         "gpg": gpg_exe,
     })
 

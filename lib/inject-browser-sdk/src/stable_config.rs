@@ -70,9 +70,12 @@ impl StableConfig {
         };
     }
 
-    /// Whether no stable-configuration entry matched this process.
+    /// Whether no supported RUM stable-configuration entry matched this process.
     pub fn is_empty(&self) -> bool {
-        return self.configs.is_empty();
+        return !self
+            .configs
+            .iter()
+            .any(|config| return crate::configuration::is_rum_configuration_key(&config.name));
     }
 
     /// Build a snippet from this configuration, with an optional overlay merged
@@ -95,14 +98,13 @@ impl StableConfig {
         // Resolve the host-side switch independently first. If it disables
         // injection, invalid or incomplete SDK options must not hide that
         // explicit opt-out from the host.
-        let disk_enabled = self
-            .lookup("DD_RUM_ENABLED")
-            .map(|raw| return parse_bool(raw, "DD_RUM_ENABLED"))
-            .transpose()?;
-        let enabled = overlay
-            .as_ref()
-            .and_then(|value| return value.enabled)
-            .or(disk_enabled);
+        let enabled = match overlay.as_ref().and_then(|value| return value.enabled) {
+            Some(enabled) => Some(enabled),
+            None => self
+                .lookup("DD_RUM_ENABLED")
+                .map(|raw| return parse_bool(raw, "DD_RUM_ENABLED"))
+                .transpose()?,
+        };
         if enabled == Some(false) {
             return Ok(self.disabled_snippet(overlay.as_ref(), enabled));
         }
@@ -133,10 +135,11 @@ fn empty_config_message(logs: &[String]) -> String {
 }
 
 fn stable_config_from_read(read: crate::platform::StableConfigRead) -> Result<StableConfig, Error> {
-    // The configurator can turn reader failures such as TooLarge into an
-    // Ok(empty) value. Preserve that failure here so reusable FFI handles do
-    // not misreport a broken file as ordinary absence.
-    if read.read_failed && read.configs.is_empty() {
+    // The configurator can turn a source failure such as TooLarge into Ok,
+    // possibly preserving entries from a lower-priority source. Reject the
+    // partial result because the unread source may contain an overriding
+    // opt-out or other RUM settings.
+    if read.read_failed {
         return Err(Error::StableConfig(empty_config_message(&read.logs)));
     }
     return Ok(StableConfig {
@@ -257,6 +260,16 @@ mod tests {
   DD_RUM_REMOTE_CONFIGURATION_ID: rc-disabled
 "#;
 
+    const INVALID_ENABLED_CONFIG: &[u8] = br#"apm_configuration_default:
+  DD_RUM_ENABLED: not-a-boolean
+  DD_RUM_APPLICATION_ID: app-enabled
+  DD_RUM_CLIENT_TOKEN: tok-enabled
+"#;
+
+    const UNRELATED_CONFIG: &[u8] = br#"apm_configuration_default:
+  DD_SERVICE: unrelated-service
+"#;
+
     struct ContentReader(Option<&'static [u8]>);
 
     impl ConfigRead for ContentReader {
@@ -360,6 +373,63 @@ mod tests {
         assert_eq!(snippet.enabled, Some(true));
     }
 
+    #[test]
+    fn overlay_enabled_wins_before_disk_value_is_parsed() {
+        for overlay_enabled in [false, true] {
+            let overlay = ConfigurationOverlay {
+                enabled: Some(overlay_enabled),
+                ..Default::default()
+            };
+            let snippet = snippet_from_stable_config_with_reader(
+                &ContentReader(Some(INVALID_ENABLED_CONFIG)),
+                "browser-sdk",
+                false,
+                Some(overlay),
+            )
+            .expect("the overlay should replace an invalid lower-priority disk value");
+
+            assert_eq!(snippet.enabled, Some(overlay_enabled));
+            assert_eq!(snippet.bytes.is_empty(), !overlay_enabled);
+        }
+    }
+
+    #[test]
+    fn unrelated_stable_configuration_is_empty_for_rum() {
+        let read = crate::platform::read_stable_configs_with_reader(
+            &ContentReader(Some(UNRELATED_CONFIG)),
+            "browser-sdk",
+            false,
+        )
+        .expect("the unrelated stable configuration should parse");
+        assert!(
+            !read.configs.is_empty(),
+            "the configurator should preserve the unrelated entry"
+        );
+
+        let config = stable_config_from_read(read).expect("the read itself should succeed");
+        assert!(config.is_empty());
+    }
+
+    struct LocalConfigFleetTooLargeReader;
+
+    impl ConfigRead for LocalConfigFleetTooLargeReader {
+        type IoError = core::convert::Infallible;
+
+        fn read(
+            &self,
+            path: &str,
+        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
+        {
+            if path == libdd_library_config::Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
+                return Ok(DISABLED_CONFIG.into());
+            }
+            if path == libdd_library_config::Configurator::FLEET_STABLE_CONFIGURATION_PATH {
+                return Err(libdd_library_config::ConfigReadError::TooLarge);
+            }
+            return Err(libdd_library_config::ConfigReadError::NotFound);
+        }
+    }
+
     struct CountingReader {
         reads: core::cell::Cell<usize>,
     }
@@ -449,6 +519,27 @@ mod tests {
         let error = match stable_config_from_read(read) {
             Err(error) => error,
             Ok(_) => panic!("a reusable handle must expose the reclassified read failure"),
+        };
+        assert_eq!(error.code(), 6);
+    }
+
+    #[test]
+    fn higher_priority_read_failure_rejects_lower_priority_entries() {
+        let read = crate::platform::read_stable_configs_with_reader(
+            &LocalConfigFleetTooLargeReader,
+            "browser-sdk",
+            false,
+        )
+        .expect("the configurator preserves entries from the readable source");
+        assert!(read.read_failed);
+        assert!(
+            !read.configs.is_empty(),
+            "the regression requires a partial result, not an empty one"
+        );
+
+        let error = match stable_config_from_read(read) {
+            Err(error) => error,
+            Ok(_) => panic!("a partial stable configuration must not be accepted"),
         };
         assert_eq!(error.code(), 6);
     }

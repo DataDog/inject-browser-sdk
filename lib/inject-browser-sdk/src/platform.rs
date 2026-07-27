@@ -122,6 +122,8 @@ pub struct StableConfigRead {
     pub logs: Vec<String>,
     /// Whether either configuration file existed.
     pub files_present: bool,
+    /// Whether an existing configuration file contained zero bytes.
+    pub empty_file_present: bool,
     /// Whether a read failed but the configurator returned an empty result.
     pub read_failed: bool,
 }
@@ -129,6 +131,7 @@ pub struct StableConfigRead {
 struct PresenceRecordingReader<'a, R> {
     inner: &'a R,
     present: Cell<bool>,
+    empty_file_present: Cell<bool>,
     read_failed: Cell<bool>,
 }
 
@@ -138,7 +141,12 @@ impl<R: ConfigRead> ConfigRead for PresenceRecordingReader<'_, R> {
     fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
         let outcome = self.inner.read(path);
         match &outcome {
-            Ok(_) => self.present.set(true),
+            Ok(bytes) => {
+                self.present.set(true);
+                if bytes.is_empty() {
+                    self.empty_file_present.set(true);
+                }
+            }
             Err(ConfigReadError::NotFound) => {}
             Err(_) => {
                 self.present.set(true);
@@ -175,6 +183,7 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
     let recording = PresenceRecordingReader {
         inner: reader,
         present: Cell::new(false),
+        empty_file_present: Cell::new(false),
         read_failed: Cell::new(false),
     };
     let logged_result =
@@ -196,6 +205,7 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
                 configs,
                 logs,
                 files_present: recording.present.get(),
+                empty_file_present: recording.empty_file_present.get(),
                 read_failed: recording.read_failed.get(),
             })
         }
@@ -289,6 +299,7 @@ rules:
             !read.files_present,
             "NotFound on both paths means no stable configuration is installed"
         );
+        assert!(!read.empty_file_present);
     }
 
     #[test]
@@ -300,6 +311,7 @@ rules:
             read.files_present,
             "a successful read proves the file exists even when it has zero bytes"
         );
+        assert!(read.empty_file_present);
         assert!(!read.read_failed);
     }
 

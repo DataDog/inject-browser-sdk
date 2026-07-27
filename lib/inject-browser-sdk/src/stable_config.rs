@@ -33,7 +33,7 @@ pub struct StableConfigSnippet {
 pub struct StableConfig {
     configs: Vec<LibraryConfig>,
     logs: Vec<String>,
-    files_present: bool,
+    empty_file_present: bool,
 }
 
 impl StableConfig {
@@ -89,7 +89,7 @@ impl StableConfig {
     ) -> Result<StableConfigSnippet, Error> {
         if self.is_empty() && overlay.is_none() {
             let message = empty_config_message(&self.logs);
-            if self.files_present {
+            if self.empty_file_present {
                 return Err(Error::StableConfig(message));
             }
             return Err(Error::StableConfigAbsent(message));
@@ -145,7 +145,7 @@ fn stable_config_from_read(read: crate::platform::StableConfigRead) -> Result<St
     return Ok(StableConfig {
         configs: read.configs,
         logs: read.logs,
-        files_present: read.files_present,
+        empty_file_present: read.empty_file_present,
     });
 }
 
@@ -408,6 +408,11 @@ mod tests {
 
         let config = stable_config_from_read(read).expect("the read itself should succeed");
         assert!(config.is_empty());
+
+        let error = config
+            .build_snippet(None)
+            .expect_err("unrelated stable configuration should be absent for RUM");
+        assert_eq!(error.code(), 10);
     }
 
     struct LocalConfigFleetTooLargeReader;
@@ -460,7 +465,7 @@ mod tests {
         let config = StableConfig {
             configs: read.configs,
             logs: read.logs,
-            files_present: read.files_present,
+            empty_file_present: read.empty_file_present,
         };
 
         for _ in 0..5 {

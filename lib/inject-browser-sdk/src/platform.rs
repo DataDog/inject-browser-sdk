@@ -116,26 +116,20 @@ pub use inner::{detect_process_info, write_stderr, PlatformConfigRead};
 /// Outcome of reading the stable-configuration files.
 #[cfg_attr(test, derive(Debug))]
 pub struct StableConfigRead {
-    /// Entries whose rules matched this process. Empty when the files are
-    /// absent, or present but matching nothing.
+    /// Entries whose rules matched this process.
     pub configs: Vec<LibraryConfig>,
-    /// Diagnostics captured by the configurator, surfaced even on the
-    /// `Ok(empty)` path — upstream reclassifies some failures (e.g. `TooLarge`)
-    /// into `Ok(StableConfig::default())` while pushing the reason into logs.
+    /// Diagnostics captured by the configurator.
     pub logs: Vec<String>,
-    /// Whether either file was actually there. Lets callers tell "no stable
-    /// configuration on this host", which is the ordinary case, from "a file is
-    /// there but yielded nothing", which is a problem worth reporting. The
-    /// configurator itself folds both into the same empty result.
+    /// Whether either configuration file existed.
     pub files_present: bool,
+    /// Whether a read failed but the configurator returned an empty result.
+    pub read_failed: bool,
 }
 
-/// Wraps a reader to record whether any configuration file was actually
-/// present. `NotFound` means absent; anything else -- content, oversized,
-/// an I/O error -- means a file is there, whether or not we could use it.
 struct PresenceRecordingReader<'a, R> {
     inner: &'a R,
     present: Cell<bool>,
+    read_failed: Cell<bool>,
 }
 
 impl<R: ConfigRead> ConfigRead for PresenceRecordingReader<'_, R> {
@@ -143,13 +137,13 @@ impl<R: ConfigRead> ConfigRead for PresenceRecordingReader<'_, R> {
 
     fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
         let outcome = self.inner.read(path);
-        let present = match &outcome {
-            Ok(bytes) => !bytes.is_empty(),
-            Err(ConfigReadError::NotFound) => false,
-            Err(_) => true,
-        };
-        if present {
-            self.present.set(true);
+        match &outcome {
+            Ok(_) => self.present.set(true),
+            Err(ConfigReadError::NotFound) => {}
+            Err(_) => {
+                self.present.set(true);
+                self.read_failed.set(true);
+            }
         }
         return outcome;
     }
@@ -181,6 +175,7 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
     let recording = PresenceRecordingReader {
         inner: reader,
         present: Cell::new(false),
+        read_failed: Cell::new(false),
     };
     let logged_result =
         configurator.get_config_from_reader(&recording, local_path, fleet_path, &process_info);
@@ -201,6 +196,7 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
                 configs,
                 logs,
                 files_present: recording.present.get(),
+                read_failed: recording.read_failed.get(),
             })
         }
         Err(err) => {
@@ -244,6 +240,16 @@ pub(crate) mod tests {
         }
     }
 
+    struct EmptyReader;
+
+    impl ConfigRead for EmptyReader {
+        type IoError = core::convert::Infallible;
+
+        fn read(&self, _path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
+            return Ok(Vec::new());
+        }
+    }
+
     /// Serves a DD_RUM_* rule for language=browser-sdk as the local config
     /// and returns NotFound for the fleet config. Used to verify that a
     /// realistic YAML document flows end-to-end through the configurator
@@ -283,6 +289,18 @@ rules:
             !read.files_present,
             "NotFound on both paths means no stable configuration is installed"
         );
+    }
+
+    #[test]
+    fn empty_existing_files_are_present() {
+        let read = read_stable_configs_with_reader(&EmptyReader, "browser-sdk", false)
+            .expect("empty files should produce an empty configuration");
+        assert!(read.configs.is_empty());
+        assert!(
+            read.files_present,
+            "a successful read proves the file exists even when it has zero bytes"
+        );
+        assert!(!read.read_failed);
     }
 
     #[test]

@@ -18,13 +18,6 @@ use serde_json::Value;
 #[allow(missing_docs)]
 pub struct Configuration {
     pub major_version: u32,
-    /// Whether the host should inject at all. Set from `DD_RUM_ENABLED`, which
-    /// is a host-side switch rather than a Browser SDK init option, so it is
-    /// deliberately not part of [`Configuration::rum`] and never reaches the
-    /// generated `DD_RUM.init({...})` JSON. `None` means "not configured";
-    /// hosts decide their own default.
-    #[serde(default)]
-    pub enabled: Option<bool>,
     pub rum: RumConfiguration,
 }
 
@@ -296,16 +289,6 @@ const DD_FIELDS: &[(&str, Setter)] = &[
         c.rum.remote_configuration_id = Some(r.into());
         return Ok(());
     }),
-    // Host-side injection switch, not a Browser SDK init option: it lands on
-    // `Configuration::enabled` and is reported back to the host rather than
-    // serialized into the snippet. Without it, a fleet-managed
-    // `DD_RUM_ENABLED: false` would be silently ignored while the RUM data keys
-    // beside it still produced a snippet -- i.e. no way to turn RUM off from
-    // stable configuration.
-    ("DD_RUM_ENABLED", |c, r| {
-        c.enabled = Some(parse_bool(r, "DD_RUM_ENABLED")?);
-        return Ok(());
-    }),
 ];
 
 impl Configuration {
@@ -317,7 +300,6 @@ impl Configuration {
     pub fn from_lookup<'a>(lookup: impl Fn(&str) -> Option<&'a str>) -> Result<Self, Error> {
         let mut cfg = Configuration {
             major_version: 5,
-            enabled: None,
             rum: RumConfiguration::default(),
         };
         for &(name, setter) in DD_FIELDS {
@@ -335,12 +317,10 @@ impl Configuration {
     /// untouched. Entries in `overlay.rum.other` are merged key-by-key into
     /// `self.rum.other`, with overlay values winning on conflicts. If
     /// `overlay.major_version` is `Some`, it replaces `self.major_version`.
-    /// Likewise for `overlay.enabled`.
     pub fn overlay(&mut self, overlay: ConfigurationOverlay) {
         if let Some(v) = overlay.major_version {
             self.major_version = v;
         }
-        overlay_field(&mut self.enabled, overlay.enabled);
         self.rum.merge(overlay.rum);
     }
 
@@ -464,7 +444,6 @@ mod test {
             TestCase {
                 input: Configuration {
                     major_version: 6,
-                    enabled: None,
                     rum: RumConfiguration {
                         application_id: Some(String::new()),
                         client_token: Some(String::from("foo")),
@@ -476,7 +455,6 @@ mod test {
             TestCase {
                 input: Configuration {
                     major_version: 5,
-                    enabled: None,
                     rum: RumConfiguration {
                         application_id: Some(String::from("bar")),
                         client_token: Some(String::new()),
@@ -488,7 +466,6 @@ mod test {
             TestCase {
                 input: Configuration {
                     major_version: 5,
-                    enabled: None,
                     rum: RumConfiguration {
                         application_id: Some(String::from("bar")),
                         client_token: Some(String::from("foo")),
@@ -501,7 +478,6 @@ mod test {
             TestCase {
                 input: Configuration {
                     major_version: 5,
-                    enabled: None,
                     rum: RumConfiguration {
                         application_id: Some(String::from("bar")),
                         client_token: Some(String::from("foo")),
@@ -514,7 +490,6 @@ mod test {
             TestCase {
                 input: Configuration {
                     major_version: 5,
-                    enabled: None,
                     rum: RumConfiguration {
                         application_id: Some(String::from("bar")),
                         client_token: Some(String::from("foo")),
@@ -527,7 +502,6 @@ mod test {
             TestCase {
                 input: Configuration {
                     major_version: 4,
-                    enabled: None,
                     rum: RumConfiguration::default(),
                 },
                 expected: Error::UnsupportedMajorVersion(4),
@@ -535,7 +509,6 @@ mod test {
             TestCase {
                 input: Configuration {
                     major_version: 5,
-                    enabled: None,
                     rum: RumConfiguration {
                         application_id: Some(String::from("bar")),
                         client_token: Some(String::from("foo")),
@@ -735,7 +708,6 @@ mod test {
     fn overlay_replaces_set_fields_and_preserves_others() {
         let mut config = Configuration {
             major_version: 5,
-            enabled: None,
             rum: RumConfiguration {
                 application_id: Some(String::from("app-base")),
                 client_token: Some(String::from("tok-base")),
@@ -760,7 +732,6 @@ mod test {
     fn overlay_merges_other_map() {
         let mut config = Configuration {
             major_version: 5,
-            enabled: None,
             rum: RumConfiguration {
                 application_id: Some(String::from("app")),
                 client_token: Some(String::from("tok")),
@@ -788,7 +759,6 @@ mod test {
     fn overlay_empty_is_noop() {
         let mut config = Configuration {
             major_version: 5,
-            enabled: None,
             rum: RumConfiguration {
                 application_id: Some(String::from("app")),
                 ..Default::default()
@@ -807,7 +777,6 @@ mod test {
         // leaves the base value intact rather than clearing it.
         let mut config = Configuration {
             major_version: 5,
-            enabled: None,
             rum: RumConfiguration {
                 application_id: Some(String::from("app-base")),
                 client_token: Some(String::from("tok-base")),

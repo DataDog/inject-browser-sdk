@@ -7,7 +7,7 @@
 use alloc::string::String;
 use core::fmt;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     Json(String),
     UnsupportedMajorVersion(u32),

@@ -11,20 +11,14 @@ use alloc::vec::Vec;
 use libdd_library_config::ConfigRead;
 use libdd_library_config::LibraryConfig;
 
-use crate::configuration::{Configuration, ConfigurationOverlay};
+use crate::configuration::{parse_bool, Configuration, ConfigurationOverlay};
 use crate::error::Error;
 use crate::generate_snippet;
 
-/// A snippet plus the host-relevant values resolved alongside it.
-///
-/// The generated JavaScript is only half of what a host needs: it also has to
-/// know whether injection is switched on, and which application the snippet
-/// belongs to so its own telemetry can be tagged. Those values live in the
-/// configuration the snippet was built from, and returning them here is what
-/// keeps hosts from having to re-read `application_monitoring.yaml` themselves.
+/// A generated snippet and its resolved host-side values.
 #[cfg_attr(test, derive(Debug))]
 pub struct StableConfigSnippet {
-    /// The generated Browser SDK snippet.
+    /// The generated Browser SDK snippet, empty when injection is disabled.
     pub bytes: Vec<u8>,
     /// Resolved `DD_RUM_ENABLED`, or `None` when nothing configured it. Hosts
     /// own the default for `None`.
@@ -35,13 +29,7 @@ pub struct StableConfigSnippet {
     pub remote_configuration_id: Option<String>,
 }
 
-/// Stable configuration read from disk, parsed once and reusable.
-///
-/// Reading is the expensive part -- two files off disk, YAML parsed, rules
-/// matched -- and it does not depend on any overlay. Hosts that build several
-/// snippets per configuration load (one per virtual host, say) read once into
-/// this and then call [`StableConfig::build_snippet`] per overlay, instead of
-/// paying for the files again each time.
+/// Stable configuration read from disk once and reusable across overlays.
 pub struct StableConfig {
     configs: Vec<LibraryConfig>,
     logs: Vec<String>,
@@ -49,9 +37,40 @@ pub struct StableConfig {
 }
 
 impl StableConfig {
-    /// Whether any stable-configuration entry matched this process. False means
-    /// the files were absent or none of their rules matched -- the ordinary case
-    /// for anyone not using stable configuration.
+    fn lookup(&self, key: &str) -> Option<&str> {
+        return self
+            .configs
+            .iter()
+            .find(|config| return config.name == key)
+            .map(|config| return config.value.as_str());
+    }
+
+    fn disabled_snippet(
+        &self,
+        overlay: Option<&ConfigurationOverlay>,
+        enabled: Option<bool>,
+    ) -> StableConfigSnippet {
+        let application_id = overlay
+            .and_then(|value| return value.rum.application_id.clone())
+            .or_else(|| {
+                return self.lookup("DD_RUM_APPLICATION_ID").map(String::from);
+            });
+        let remote_configuration_id = overlay
+            .and_then(|value| return value.rum.remote_configuration_id.clone())
+            .or_else(|| {
+                return self
+                    .lookup("DD_RUM_REMOTE_CONFIGURATION_ID")
+                    .map(String::from);
+            });
+        return StableConfigSnippet {
+            bytes: Vec::new(),
+            enabled,
+            application_id,
+            remote_configuration_id,
+        };
+    }
+
+    /// Whether no stable-configuration entry matched this process.
     pub fn is_empty(&self) -> bool {
         return self.configs.is_empty();
     }
@@ -65,39 +84,30 @@ impl StableConfig {
         &self,
         overlay: Option<ConfigurationOverlay>,
     ) -> Result<StableConfigSnippet, Error> {
-        // Distinguish "no config source at all" from "config source present but
-        // missing required fields". Without this, the caller gets code 5
-        // ("mandatory field 'applicationId' is empty") and spends time
-        // troubleshooting file contents when the real issue is that no files
-        // matched or existed.
         if self.is_empty() && overlay.is_none() {
-            // Surface any diagnostics captured on the Ok(empty) path (e.g. a
-            // file reclassified as TooLarge by the configurator) so Windows
-            // callers, who never see stderr, still get the full context.
-            let base = "no stable-config entries found; \
-                 expected DD_RUM_* keys in application_monitoring.yaml \
-                 (local or fleet-managed) or an overlay";
-            let message = if self.logs.is_empty() {
-                String::from(base)
-            } else {
-                alloc::format!("{base}\n{}", self.logs.join("\n"))
-            };
-            // A file that was there but yielded nothing (unreadable, oversized,
-            // or matching no rule) is a real problem and keeps code 6, so hosts
-            // that stay quiet about absent stable configuration still report it.
+            let message = empty_config_message(&self.logs);
             if self.files_present {
                 return Err(Error::StableConfig(message));
             }
             return Err(Error::StableConfigAbsent(message));
         }
 
-        let mut config = Configuration::from_lookup(|key| {
-            return self
-                .configs
-                .iter()
-                .find(|c| return c.name == key)
-                .map(|c| return c.value.as_str());
-        })?;
+        // Resolve the host-side switch independently first. If it disables
+        // injection, invalid or incomplete SDK options must not hide that
+        // explicit opt-out from the host.
+        let disk_enabled = self
+            .lookup("DD_RUM_ENABLED")
+            .map(|raw| return parse_bool(raw, "DD_RUM_ENABLED"))
+            .transpose()?;
+        let enabled = overlay
+            .as_ref()
+            .and_then(|value| return value.enabled)
+            .or(disk_enabled);
+        if enabled == Some(false) {
+            return Ok(self.disabled_snippet(overlay.as_ref(), enabled));
+        }
+
+        let mut config = Configuration::from_lookup(|key| return self.lookup(key))?;
 
         if let Some(o) = overlay {
             config.overlay(o);
@@ -105,35 +115,43 @@ impl StableConfig {
 
         return Ok(StableConfigSnippet {
             bytes: generate_snippet(&config)?,
-            enabled: config.enabled,
+            enabled,
             application_id: config.rum.application_id.clone(),
             remote_configuration_id: config.rum.remote_configuration_id.clone(),
         });
     }
 }
 
-/// Read the Datadog Agent's `application_monitoring.yaml` files (local and
-/// fleet-managed) once, using the `DD_RUM_*` key set.
-///
-/// The `language` parameter identifies the current process's language (e.g.
-/// `"browser-sdk"`) and is used for rule-based process matching in the
-/// configuration files.
-///
-/// When `debug_logs` is `true`, diagnostic messages are written to stderr on
-/// Unix. On Windows stderr is a no-op (see [`crate::platform::write_stderr`]);
-/// diagnostics are folded into error messages so they survive.
-///
-/// Absent files are *not* an error here -- the result is simply empty, and
-/// [`StableConfig::build_snippet`] reports [`Error::StableConfigAbsent`] if
-/// asked to build from nothing. Only a failed read or parse errors.
-pub fn read_stable_config(language: &str, debug_logs: bool) -> Result<StableConfig, Error> {
-    let read =
-        crate::platform::read_stable_configs(language, debug_logs).map_err(Error::StableConfig)?;
+fn empty_config_message(logs: &[String]) -> String {
+    let base = "no stable-config entries found; \
+         expected DD_RUM_* keys in application_monitoring.yaml \
+         (local or fleet-managed) or an overlay";
+    if logs.is_empty() {
+        return String::from(base);
+    }
+    return alloc::format!("{base}\n{}", logs.join("\n"));
+}
+
+fn stable_config_from_read(read: crate::platform::StableConfigRead) -> Result<StableConfig, Error> {
+    // The configurator can turn reader failures such as TooLarge into an
+    // Ok(empty) value. Preserve that failure here so reusable FFI handles do
+    // not misreport a broken file as ordinary absence.
+    if read.read_failed && read.configs.is_empty() {
+        return Err(Error::StableConfig(empty_config_message(&read.logs)));
+    }
     return Ok(StableConfig {
         configs: read.configs,
         logs: read.logs,
         files_present: read.files_present,
     });
+}
+
+/// Read and parse the local and fleet-managed stable configuration once.
+/// Missing files return an empty [`StableConfig`].
+pub fn read_stable_config(language: &str, debug_logs: bool) -> Result<StableConfig, Error> {
+    let read =
+        crate::platform::read_stable_configs(language, debug_logs).map_err(Error::StableConfig)?;
+    return stable_config_from_read(read);
 }
 
 /// Build a snippet from Datadog stable configuration files, with an optional overlay.
@@ -162,12 +180,7 @@ pub(crate) fn snippet_from_stable_config_with_reader<R: ConfigRead>(
 ) -> Result<StableConfigSnippet, Error> {
     let read = crate::platform::read_stable_configs_with_reader(reader, language, debug_logs)
         .map_err(Error::StableConfig)?;
-    return StableConfig {
-        configs: read.configs,
-        logs: read.logs,
-        files_present: read.files_present,
-    }
-    .build_snippet(overlay);
+    return stable_config_from_read(read)?.build_snippet(overlay);
 }
 
 #[cfg(test)]
@@ -237,14 +250,16 @@ mod tests {
         }
     }
 
-    /// Reader serving stable config that turns RUM off while still carrying the
-    /// RUM data keys. The snippet still builds -- whether to inject is the
-    /// host's call -- but `enabled` must come back `false` so the host can
-    /// honour it. Before `DD_RUM_ENABLED` was in the key table this was
-    /// indistinguishable from "not configured", so hosts injected anyway.
-    struct DisabledReader;
+    const DISABLED_CONFIG: &[u8] = br#"apm_configuration_default:
+  DD_RUM_ENABLED: false
+  DD_RUM_APPLICATION_ID: app-disabled
+  DD_RUM_CLIENT_TOKEN: tok-disabled
+  DD_RUM_REMOTE_CONFIGURATION_ID: rc-disabled
+"#;
 
-    impl ConfigRead for DisabledReader {
+    struct ContentReader(Option<&'static [u8]>);
+
+    impl ConfigRead for ContentReader {
         type IoError = core::convert::Infallible;
 
         fn read(
@@ -253,24 +268,23 @@ mod tests {
         ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
         {
             if path == libdd_library_config::Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
-                return Ok(alloc::vec::Vec::from(
-                    &br#"apm_configuration_default:
-  DD_RUM_ENABLED: false
-  DD_RUM_APPLICATION_ID: app-disabled
-  DD_RUM_CLIENT_TOKEN: tok-disabled
-  DD_RUM_REMOTE_CONFIGURATION_ID: rc-disabled
-"#[..],
-                ));
+                if let Some(contents) = self.0 {
+                    return Ok(contents.into());
+                }
             }
-            return Ok(alloc::vec::Vec::new());
+            return Err(libdd_library_config::ConfigReadError::NotFound);
         }
     }
 
     #[test]
     fn stable_config_reports_enabled_false_and_ids() {
-        let snippet =
-            snippet_from_stable_config_with_reader(&DisabledReader, "browser-sdk", false, None)
-                .expect("snippet should still build; enabling is the host's decision");
+        let snippet = snippet_from_stable_config_with_reader(
+            &ContentReader(Some(DISABLED_CONFIG)),
+            "browser-sdk",
+            false,
+            None,
+        )
+        .expect("snippet should build");
 
         assert_eq!(snippet.enabled, Some(false));
         assert_eq!(
@@ -282,13 +296,51 @@ mod tests {
             snippet.remote_configuration_id.as_deref(),
             Some("rc-disabled")
         );
+        assert!(snippet.bytes.is_empty());
+    }
 
-        // The host-side switch must not leak into DD_RUM.init({...}).
-        let init = extract_init_json(&snippet.bytes);
-        assert!(
-            init.get("enabled").is_none(),
-            "enabled is a host switch, not a Browser SDK init option: {init}"
-        );
+    #[test]
+    fn disabled_config_skips_snippet_validation() {
+        for (contents, expected_remote_id) in [
+            (
+                &br#"apm_configuration_default:
+  DD_RUM_ENABLED: false
+  DD_RUM_REMOTE_CONFIGURATION_ID: rc-disabled
+"#[..],
+                Some("rc-disabled"),
+            ),
+            (
+                &br#"apm_configuration_default:
+  DD_RUM_ENABLED: false
+  DD_RUM_SESSION_SAMPLE_RATE: not-a-number
+"#[..],
+                None,
+            ),
+        ] {
+            let snippet = snippet_from_stable_config_with_reader(
+                &ContentReader(Some(contents)),
+                "browser-sdk",
+                false,
+                None,
+            )
+            .expect("disabled configuration should not validate SDK options");
+
+            assert_eq!(snippet.enabled, Some(false));
+            assert!(snippet.bytes.is_empty());
+            assert_eq!(
+                snippet.remote_configuration_id.as_deref(),
+                expected_remote_id
+            );
+        }
+    }
+
+    #[test]
+    fn empty_existing_config_is_not_reported_as_absent() {
+        let reader = ContentReader(Some(b""));
+        let error = snippet_from_stable_config_with_reader(&reader, "browser-sdk", false, None)
+            .expect_err("an existing empty file should be reported as unusable");
+
+        assert_eq!(error.code(), 6);
     }
 
     #[test]
@@ -298,7 +350,7 @@ mod tests {
             ..Default::default()
         };
         let snippet = snippet_from_stable_config_with_reader(
-            &DisabledReader,
+            &ContentReader(Some(DISABLED_CONFIG)),
             "browser-sdk",
             false,
             Some(overlay),
@@ -308,8 +360,6 @@ mod tests {
         assert_eq!(snippet.enabled, Some(true));
     }
 
-    /// Counts how many times the configuration files are actually read, so a
-    /// test can prove reuse rather than infer it.
     struct CountingReader {
         reads: core::cell::Cell<usize>,
     }
@@ -323,7 +373,7 @@ mod tests {
         ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
         {
             self.reads.set(self.reads.get() + 1);
-            return DisabledReader.read(path);
+            return ContentReader(Some(DISABLED_CONFIG)).read(path);
         }
     }
 
@@ -343,8 +393,6 @@ mod tests {
             files_present: read.files_present,
         };
 
-        // A host with several virtual hosts builds one snippet per overlay. None
-        // of them may touch the filesystem again.
         for _ in 0..5 {
             config
                 .build_snippet(Some(ConfigurationOverlay::default()))
@@ -358,26 +406,15 @@ mod tests {
         );
     }
 
-    /// Reader for a host with no stable configuration at all.
-    struct AbsentReader;
-
-    impl ConfigRead for AbsentReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(
-            &self,
-            _path: &str,
-        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
-        {
-            return Err(libdd_library_config::ConfigReadError::NotFound);
-        }
-    }
-
     #[test]
     fn absent_stable_config_is_distinct_from_a_broken_one() {
-        // Nothing on disk at all: code 10, so a host can stay quiet about it.
-        let err = snippet_from_stable_config_with_reader(&AbsentReader, "browser-sdk", false, None)
-            .expect_err("no entries and no overlay must error");
+        let err = snippet_from_stable_config_with_reader(
+            &ContentReader(None),
+            "browser-sdk",
+            false,
+            None,
+        )
+        .expect_err("no entries and no overlay must error");
         assert_eq!(
             err.code(),
             10,
@@ -390,9 +427,6 @@ mod tests {
         let err =
             snippet_from_stable_config_with_reader(&TooLargeReader, "browser-sdk", false, None)
                 .expect_err("TooLarge reclassified to empty + no overlay must error");
-        // Code 6, not the absent code 10: a file that was there but unusable is
-        // a real problem, and hosts that stay quiet about 10 must still report
-        // this one.
         assert_eq!(err.code(), 6);
         let msg = alloc::format!("{err}");
         assert!(
@@ -403,5 +437,19 @@ mod tests {
             msg.to_lowercase().contains("too large") || msg.contains("TooLarge"),
             "expected TooLarge diagnostic to be folded into error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn reclassified_read_failure_fails_before_creating_a_reusable_config() {
+        let read =
+            crate::platform::read_stable_configs_with_reader(&TooLargeReader, "browser-sdk", false)
+                .expect("the configurator reclassifies TooLarge as an empty result");
+        assert!(read.read_failed);
+
+        let error = match stable_config_from_read(read) {
+            Err(error) => error,
+            Ok(_) => panic!("a reusable handle must expose the reclassified read failure"),
+        };
+        assert_eq!(error.code(), 6);
     }
 }

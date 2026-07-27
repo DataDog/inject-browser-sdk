@@ -58,21 +58,12 @@ pub struct Snippet {
     pub error_message: *const c_char,
     /// The snippet bytes length.
     pub length: u32,
-    /// Resolved `DD_RUM_ENABLED`: [`RUM_ENABLED_UNSET`] when nothing configured
-    /// it, otherwise [`RUM_ENABLED_TRUE`] or [`RUM_ENABLED_FALSE`]. Hosts own
-    /// the default for `UNSET`; the point of reporting it is that a
-    /// fleet-managed `DD_RUM_ENABLED: false` has to be able to switch injection
-    /// off without the host re-reading the configuration files itself.
-    ///
-    /// Only ever set by the stable-config constructors; always
-    /// [`RUM_ENABLED_UNSET`] from [`snippet_create_from_json`].
+    /// Resolved `DD_RUM_ENABLED`, using the `RUM_ENABLED_*` constants below.
+    /// Plain JSON snippets always report [`RUM_ENABLED_UNSET`].
     pub rum_enabled: u8,
-    /// Resolved `applicationId`, or `NULL` when unset. Provided so hosts can tag
-    /// their own telemetry without parsing the snippet or the configuration
-    /// files. Valid until [`snippet_cleanup`].
+    /// Resolved `applicationId`, or `NULL` when unset.
     pub application_id: *const c_char,
-    /// Resolved `remoteConfigurationId`, or `NULL` when unset. Same lifetime as
-    /// [`Snippet::application_id`].
+    /// Resolved `remoteConfigurationId`, or `NULL` when unset.
     pub remote_configuration_id: *const c_char,
 }
 
@@ -97,14 +88,10 @@ pub(crate) struct SnippetInternal {
     // The following fields are kept internal, so they don't need to be FFI-safe and they can be
     // changed at any time without breaking change.
     pub inner: Result<Vec<u8>, CString>,
-    /// Backing storage for the `application_id` / `remote_configuration_id`
-    /// pointers above, kept alive for as long as the snippet is.
     pub owned_ids: [Option<CString>; 2],
 }
 
 impl SnippetInternal {
-    /// Wrap a plain snippet result. Reports no resolved stable-config values:
-    /// use [`SnippetInternal::new_from_stable_config`] when they are available.
     pub(crate) fn new(result: Result<Vec<u8>, Error>) -> Self {
         match result {
             Ok(content) => {
@@ -145,9 +132,6 @@ impl SnippetInternal {
         }
     }
 
-    /// Wrap a stable-config snippet result, carrying the values the host needs
-    /// alongside the snippet: whether `DD_RUM_ENABLED` said anything, and the
-    /// identifiers it should tag its own telemetry with.
     pub(crate) fn new_from_stable_config(result: Result<StableConfigSnippet, Error>) -> Self {
         let snippet = match result {
             Ok(snippet) => snippet,
@@ -169,10 +153,6 @@ impl SnippetInternal {
             Some(true) => RUM_ENABLED_TRUE,
             Some(false) => RUM_ENABLED_FALSE,
         };
-        // Take the pointers after `owned_ids` is in its final place: the
-        // CStrings' heap buffers do not move when the array is moved into
-        // `this`, but taking the pointers from the array we still own keeps that
-        // reasoning local.
         this.application_id = owned_ids[0].as_ref().map_or(null(), |s| return s.as_ptr());
         this.remote_configuration_id = owned_ids[1].as_ref().map_or(null(), |s| return s.as_ptr());
         this.owned_ids = owned_ids;
@@ -366,6 +346,20 @@ mod tests {
         let msg = core::str::from_utf8(msg_bytes).unwrap();
         assert!(!msg.contains('\0'), "NUL must be scrubbed before CString");
         assert!(msg.contains("before\\0after"), "got: {msg}");
+    }
+
+    #[test]
+    fn disabled_stable_config_without_bytes_surfaces_switch() {
+        let snippet = SnippetInternal::new_from_stable_config(Ok(StableConfigSnippet {
+            bytes: Vec::new(),
+            enabled: Some(false),
+            application_id: None,
+            remote_configuration_id: None,
+        }));
+
+        assert_eq!(snippet.error_code, 0);
+        assert_eq!(snippet.length, 0);
+        assert_eq!(snippet.rum_enabled, RUM_ENABLED_FALSE);
     }
 
     #[test]

@@ -14,7 +14,6 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     let conf: Configuration = Configuration {
         major_version: 5,
-        enabled: None,
         rum: RumConfiguration {
             application_id: Some("foo".into()),
             client_token: Some("bar".into()),

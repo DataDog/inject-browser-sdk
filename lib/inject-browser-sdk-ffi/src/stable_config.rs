@@ -4,10 +4,16 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
+use alloc::boxed::Box;
+use alloc::ffi::CString;
 use alloc::string::{String, ToString};
 use core::ffi::{c_char, CStr};
+use core::ptr::null;
 
-use inject_browser_sdk::{error::Error, parse_configuration_overlay, snippet_from_stable_config};
+use inject_browser_sdk::{
+    error::Error, parse_configuration_overlay, read_stable_config, snippet_from_stable_config,
+    ConfigurationOverlay, StableConfig as CoreStableConfig,
+};
 
 use crate::snippet::{Snippet, SnippetInternal};
 
@@ -55,9 +61,19 @@ fn cstr_to_str<'a>(cstr: &'a CStr, field: &str) -> Result<&'a str, Error> {
 /// Always returns a valid `Snippet` pointer. Check `error_code` for failures.
 /// See [`Snippet`] for the full error-code table. The codes most relevant to
 /// this call are `1` (malformed `json_overlay`, including unknown top-level
-/// keys), `6` (stable-config I/O or YAML parse failures), `7` (NULL
-/// `language`), and `8` (non-UTF-8 `language`). Overlay values that fail
-/// validation also produce codes `2`–`5`.
+/// keys), `6` (a stable-config file was there but could not be read or parsed),
+/// `10` (there was no stable configuration to build from — the ordinary case on
+/// a host not using it, and worth distinguishing from `6` so callers can stay
+/// quiet about it), `7` (NULL `language`), and `8` (non-UTF-8 `language`).
+/// Overlay values that fail validation also produce codes `2`–`5`.
+///
+/// # Resolved values
+///
+/// On success the returned snippet also reports [`Snippet::rum_enabled`],
+/// [`Snippet::application_id`] and [`Snippet::remote_configuration_id`], taken
+/// from the merged configuration. `rum_enabled` is how a fleet-managed
+/// `DD_RUM_ENABLED: false` reaches the host: the snippet still builds, and the
+/// host is expected not to inject it.
 ///
 /// # Memory ownership
 ///
@@ -113,7 +129,192 @@ pub unsafe extern "C" fn snippet_create_from_stable_config(
     };
 
     let result = snippet_from_stable_config(language_str, debug_logs, overlay);
-    return SnippetInternal::new(result).into_public_ptr();
+    return SnippetInternal::new_from_stable_config(result).into_public_ptr();
+}
+
+/// Stable configuration read from disk once, for building several snippets from.
+///
+/// Created by [`stable_config_read`] and freed with [`stable_config_cleanup`].
+/// See [`stable_config_snippet_create`] for why this exists.
+#[repr(C)]
+pub struct StableConfig {
+    /// The error code. `0` when the read succeeded. An absent
+    /// `application_monitoring.yaml` is *not* an error here — see
+    /// [`StableConfig::is_empty`].
+    pub error_code: u8,
+    /// The error message. `NULL` when the read succeeded.
+    pub error_message: *const c_char,
+    /// `true` when no configuration entry matched this process, i.e. the files
+    /// were absent or matched nothing. Hosts generally treat this as "stable
+    /// configuration is not in use here" and stay quiet about it.
+    pub is_empty: bool,
+}
+
+/// Mirrors [`StableConfig`]'s layout, with the non-FFI-safe payload appended.
+#[repr(C)]
+struct StableConfigInternal {
+    error_code: u8,
+    error_message: *const c_char,
+    is_empty: bool,
+    // Internal: not FFI-safe, may change without a breaking change.
+    inner: Result<CoreStableConfig, CString>,
+}
+
+impl StableConfigInternal {
+    fn new(result: Result<CoreStableConfig, Error>) -> Self {
+        match result {
+            Ok(config) => {
+                return Self {
+                    error_code: 0,
+                    error_message: null(),
+                    is_empty: config.is_empty(),
+                    inner: Ok(config),
+                }
+            }
+            Err(error) => {
+                // Same NUL-scrubbing rationale as SnippetInternal::new: error
+                // messages can embed user-controlled bytes, and panicking here
+                // would bring down the host web server.
+                let error_string = error.to_string().replace('\0', "\\0");
+                let error_message = CString::new(error_string).unwrap_or_else(|_| {
+                    return CString::new(
+                        "internal error: error message contained unrepresentable bytes",
+                    )
+                    .expect("static message has no NUL bytes");
+                });
+                return Self {
+                    error_code: error.code(),
+                    error_message: error_message.as_ptr(),
+                    is_empty: true,
+                    inner: Err(error_message),
+                };
+            }
+        }
+    }
+
+    fn into_public_ptr(self) -> *mut StableConfig {
+        return Box::into_raw(Box::new(self)) as *mut StableConfig;
+    }
+
+    unsafe fn from_public_ptr(config: *mut StableConfig) -> Box<Self> {
+        return Box::from_raw(config as *mut StableConfigInternal);
+    }
+
+    unsafe fn borrow_public_ptr(config: *const StableConfig) -> &'static Self {
+        return &*(config as *const StableConfigInternal);
+    }
+}
+
+/// Read the Datadog Agent's `application_monitoring.yaml` files (local and
+/// fleet-managed) once, for reuse across several
+/// [`stable_config_snippet_create`] calls.
+///
+/// [`snippet_create_from_stable_config`] reads both files on every call. A host
+/// that builds one snippet per virtual host would pay for that repeatedly during
+/// a single configuration load; reading once into a `StableConfig` and building
+/// from it does the I/O exactly once.
+///
+/// An absent `application_monitoring.yaml` is not an error: the returned handle
+/// simply has `is_empty == true`. Only a failed read or parse sets
+/// `error_code`.
+///
+/// # Error handling
+///
+/// Always returns a valid `StableConfig` pointer. Check `error_code` for
+/// failures. Codes `7` (NULL `language`) and `8` (non-UTF-8 `language`) come
+/// from the arguments; `6` means the files could not be read or parsed.
+///
+/// # Memory ownership
+///
+/// `language` is owned by the caller. The returned `StableConfig` must be freed
+/// with [`stable_config_cleanup`].
+///
+/// # Safety
+///
+/// If `language` is non-null, it must point to a valid NUL-terminated C string.
+/// NULL is tolerated and returns error code 7.
+#[no_mangle]
+pub unsafe extern "C" fn stable_config_read(
+    language: *const c_char,
+    debug_logs: bool,
+) -> *mut StableConfig {
+    if language.is_null() {
+        return StableConfigInternal::new(Err(Error::FfiNullPointer(String::from("language"))))
+            .into_public_ptr();
+    }
+
+    let language_cstr = CStr::from_ptr(language);
+    let language_str = match cstr_to_str(language_cstr, "language") {
+        Ok(s) => s,
+        Err(e) => return StableConfigInternal::new(Err(e)).into_public_ptr(),
+    };
+
+    return StableConfigInternal::new(read_stable_config(language_str, debug_logs))
+        .into_public_ptr();
+}
+
+/// Build a snippet from an already-read [`StableConfig`], with an optional JSON
+/// overlay. Does no file I/O.
+///
+/// Overlay semantics, error codes and the resolved values reported on the
+/// returned [`Snippet`] are identical to
+/// [`snippet_create_from_stable_config`]; only the source of the stable
+/// configuration differs.
+///
+/// # Memory ownership
+///
+/// `config` stays owned by the caller and may be reused for further calls. The
+/// returned `Snippet` must be freed with [`crate::snippet_cleanup`].
+///
+/// # Safety
+///
+/// - `config` must be a non-NULL pointer returned by [`stable_config_read`] and
+///   not yet passed to [`stable_config_cleanup`].
+/// - If `json_overlay` is non-null, it must point to a valid NUL-terminated C
+///   string.
+#[no_mangle]
+pub unsafe extern "C" fn stable_config_snippet_create(
+    config: *const StableConfig,
+    json_overlay: *const c_char,
+) -> *mut Snippet {
+    if config.is_null() {
+        return SnippetInternal::new(Err(Error::FfiNullPointer(String::from("config"))))
+            .into_public_ptr();
+    }
+
+    let overlay: Option<ConfigurationOverlay> = if json_overlay.is_null() {
+        None
+    } else {
+        match parse_configuration_overlay(CStr::from_ptr(json_overlay).to_bytes()) {
+            Ok(o) => Some(o),
+            Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
+        }
+    };
+
+    let internal = StableConfigInternal::borrow_public_ptr(config);
+    let result = match &internal.inner {
+        Ok(stable_config) => stable_config.build_snippet(overlay),
+        // The read failed; re-report that rather than silently building from
+        // nothing, which would look like an absent-configuration result.
+        Err(message) => Err(Error::StableConfig(message.to_string_lossy().into_owned())),
+    };
+    return SnippetInternal::new_from_stable_config(result).into_public_ptr();
+}
+
+/// Free a [`StableConfig`] created by [`stable_config_read`].
+///
+/// Snippets already built from it stay valid: they own their own data.
+///
+/// # Safety
+///
+/// `config` must be a pointer returned by [`stable_config_read`] and not
+/// already freed. NULL is tolerated and does nothing.
+#[no_mangle]
+pub unsafe extern "C" fn stable_config_cleanup(config: *mut StableConfig) {
+    if config.is_null() {
+        return;
+    }
+    drop(StableConfigInternal::from_public_ptr(config));
 }
 
 #[cfg(test)]
@@ -128,15 +329,16 @@ mod tests {
 
     #[test]
     fn no_files_no_overlay() {
-        // With no config files and no overlay, the error is now the
-        // descriptive "no stable-config entries found" (code 6) — not the
-        // misleading "mandatory field applicationId empty" (code 5) we used
-        // to surface.
+        // With no config files and no overlay, the error is the descriptive
+        // "no stable-config entries found" (code 10) — not the misleading
+        // "mandatory field applicationId empty" (code 5) we used to surface,
+        // and not code 6, which is reserved for a file that was there but
+        // unusable. Hosts stay quiet about 10 and report 6.
         let snippet =
             unsafe { snippet_create_from_stable_config(cstr_ptr(b"browser-sdk\0"), false, null()) };
         assert_ne!(snippet, null_mut());
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
-        assert_eq!(s.error_code, 6);
+        assert_eq!(s.error_code, 10);
         let msg = unsafe { CStr::from_ptr(s.error_message) }
             .to_string_lossy()
             .into_owned();
@@ -160,11 +362,12 @@ mod tests {
     fn empty_language() {
         // Empty language passes NULL+UTF-8 guards but matches no rule
         // selectors. Must surface as the descriptive "no stable-config
-        // entries found" (code 6), not as a lower-level failure.
+        // entries found" (code 10 on a host with no configuration files),
+        // not as a lower-level failure.
         let snippet = unsafe { snippet_create_from_stable_config(cstr_ptr(b"\0"), false, null()) };
         assert_ne!(snippet, null_mut());
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
-        assert_eq!(s.error_code, 6);
+        assert_eq!(s.error_code, 10);
         unsafe { snippet_cleanup(snippet) };
     }
 
@@ -215,6 +418,101 @@ mod tests {
         let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
         assert_eq!(s.error_code, 1);
         unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn handle_read_on_a_host_without_stable_config_is_not_an_error() {
+        let config = unsafe { stable_config_read(cstr_ptr(b"browser-sdk\0"), false) };
+        assert_ne!(config, null_mut());
+        let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
+        assert_eq!(c.error_code, 0, "absent files must not be a read error");
+        assert!(c.is_empty);
+        unsafe { stable_config_cleanup(config) };
+    }
+
+    #[test]
+    fn handle_null_language() {
+        let config = unsafe { stable_config_read(null(), false) };
+        assert_ne!(config, null_mut());
+        let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
+        assert_eq!(c.error_code, 7);
+        unsafe { stable_config_cleanup(config) };
+    }
+
+    #[test]
+    fn handle_builds_several_snippets_and_reports_resolved_values() {
+        let config = unsafe { stable_config_read(cstr_ptr(b"browser-sdk\0"), false) };
+
+        // Two snippets from one read: the point of the handle. Each overlay
+        // supplies its own applicationId, which must come back on the snippet
+        // for host telemetry tagging.
+        for (overlay, expected_app_id) in [
+            (
+                b"{\"rum\":{\"applicationId\":\"app-1\",\"clientToken\":\"tok-1\"}}\0".to_vec(),
+                "app-1",
+            ),
+            (
+                b"{\"rum\":{\"applicationId\":\"app-2\",\"clientToken\":\"tok-2\"}}\0".to_vec(),
+                "app-2",
+            ),
+        ] {
+            let snippet = unsafe { stable_config_snippet_create(config, cstr_ptr(&overlay)) };
+            let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+            assert_eq!(s.error_code, 0);
+            assert!(s.length > 0);
+            assert_ne!(s.application_id, null());
+            assert_eq!(
+                unsafe { CStr::from_ptr(s.application_id) }
+                    .to_str()
+                    .unwrap(),
+                expected_app_id
+            );
+            assert_eq!(
+                s.rum_enabled,
+                crate::snippet::RUM_ENABLED_UNSET,
+                "nothing set DD_RUM_ENABLED"
+            );
+            unsafe { snippet_cleanup(snippet) };
+        }
+
+        unsafe { stable_config_cleanup(config) };
+    }
+
+    #[test]
+    fn snippet_outlives_the_handle_it_was_built_from() {
+        let config = unsafe { stable_config_read(cstr_ptr(b"browser-sdk\0"), false) };
+        let snippet = unsafe {
+            stable_config_snippet_create(
+                config,
+                cstr_ptr(b"{\"rum\":{\"applicationId\":\"app-1\",\"clientToken\":\"tok-1\"}}\0"),
+            )
+        };
+        unsafe { stable_config_cleanup(config) };
+
+        // Snippets own their data, so this must still be readable.
+        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_eq!(s.error_code, 0);
+        assert_eq!(
+            unsafe { CStr::from_ptr(s.application_id) }
+                .to_str()
+                .unwrap(),
+            "app-1"
+        );
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn handle_snippet_create_rejects_null_config() {
+        let snippet = unsafe { stable_config_snippet_create(null(), null()) };
+        assert_ne!(snippet, null_mut());
+        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_eq!(s.error_code, 7);
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn cleanup_tolerates_null() {
+        unsafe { stable_config_cleanup(null_mut()) };
     }
 
     #[test]

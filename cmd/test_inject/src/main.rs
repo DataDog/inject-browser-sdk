@@ -22,6 +22,7 @@ fn main() {
 
     let configuration = Configuration {
         major_version: 6,
+        enabled: None,
         rum: RumConfiguration {
             application_id: Some("xxx".into()),
             client_token: Some("xxx".into()),

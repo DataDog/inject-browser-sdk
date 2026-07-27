@@ -118,6 +118,7 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
+                    enabled: None,
                     rum: RumConfiguration {
                         application_id: Some(String::from("bar")),
                         client_token: Some(String::from("foo")),
@@ -150,6 +151,7 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
+                    enabled: None,
                     rum: RumConfiguration {
                         application_id: Some(String::from("bar")),
                         client_token: Some(String::from("foo")),
@@ -188,6 +190,7 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
+                    enabled: None,
                     rum: RumConfiguration {
                         application_id: Some(String::from("☺ € é")),
                         client_token: Some(String::from("foo")),
@@ -221,6 +224,7 @@ window.DD_RUM.onReady(function() {
             core::str::from_utf8(
                 &generate_snippet(&Configuration {
                     major_version: 5,
+                    enabled: None,
                     rum: RumConfiguration {
                         application_id: Some(String::from("foo")),
                         client_token: Some(String::from("bar")),
@@ -303,6 +307,7 @@ window.DD_RUM.onReady(function() {
     fn test_generate_snippet_with_prefixed_site() {
         let snippet = generate_snippet(&Configuration {
             major_version: 5,
+            enabled: None,
             rum: RumConfiguration {
                 client_token: Some(String::from("tok")),
                 application_id: Some(String::from("app")),

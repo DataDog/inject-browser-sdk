@@ -16,7 +16,9 @@ use core::{
     ptr::null,
 };
 
-use inject_browser_sdk::{error::Error, generate_snippet, parse_configuration};
+use inject_browser_sdk::{
+    error::Error, generate_snippet, parse_configuration, StableConfigSnippet,
+};
 
 /// A Browser SDK snippet. Use [`snippet_create_from_json`] or
 /// [`crate::snippet_create_from_stable_config`] to create a new one.
@@ -43,6 +45,7 @@ use inject_browser_sdk::{error::Error, generate_snippet, parse_configuration};
 /// | NULL pointer passed to FFI     | `7`          | `"FFI error: {field} is NULL"` |
 /// | Non-UTF-8 input passed to FFI  | `8`          | `"FFI error: {field} is not valid UTF-8"` |
 /// | Unknown JSON field             | `9`          | `"Validation error: Unknown field '{path}'."` |
+/// | No stable config to read from  | `10`         | `"Stable config error: no stable-config entries found; ..."` |
 ///
 ///
 /// [1]: https://docs.datadoghq.com/real_user_monitoring/browser/#cdn-async
@@ -55,7 +58,21 @@ pub struct Snippet {
     pub error_message: *const c_char,
     /// The snippet bytes length.
     pub length: u32,
+    /// Resolved `DD_RUM_ENABLED`, using the `RUM_ENABLED_*` constants below.
+    /// Plain JSON snippets always report [`RUM_ENABLED_UNSET`].
+    pub rum_enabled: u8,
+    /// Resolved `applicationId`, or `NULL` when unset.
+    pub application_id: *const c_char,
+    /// Resolved `remoteConfigurationId`, or `NULL` when unset.
+    pub remote_configuration_id: *const c_char,
 }
+
+/// `DD_RUM_ENABLED` was not configured; the host decides.
+pub const RUM_ENABLED_UNSET: u8 = 0;
+/// `DD_RUM_ENABLED` resolved to true.
+pub const RUM_ENABLED_TRUE: u8 = 1;
+/// `DD_RUM_ENABLED` resolved to false.
+pub const RUM_ENABLED_FALSE: u8 = 2;
 
 /// The [`Snippet`] structure exposes only public fields, but we want to store internal data that
 /// is not FFI-safe in the snippet instance. This is why this `SnippetInternal` struct need to
@@ -65,9 +82,13 @@ pub(crate) struct SnippetInternal {
     pub error_code: u8,
     pub error_message: *const c_char,
     pub length: u32,
+    pub rum_enabled: u8,
+    pub application_id: *const c_char,
+    pub remote_configuration_id: *const c_char,
     // The following fields are kept internal, so they don't need to be FFI-safe and they can be
     // changed at any time without breaking change.
     pub inner: Result<Vec<u8>, CString>,
+    pub owned_ids: [Option<CString>; 2],
 }
 
 impl SnippetInternal {
@@ -78,7 +99,11 @@ impl SnippetInternal {
                     error_message: null(),
                     error_code: 0,
                     length: content.len() as u32,
+                    rum_enabled: RUM_ENABLED_UNSET,
+                    application_id: null(),
+                    remote_configuration_id: null(),
                     inner: Ok(content),
+                    owned_ids: [None, None],
                 }
             }
             Err(error) => {
@@ -97,10 +122,41 @@ impl SnippetInternal {
                     error_message: error_message.as_ptr(),
                     error_code: error.code(),
                     length: 0,
+                    rum_enabled: RUM_ENABLED_UNSET,
+                    application_id: null(),
+                    remote_configuration_id: null(),
                     inner: Err(error_message),
+                    owned_ids: [None, None],
                 };
             }
         }
+    }
+
+    pub(crate) fn new_from_stable_config(result: Result<StableConfigSnippet, Error>) -> Self {
+        let snippet = match result {
+            Ok(snippet) => snippet,
+            Err(error) => return Self::new(Err(error)),
+        };
+
+        // Values are user-controlled, so a NUL byte would make CString::new
+        // fail; treat that as "not set" rather than failing the whole snippet.
+        let to_cstring =
+            |value: Option<String>| return value.and_then(|v| return CString::new(v).ok());
+        let owned_ids = [
+            to_cstring(snippet.application_id),
+            to_cstring(snippet.remote_configuration_id),
+        ];
+
+        let mut this = Self::new(Ok(snippet.bytes));
+        this.rum_enabled = match snippet.enabled {
+            None => RUM_ENABLED_UNSET,
+            Some(true) => RUM_ENABLED_TRUE,
+            Some(false) => RUM_ENABLED_FALSE,
+        };
+        this.application_id = owned_ids[0].as_ref().map_or(null(), |s| return s.as_ptr());
+        this.remote_configuration_id = owned_ids[1].as_ref().map_or(null(), |s| return s.as_ptr());
+        this.owned_ids = owned_ids;
+        return this;
     }
 
     pub(crate) fn into_public_ptr(self) -> *mut Snippet {
@@ -290,6 +346,20 @@ mod tests {
         let msg = core::str::from_utf8(msg_bytes).unwrap();
         assert!(!msg.contains('\0'), "NUL must be scrubbed before CString");
         assert!(msg.contains("before\\0after"), "got: {msg}");
+    }
+
+    #[test]
+    fn disabled_stable_config_without_bytes_surfaces_switch() {
+        let snippet = SnippetInternal::new_from_stable_config(Ok(StableConfigSnippet {
+            bytes: Vec::new(),
+            enabled: Some(false),
+            application_id: None,
+            remote_configuration_id: None,
+        }));
+
+        assert_eq!(snippet.error_code, 0);
+        assert_eq!(snippet.length, 0);
+        assert_eq!(snippet.rum_enabled, RUM_ENABLED_FALSE);
     }
 
     #[test]

@@ -11,31 +11,164 @@ use alloc::vec::Vec;
 use libdd_library_config::ConfigRead;
 use libdd_library_config::LibraryConfig;
 
-use crate::configuration::{Configuration, ConfigurationOverlay};
+use crate::configuration::{parse_bool, Configuration, ConfigurationOverlay};
 use crate::error::Error;
 use crate::generate_snippet;
 
+/// A generated snippet and its resolved host-side values.
+#[cfg_attr(test, derive(Debug))]
+pub struct StableConfigSnippet {
+    /// The generated Browser SDK snippet, empty when injection is disabled.
+    pub bytes: Vec<u8>,
+    /// Resolved `DD_RUM_ENABLED`, or `None` when nothing configured it. Hosts
+    /// own the default for `None`.
+    pub enabled: Option<bool>,
+    /// Resolved `applicationId`, for host-side telemetry tagging.
+    pub application_id: Option<String>,
+    /// Resolved `remoteConfigurationId`, for host-side telemetry tagging.
+    pub remote_configuration_id: Option<String>,
+}
+
+/// Stable configuration read from disk once and reusable across overlays.
+pub struct StableConfig {
+    configs: Vec<LibraryConfig>,
+    logs: Vec<String>,
+    empty_file_present: bool,
+}
+
+impl StableConfig {
+    fn lookup(&self, key: &str) -> Option<&str> {
+        return self
+            .configs
+            .iter()
+            .find(|config| return config.name == key)
+            .map(|config| return config.value.as_str());
+    }
+
+    fn disabled_snippet(
+        &self,
+        overlay: Option<&ConfigurationOverlay>,
+        enabled: Option<bool>,
+    ) -> StableConfigSnippet {
+        let application_id = overlay
+            .and_then(|value| return value.rum.application_id.clone())
+            .or_else(|| {
+                return self.lookup("DD_RUM_APPLICATION_ID").map(String::from);
+            });
+        let remote_configuration_id = overlay
+            .and_then(|value| return value.rum.remote_configuration_id.clone())
+            .or_else(|| {
+                return self
+                    .lookup("DD_RUM_REMOTE_CONFIGURATION_ID")
+                    .map(String::from);
+            });
+        return StableConfigSnippet {
+            bytes: Vec::new(),
+            enabled,
+            application_id,
+            remote_configuration_id,
+        };
+    }
+
+    /// Whether no supported RUM stable-configuration entry matched this process.
+    pub fn is_empty(&self) -> bool {
+        return !self
+            .configs
+            .iter()
+            .any(|config| return crate::configuration::is_rum_configuration_key(&config.name));
+    }
+
+    /// Build a snippet from this configuration, with an optional overlay merged
+    /// on top of it via [`Configuration::overlay`]. Does no I/O.
+    ///
+    /// Returns [`Error::StableConfigAbsent`] when there is nothing to build
+    /// from: no entries matched and no overlay was supplied.
+    pub fn build_snippet(
+        &self,
+        overlay: Option<ConfigurationOverlay>,
+    ) -> Result<StableConfigSnippet, Error> {
+        if self.is_empty() && overlay.is_none() {
+            let message = empty_config_message(&self.logs);
+            if self.empty_file_present {
+                return Err(Error::StableConfig(message));
+            }
+            return Err(Error::StableConfigAbsent(message));
+        }
+
+        // Resolve the host-side switch independently first. If it disables
+        // injection, invalid or incomplete SDK options must not hide that
+        // explicit opt-out from the host.
+        let enabled = match overlay.as_ref().and_then(|value| return value.enabled) {
+            Some(enabled) => Some(enabled),
+            None => self
+                .lookup("DD_RUM_ENABLED")
+                .map(|raw| return parse_bool(raw, "DD_RUM_ENABLED"))
+                .transpose()?,
+        };
+        if enabled == Some(false) {
+            return Ok(self.disabled_snippet(overlay.as_ref(), enabled));
+        }
+
+        let mut config = Configuration::from_lookup(|key| return self.lookup(key))?;
+
+        if let Some(o) = overlay {
+            config.overlay(o);
+        }
+
+        return Ok(StableConfigSnippet {
+            bytes: generate_snippet(&config)?,
+            enabled,
+            application_id: config.rum.application_id.clone(),
+            remote_configuration_id: config.rum.remote_configuration_id.clone(),
+        });
+    }
+}
+
+fn empty_config_message(logs: &[String]) -> String {
+    let base = "no stable-config entries found; \
+         expected DD_RUM_* keys in application_monitoring.yaml \
+         (local or fleet-managed) or an overlay";
+    if logs.is_empty() {
+        return String::from(base);
+    }
+    return alloc::format!("{base}\n{}", logs.join("\n"));
+}
+
+fn stable_config_from_read(read: crate::platform::StableConfigRead) -> Result<StableConfig, Error> {
+    // The configurator can turn a source failure such as TooLarge into Ok,
+    // possibly preserving entries from a lower-priority source. Reject the
+    // partial result because the unread source may contain an overriding
+    // opt-out or other RUM settings.
+    if read.read_failed {
+        return Err(Error::StableConfig(empty_config_message(&read.logs)));
+    }
+    return Ok(StableConfig {
+        configs: read.configs,
+        logs: read.logs,
+        empty_file_present: read.empty_file_present,
+    });
+}
+
+/// Read and parse the local and fleet-managed stable configuration once.
+/// Missing files return an empty [`StableConfig`].
+pub fn read_stable_config(language: &str, debug_logs: bool) -> Result<StableConfig, Error> {
+    let read =
+        crate::platform::read_stable_configs(language, debug_logs).map_err(Error::StableConfig)?;
+    return stable_config_from_read(read);
+}
+
 /// Build a snippet from Datadog stable configuration files, with an optional overlay.
 ///
-/// Reads configuration from the Datadog Agent's `application_monitoring.yaml` files
-/// (local and fleet-managed) using the `DD_RUM_*` key set. If `overlay` is
-/// provided, its typed fields and `other` entries are merged on top of the
-/// disk-sourced configuration via [`Configuration::overlay`].
-///
-/// The `language` parameter identifies the current process's language (e.g. `"browser-sdk"`)
-/// and is used for rule-based process matching in the configuration files.
-///
-/// When `debug_logs` is `true`, diagnostic messages are written to stderr on
-/// Unix. On Windows stderr is a no-op (see [`crate::platform::write_stderr`]);
-/// diagnostics are folded into the returned error message so they survive.
+/// Convenience wrapper over [`read_stable_config`] followed by
+/// [`StableConfig::build_snippet`]. Reads from disk on every call; hold a
+/// [`StableConfig`] instead when building more than one snippet per
+/// configuration load.
 pub fn snippet_from_stable_config(
     language: &str,
     debug_logs: bool,
     overlay: Option<ConfigurationOverlay>,
-) -> Result<Vec<u8>, Error> {
-    let (configs, logs) =
-        crate::platform::read_stable_configs(language, debug_logs).map_err(Error::StableConfig)?;
-    return build_snippet_from_configs(configs, logs, overlay);
+) -> Result<StableConfigSnippet, Error> {
+    return read_stable_config(language, debug_logs)?.build_snippet(overlay);
 }
 
 /// Variant of [`snippet_from_stable_config`] that accepts a caller-supplied
@@ -47,51 +180,10 @@ pub(crate) fn snippet_from_stable_config_with_reader<R: ConfigRead>(
     language: &str,
     debug_logs: bool,
     overlay: Option<ConfigurationOverlay>,
-) -> Result<Vec<u8>, Error> {
-    let (configs, logs) =
-        crate::platform::read_stable_configs_with_reader(reader, language, debug_logs)
-            .map_err(Error::StableConfig)?;
-    return build_snippet_from_configs(configs, logs, overlay);
-}
-
-fn build_snippet_from_configs(
-    configs: Vec<LibraryConfig>,
-    logs: Vec<String>,
-    overlay: Option<ConfigurationOverlay>,
-) -> Result<Vec<u8>, Error> {
-    // Distinguish "no config source at all" from "config source present but
-    // missing required fields". Without this, the caller gets code 5
-    // ("mandatory field 'applicationId' is empty") and spends time
-    // troubleshooting file contents when the real issue is that no files
-    // matched or existed.
-    if configs.is_empty() && overlay.is_none() {
-        // Surface any diagnostics captured on the Ok(empty) path (e.g. a file
-        // reclassified as TooLarge by the configurator) so Windows callers,
-        // who never see stderr, still get the full context.
-        let base = "no stable-config entries found; \
-             expected DD_RUM_* keys in application_monitoring.yaml \
-             (local or fleet-managed) or an overlay";
-        if logs.is_empty() {
-            return Err(Error::StableConfig(String::from(base)));
-        }
-        return Err(Error::StableConfig(alloc::format!(
-            "{base}\n{}",
-            logs.join("\n")
-        )));
-    }
-
-    let mut config = Configuration::from_lookup(|key| {
-        return configs
-            .iter()
-            .find(|c| return c.name == key)
-            .map(|c| return c.value.as_str());
-    })?;
-
-    if let Some(o) = overlay {
-        config.overlay(o);
-    }
-
-    return generate_snippet(&config);
+) -> Result<StableConfigSnippet, Error> {
+    let read = crate::platform::read_stable_configs_with_reader(reader, language, debug_logs)
+        .map_err(Error::StableConfig)?;
+    return stable_config_from_read(read)?.build_snippet(overlay);
 }
 
 #[cfg(test)]
@@ -128,7 +220,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let bytes = snippet_from_stable_config_with_reader(
+        let snippet = snippet_from_stable_config_with_reader(
             &crate::platform::tests::PopulatedReader,
             "browser-sdk",
             false,
@@ -136,7 +228,7 @@ mod tests {
         )
         .expect("should build snippet");
 
-        let init = extract_init_json(&bytes);
+        let init = extract_init_json(&snippet.bytes);
         assert_eq!(init["site"], Value::from("us3.datadoghq.com"));
         assert_eq!(init["applicationId"], Value::from("app-populated"));
         assert_eq!(init["clientToken"], Value::from("tok-populated"));
@@ -161,6 +253,250 @@ mod tests {
         }
     }
 
+    const DISABLED_CONFIG: &[u8] = br#"apm_configuration_default:
+  DD_RUM_ENABLED: false
+  DD_RUM_APPLICATION_ID: app-disabled
+  DD_RUM_CLIENT_TOKEN: tok-disabled
+  DD_RUM_REMOTE_CONFIGURATION_ID: rc-disabled
+"#;
+
+    const INVALID_ENABLED_CONFIG: &[u8] = br#"apm_configuration_default:
+  DD_RUM_ENABLED: not-a-boolean
+  DD_RUM_APPLICATION_ID: app-enabled
+  DD_RUM_CLIENT_TOKEN: tok-enabled
+"#;
+
+    const UNRELATED_CONFIG: &[u8] = br#"apm_configuration_default:
+  DD_SERVICE: unrelated-service
+"#;
+
+    struct ContentReader(Option<&'static [u8]>);
+
+    impl ConfigRead for ContentReader {
+        type IoError = core::convert::Infallible;
+
+        fn read(
+            &self,
+            path: &str,
+        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
+        {
+            if path == libdd_library_config::Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
+                if let Some(contents) = self.0 {
+                    return Ok(contents.into());
+                }
+            }
+            return Err(libdd_library_config::ConfigReadError::NotFound);
+        }
+    }
+
+    #[test]
+    fn stable_config_reports_enabled_false_and_ids() {
+        let snippet = snippet_from_stable_config_with_reader(
+            &ContentReader(Some(DISABLED_CONFIG)),
+            "browser-sdk",
+            false,
+            None,
+        )
+        .expect("snippet should build");
+
+        assert_eq!(snippet.enabled, Some(false));
+        assert_eq!(
+            snippet.application_id.as_deref(),
+            Some("app-disabled"),
+            "application_id must be reported for host telemetry tagging"
+        );
+        assert_eq!(
+            snippet.remote_configuration_id.as_deref(),
+            Some("rc-disabled")
+        );
+        assert!(snippet.bytes.is_empty());
+    }
+
+    #[test]
+    fn disabled_config_skips_snippet_validation() {
+        for (contents, expected_remote_id) in [
+            (
+                &br#"apm_configuration_default:
+  DD_RUM_ENABLED: false
+  DD_RUM_REMOTE_CONFIGURATION_ID: rc-disabled
+"#[..],
+                Some("rc-disabled"),
+            ),
+            (
+                &br#"apm_configuration_default:
+  DD_RUM_ENABLED: false
+  DD_RUM_SESSION_SAMPLE_RATE: not-a-number
+"#[..],
+                None,
+            ),
+        ] {
+            let snippet = snippet_from_stable_config_with_reader(
+                &ContentReader(Some(contents)),
+                "browser-sdk",
+                false,
+                None,
+            )
+            .expect("disabled configuration should not validate SDK options");
+
+            assert_eq!(snippet.enabled, Some(false));
+            assert!(snippet.bytes.is_empty());
+            assert_eq!(
+                snippet.remote_configuration_id.as_deref(),
+                expected_remote_id
+            );
+        }
+    }
+
+    #[test]
+    fn empty_existing_config_is_not_reported_as_absent() {
+        let reader = ContentReader(Some(b""));
+        let error = snippet_from_stable_config_with_reader(&reader, "browser-sdk", false, None)
+            .expect_err("an existing empty file should be reported as unusable");
+
+        assert_eq!(error.code(), 6);
+    }
+
+    #[test]
+    fn overlay_can_override_stable_config_enabled() {
+        let overlay = ConfigurationOverlay {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let snippet = snippet_from_stable_config_with_reader(
+            &ContentReader(Some(DISABLED_CONFIG)),
+            "browser-sdk",
+            false,
+            Some(overlay),
+        )
+        .expect("should build snippet");
+
+        assert_eq!(snippet.enabled, Some(true));
+    }
+
+    #[test]
+    fn overlay_enabled_wins_before_disk_value_is_parsed() {
+        for overlay_enabled in [false, true] {
+            let overlay = ConfigurationOverlay {
+                enabled: Some(overlay_enabled),
+                ..Default::default()
+            };
+            let snippet = snippet_from_stable_config_with_reader(
+                &ContentReader(Some(INVALID_ENABLED_CONFIG)),
+                "browser-sdk",
+                false,
+                Some(overlay),
+            )
+            .expect("the overlay should replace an invalid lower-priority disk value");
+
+            assert_eq!(snippet.enabled, Some(overlay_enabled));
+            assert_eq!(snippet.bytes.is_empty(), !overlay_enabled);
+        }
+    }
+
+    #[test]
+    fn unrelated_stable_configuration_is_empty_for_rum() {
+        let read = crate::platform::read_stable_configs_with_reader(
+            &ContentReader(Some(UNRELATED_CONFIG)),
+            "browser-sdk",
+            false,
+        )
+        .expect("the unrelated stable configuration should parse");
+        assert!(
+            !read.configs.is_empty(),
+            "the configurator should preserve the unrelated entry"
+        );
+
+        let config = stable_config_from_read(read).expect("the read itself should succeed");
+        assert!(config.is_empty());
+
+        let error = config
+            .build_snippet(None)
+            .expect_err("unrelated stable configuration should be absent for RUM");
+        assert_eq!(error.code(), 10);
+    }
+
+    struct LocalConfigFleetTooLargeReader;
+
+    impl ConfigRead for LocalConfigFleetTooLargeReader {
+        type IoError = core::convert::Infallible;
+
+        fn read(
+            &self,
+            path: &str,
+        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
+        {
+            if path == libdd_library_config::Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
+                return Ok(DISABLED_CONFIG.into());
+            }
+            if path == libdd_library_config::Configurator::FLEET_STABLE_CONFIGURATION_PATH {
+                return Err(libdd_library_config::ConfigReadError::TooLarge);
+            }
+            return Err(libdd_library_config::ConfigReadError::NotFound);
+        }
+    }
+
+    struct CountingReader {
+        reads: core::cell::Cell<usize>,
+    }
+
+    impl ConfigRead for CountingReader {
+        type IoError = core::convert::Infallible;
+
+        fn read(
+            &self,
+            path: &str,
+        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
+        {
+            self.reads.set(self.reads.get() + 1);
+            return ContentReader(Some(DISABLED_CONFIG)).read(path);
+        }
+    }
+
+    #[test]
+    fn one_read_serves_many_snippets() {
+        let reader = CountingReader {
+            reads: core::cell::Cell::new(0),
+        };
+        let read = crate::platform::read_stable_configs_with_reader(&reader, "browser-sdk", false)
+            .expect("read must succeed");
+        let after_read = reader.reads.get();
+        assert!(after_read > 0, "the files should have been read once");
+
+        let config = StableConfig {
+            configs: read.configs,
+            logs: read.logs,
+            empty_file_present: read.empty_file_present,
+        };
+
+        for _ in 0..5 {
+            config
+                .build_snippet(Some(ConfigurationOverlay::default()))
+                .expect("should build snippet");
+        }
+
+        assert_eq!(
+            reader.reads.get(),
+            after_read,
+            "building snippets from a StableConfig must not re-read the files"
+        );
+    }
+
+    #[test]
+    fn absent_stable_config_is_distinct_from_a_broken_one() {
+        let err = snippet_from_stable_config_with_reader(
+            &ContentReader(None),
+            "browser-sdk",
+            false,
+            None,
+        )
+        .expect_err("no entries and no overlay must error");
+        assert_eq!(
+            err.code(),
+            10,
+            "absent stable config must not share code 6 with a broken one"
+        );
+    }
+
     #[test]
     fn too_large_reader_with_no_overlay_surfaces_diagnostic_in_error() {
         let err =
@@ -176,5 +512,40 @@ mod tests {
             msg.to_lowercase().contains("too large") || msg.contains("TooLarge"),
             "expected TooLarge diagnostic to be folded into error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn reclassified_read_failure_fails_before_creating_a_reusable_config() {
+        let read =
+            crate::platform::read_stable_configs_with_reader(&TooLargeReader, "browser-sdk", false)
+                .expect("the configurator reclassifies TooLarge as an empty result");
+        assert!(read.read_failed);
+
+        let error = match stable_config_from_read(read) {
+            Err(error) => error,
+            Ok(_) => panic!("a reusable handle must expose the reclassified read failure"),
+        };
+        assert_eq!(error.code(), 6);
+    }
+
+    #[test]
+    fn higher_priority_read_failure_rejects_lower_priority_entries() {
+        let read = crate::platform::read_stable_configs_with_reader(
+            &LocalConfigFleetTooLargeReader,
+            "browser-sdk",
+            false,
+        )
+        .expect("the configurator preserves entries from the readable source");
+        assert!(read.read_failed);
+        assert!(
+            !read.configs.is_empty(),
+            "the regression requires a partial result, not an empty one"
+        );
+
+        let error = match stable_config_from_read(read) {
+            Err(error) => error,
+            Ok(_) => panic!("a partial stable configuration must not be accepted"),
+        };
+        assert_eq!(error.code(), 6);
     }
 }

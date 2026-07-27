@@ -7,6 +7,7 @@
 //! Platform-specific helpers for reading stable configuration files.
 
 use alloc::{format, string::String, vec, vec::Vec};
+use core::cell::Cell;
 
 use libdd_library_config::{
     ConfigRead, ConfigReadError, Configurator, LibraryConfig, ProcessInfo, MAX_CONFIG_FILE_SIZE,
@@ -112,20 +113,56 @@ mod inner {
 
 pub use inner::{detect_process_info, write_stderr, PlatformConfigRead};
 
+/// Outcome of reading the stable-configuration files.
+#[cfg_attr(test, derive(Debug))]
+pub struct StableConfigRead {
+    /// Entries whose rules matched this process.
+    pub configs: Vec<LibraryConfig>,
+    /// Diagnostics captured by the configurator.
+    pub logs: Vec<String>,
+    /// Whether either configuration file existed.
+    pub files_present: bool,
+    /// Whether an existing configuration file contained zero bytes.
+    pub empty_file_present: bool,
+    /// Whether a read failed but the configurator returned an empty result.
+    pub read_failed: bool,
+}
+
+struct PresenceRecordingReader<'a, R> {
+    inner: &'a R,
+    present: Cell<bool>,
+    empty_file_present: Cell<bool>,
+    read_failed: Cell<bool>,
+}
+
+impl<R: ConfigRead> ConfigRead for PresenceRecordingReader<'_, R> {
+    type IoError = R::IoError;
+
+    fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
+        let outcome = self.inner.read(path);
+        match &outcome {
+            Ok(bytes) => {
+                self.present.set(true);
+                if bytes.is_empty() {
+                    self.empty_file_present.set(true);
+                }
+            }
+            Err(ConfigReadError::NotFound) => {}
+            Err(_) => {
+                self.present.set(true);
+                self.read_failed.set(true);
+            }
+        }
+        return outcome;
+    }
+}
+
 /// Reads configuration entries from both local and fleet-managed `application_monitoring.yaml`
 /// files, preserving the full [`LibraryConfig`] metadata.
 ///
 /// When `debug_logs` is `true`, diagnostic messages from the configurator are written to stderr.
 /// On Windows, `debug_logs` is a no-op (see [`write_stderr`]).
-///
-/// Returns a `(configs, logs)` tuple on success so callers can surface
-/// diagnostics even on the `Ok(empty)` path — upstream reclassifies some
-/// failures (e.g. `TooLarge`) into `Ok(StableConfig::default())` while pushing
-/// the reason into logs.
-pub fn read_stable_configs(
-    language: &str,
-    debug_logs: bool,
-) -> Result<(Vec<LibraryConfig>, Vec<String>), String> {
+pub fn read_stable_configs(language: &str, debug_logs: bool) -> Result<StableConfigRead, String> {
     return read_stable_configs_with_reader(&PlatformConfigRead, language, debug_logs);
 }
 
@@ -136,15 +173,21 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
     reader: &R,
     language: &str,
     debug_logs: bool,
-) -> Result<(Vec<LibraryConfig>, Vec<String>), String> {
+) -> Result<StableConfigRead, String> {
     let process_info = detect_process_info(language);
     let configurator = Configurator::new(debug_logs);
 
     let local_path = Configurator::LOCAL_STABLE_CONFIGURATION_PATH;
     let fleet_path = Configurator::FLEET_STABLE_CONFIGURATION_PATH;
 
+    let recording = PresenceRecordingReader {
+        inner: reader,
+        present: Cell::new(false),
+        empty_file_present: Cell::new(false),
+        read_failed: Cell::new(false),
+    };
     let logged_result =
-        configurator.get_config_from_reader(reader, local_path, fleet_path, &process_info);
+        configurator.get_config_from_reader(&recording, local_path, fleet_path, &process_info);
 
     // Buffer logs before consuming `logged_result` — `data()` takes self.
     let logs: Vec<String> = logged_result.logs().iter().map(String::from).collect();
@@ -157,7 +200,15 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
     }
 
     match data {
-        Ok(configs) => return Ok((configs, logs)),
+        Ok(configs) => {
+            return Ok(StableConfigRead {
+                configs,
+                logs,
+                files_present: recording.present.get(),
+                empty_file_present: recording.empty_file_present.get(),
+                read_failed: recording.read_failed.get(),
+            })
+        }
         Err(err) => {
             // Fold captured diagnostics into the error string so callers that
             // never see stderr (notably Windows, where write_stderr is a
@@ -199,6 +250,16 @@ pub(crate) mod tests {
         }
     }
 
+    struct EmptyReader;
+
+    impl ConfigRead for EmptyReader {
+        type IoError = core::convert::Infallible;
+
+        fn read(&self, _path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
+            return Ok(Vec::new());
+        }
+    }
+
     /// Serves a DD_RUM_* rule for language=browser-sdk as the local config
     /// and returns NotFound for the fleet config. Used to verify that a
     /// realistic YAML document flows end-to-end through the configurator
@@ -231,10 +292,27 @@ rules:
 
     #[test]
     fn missing_files_return_empty_configs() {
-        let (configs, _logs) =
-            read_stable_configs_with_reader(&NotFoundReader, "browser-sdk", false)
-                .expect("reader NotFound should not surface as error");
-        assert_eq!(configs.len(), 0);
+        let read = read_stable_configs_with_reader(&NotFoundReader, "browser-sdk", false)
+            .expect("reader NotFound should not surface as error");
+        assert_eq!(read.configs.len(), 0);
+        assert!(
+            !read.files_present,
+            "NotFound on both paths means no stable configuration is installed"
+        );
+        assert!(!read.empty_file_present);
+    }
+
+    #[test]
+    fn empty_existing_files_are_present() {
+        let read = read_stable_configs_with_reader(&EmptyReader, "browser-sdk", false)
+            .expect("empty files should produce an empty configuration");
+        assert!(read.configs.is_empty());
+        assert!(
+            read.files_present,
+            "a successful read proves the file exists even when it has zero bytes"
+        );
+        assert!(read.empty_file_present);
+        assert!(!read.read_failed);
     }
 
     #[test]
@@ -249,9 +327,10 @@ rules:
 
     #[test]
     fn populated_yaml_with_matching_rule_yields_dd_rum_fields() {
-        let (configs, _logs) =
-            read_stable_configs_with_reader(&PopulatedReader, "browser-sdk", false)
-                .expect("populated reader must succeed");
+        let read = read_stable_configs_with_reader(&PopulatedReader, "browser-sdk", false)
+            .expect("populated reader must succeed");
+        assert!(read.files_present, "the local config file was served");
+        let configs = read.configs;
         let lookup = |key: &str| {
             return configs
                 .iter()
@@ -308,9 +387,9 @@ rules:
     fn fleet_overrides_local_when_both_present() {
         // Upstream libdd-library-config semantics: fleet-managed config
         // overrides local. Guards against that contract silently flipping.
-        let (configs, _logs) =
-            read_stable_configs_with_reader(&BothSourcesReader, "browser-sdk", false)
-                .expect("both-sources reader must succeed");
+        let configs = read_stable_configs_with_reader(&BothSourcesReader, "browser-sdk", false)
+            .expect("both-sources reader must succeed")
+            .configs;
         let lookup = |key: &str| {
             return configs
                 .iter()
@@ -326,10 +405,13 @@ rules:
     fn populated_yaml_skips_non_matching_language() {
         // Rule selects language=browser-sdk; passing a different language
         // must yield zero entries rather than the matching rule's values.
-        let (configs, _logs) =
-            read_stable_configs_with_reader(&PopulatedReader, "not-browser-sdk", false)
-                .expect("populated reader must succeed");
-        assert_eq!(configs.len(), 0);
+        let read = read_stable_configs_with_reader(&PopulatedReader, "not-browser-sdk", false)
+            .expect("populated reader must succeed");
+        assert_eq!(read.configs.len(), 0);
+        assert!(
+            read.files_present,
+            "a file was there; it just matched nothing -- distinct from absent"
+        );
     }
 
     #[cfg(not(windows))]

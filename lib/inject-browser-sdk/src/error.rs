@@ -7,7 +7,7 @@
 use alloc::string::String;
 use core::fmt;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     Json(String),
     UnsupportedMajorVersion(u32),
@@ -15,6 +15,13 @@ pub enum Error {
     OutOfRangeRate(String, f64),
     EmptyMandatoryConf(String),
     StableConfig(String),
+    /// No stable-configuration entries were found: the files are absent, or
+    /// none of their rules matched this process. Distinct from
+    /// [`Error::StableConfig`], which means a file was there but could not be
+    /// read or parsed. Callers that treat missing stable configuration as the
+    /// ordinary case need to tell the two apart so a broken file is still
+    /// reported.
+    StableConfigAbsent(String),
     /// Caller supplied a NULL pointer for a required FFI argument.
     FfiNullPointer(String),
     /// Caller supplied a non-UTF-8 byte sequence for an FFI argument that
@@ -33,6 +40,7 @@ impl Error {
             Error::StableConfig(_) => return 6,
             Error::FfiNullPointer(_) => return 7,
             Error::FfiInvalidUtf8(_) => return 8,
+            Error::StableConfigAbsent(_) => return 10,
         }
     }
 }
@@ -54,6 +62,9 @@ impl fmt::Display for Error {
                 return write!(f, "Validation error: Mandatory field '{key}' is empty.")
             }
             Error::StableConfig(cause) => return write!(f, "Stable config error: {cause}"),
+            Error::StableConfigAbsent(cause) => {
+                return write!(f, "Stable config error: {cause}")
+            }
             Error::FfiNullPointer(field) => return write!(f, "FFI error: {field} is NULL"),
             Error::FfiInvalidUtf8(field) => return write!(f, "FFI error: {field} is not valid UTF-8"),
         }

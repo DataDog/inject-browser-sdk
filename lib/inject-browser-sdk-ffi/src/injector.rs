@@ -24,7 +24,51 @@ pub struct Injector {
     slices_memory_storage: [BytesSlice; 4],
 }
 
-/// Create an [`Injector`] injector based on a [`Snippet`].
+/// Where the snippet should be injected within the HTML document, see
+/// [`injector_create_with_strategy`].
+///
+/// The trade-off is between how early the snippet runs and how much of the response has to be held
+/// back to decide where it goes. The earlier the snippet runs, the more of the page lifecycle RUM
+/// observes, but injecting early means proving that no character encoding declaration follows, which
+/// cannot be done without buffering.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectionStrategy {
+    /// Inject right before the `</head>` tag.
+    ///
+    /// Never holds back more than a partially matched tag, at the cost of the snippet running as
+    /// late as possible within the head. This is what [`injector_create`] uses.
+    HeadCloseTag = 0,
+
+    /// Inject at the earliest valid position within the `<head>` tag: right after the open tag, or
+    /// right after a `<meta charset>` / `<meta http-equiv>` declaration. Does not inject at all if
+    /// there is no such position within the first 1024 bytes of the document.
+    ///
+    /// Holds back up to 1024 bytes, which delays the start of the response body by that much.
+    HeadOpenTag = 1,
+
+    /// Like [`InjectionStrategy::HeadOpenTag`], but falls back to
+    /// [`InjectionStrategy::HeadCloseTag`] instead of giving up when the first 1024 bytes hold no
+    /// valid injection point.
+    HeadOpenTagWithCloseTagFallback = 2,
+}
+
+impl From<InjectionStrategy> for injector::InjectionStrategy {
+    fn from(strategy: InjectionStrategy) -> Self {
+        return match strategy {
+            InjectionStrategy::HeadCloseTag => injector::InjectionStrategy::HeadCloseTag,
+            InjectionStrategy::HeadOpenTag => injector::InjectionStrategy::HeadOpenTag,
+            InjectionStrategy::HeadOpenTagWithCloseTagFallback => {
+                injector::InjectionStrategy::HeadOpenTagWithCloseTagFallback
+            }
+        };
+    }
+}
+
+/// Create an [`Injector`] injector based on a [`Snippet`], injecting before the `</head>` tag.
+///
+/// Equivalent to calling [`injector_create_with_strategy`] with
+/// [`InjectionStrategy::HeadCloseTag`].
 ///
 /// Returns `NULL` when `snippet` is `NULL` or when `snippet->error_code != 0`
 /// (the snippet failed to build and has no content to inject). Callers must
@@ -56,6 +100,25 @@ pub struct Injector {
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn injector_create(snippet: *const Snippet) -> *mut Injector {
+    return injector_create_with_strategy(snippet, InjectionStrategy::HeadCloseTag);
+}
+
+/// Create an [`Injector`] injector based on a [`Snippet`], choosing where the snippet is injected.
+///
+/// Behaves exactly like [`injector_create`] with respect to `NULL` handling, memory ownership and
+/// usage; see its documentation. `strategy` must be one of the [`InjectionStrategy`] enumerators.
+///
+/// # Example
+///
+/// ```c
+/// Injector* injector = injector_create_with_strategy(
+///     snippet, InjectionStrategy::HeadOpenTagWithCloseTagFallback);
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn injector_create_with_strategy(
+    snippet: *const Snippet,
+    strategy: InjectionStrategy,
+) -> *mut Injector {
     if snippet.is_null() {
         return core::ptr::null_mut();
     }
@@ -65,7 +128,7 @@ pub unsafe extern "C" fn injector_create(snippet: *const Snippet) -> *mut Inject
     };
 
     return Box::into_raw(Box::new(Injector {
-        inner: injector::Injector::new(snippet_content),
+        inner: injector::Injector::with_strategy(snippet_content, strategy.into()),
         slices_memory_storage: core::array::from_fn(|_| return BytesSlice::empty()),
     }));
 }
@@ -277,6 +340,7 @@ mod tests {
     use super::*;
     use crate::snippet::{snippet_cleanup, snippet_create_from_json};
     use crate::test_utils::cstr_ptr;
+    use alloc::string::String;
     use core::ptr::null_mut;
     use pretty_assertions::assert_eq;
 
@@ -314,6 +378,120 @@ mod tests {
         assert_eq!(result.slices_length, 0);
         assert!(result.slices.is_null());
         assert!(!result.injected);
+    }
+
+    #[test]
+    fn injector_create_with_strategy_null_snippet_returns_null() {
+        for strategy in [
+            InjectionStrategy::HeadCloseTag,
+            InjectionStrategy::HeadOpenTag,
+            InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+        ] {
+            let injector = unsafe { injector_create_with_strategy(null(), strategy) };
+            assert!(injector.is_null());
+        }
+    }
+
+    /// `injector_create` must keep injecting before `</head>`, so existing consumers are unaffected
+    /// by the introduction of the other strategies.
+    #[test]
+    fn injector_create_defaults_to_head_close_tag() {
+        assert_eq!(
+            inject(None, b"<head>abc</head>def"),
+            "<head>abc<SNIPPET></head>def"
+        );
+    }
+
+    #[test]
+    fn injector_create_with_strategy_head_open_tag() {
+        assert_eq!(
+            inject(Some(InjectionStrategy::HeadOpenTag), b"<head>abc</head>def"),
+            "<head><SNIPPET>abc</head>def"
+        );
+        // No `<head>` to inject after, and this strategy has no fallback: the document is padded
+        // to the length it would have had, and left otherwise untouched.
+        let html = "abc</head>def";
+        let output = inject(Some(InjectionStrategy::HeadOpenTag), html.as_bytes());
+        let mut expected = String::from(html);
+        expected.extend(core::iter::repeat_n(' ', snippet_len()));
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn injector_create_with_strategy_head_open_tag_with_fallback() {
+        assert_eq!(
+            inject(
+                Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback),
+                b"<head>abc</head>def"
+            ),
+            "<head><SNIPPET>abc</head>def"
+        );
+        // Falls back to `</head>` when there is no `<head>` to inject after.
+        assert_eq!(
+            inject(
+                Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback),
+                b"abc</head>def"
+            ),
+            "abc<SNIPPET></head>def"
+        );
+    }
+
+    /// Length of the snippet built by [`test_snippet`], used to check padding.
+    fn snippet_len() -> usize {
+        let snippet = test_snippet();
+        let len = unsafe { SnippetInternal::borrow_public_ptr(snippet) }
+            .inner
+            .as_ref()
+            .expect("valid snippet")
+            .len();
+        unsafe { snippet_cleanup(snippet) };
+        return len;
+    }
+
+    /// Drives a full injection through the C API and returns the concatenated output, with the
+    /// snippet itself replaced by `<SNIPPET>` so assertions stay readable.
+    fn inject(strategy: Option<InjectionStrategy>, html: &[u8]) -> String {
+        let snippet = test_snippet();
+        let injector = match strategy {
+            Some(strategy) => unsafe { injector_create_with_strategy(snippet, strategy) },
+            None => unsafe { injector_create(snippet) },
+        };
+        assert!(!injector.is_null());
+
+        let snippet_content = unsafe { SnippetInternal::borrow_public_ptr(snippet) }
+            .inner
+            .as_ref()
+            .expect("valid snippet")
+            .clone();
+
+        // Each result must be fully consumed before the next call, as documented on
+        // `InjectorResult`: consecutive calls reuse the same slice storage.
+        let mut output = String::new();
+        let mut append = |result: InjectorResult| {
+            for index in 0..result.slices_length as usize {
+                let slice = unsafe { &*result.slices.add(index) };
+                let bytes = unsafe { slice::from_raw_parts(slice.start, slice.length as usize) };
+                if bytes == snippet_content.as_slice() {
+                    output.push_str("<SNIPPET>");
+                } else {
+                    output.push_str(core::str::from_utf8(bytes).expect("valid UTF-8"));
+                }
+            }
+        };
+        append(unsafe { injector_write(injector, html.as_ptr(), html.len() as u32) });
+        append(unsafe { injector_end(injector) });
+
+        unsafe { injector_cleanup(injector) };
+        unsafe { snippet_cleanup(snippet) };
+        return output;
+    }
+
+    fn test_snippet() -> *mut Snippet {
+        return unsafe {
+            snippet_create_from_json(cstr_ptr(
+                b"{\"majorVersion\":5,\"rum\":{\"applicationId\":\"a\",\"clientToken\":\"t\"}}\0",
+            ))
+        };
     }
 
     #[test]

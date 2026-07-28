@@ -49,8 +49,8 @@ impl InjectionPointLocator {
 enum TagName {
     Meta,
     Head,
-    /// An element whose content is raw text (`script`, `style`), holding its lower case name. Such
-    /// content is not markup, so it must be skipped rather than scanned.
+    /// An element whose content is text rather than markup (`script`, `style`, `title`,
+    /// `textarea`), holding its lower case name. Such content must be skipped rather than scanned.
     RawText(&'static [u8]),
 }
 
@@ -78,8 +78,8 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
 
         match parse_tag_name(&rest[..name_end]) {
             // The content of a raw text element is text, not markup: a `<meta charset>` written
-            // within a script or a stylesheet is not an encoding declaration, and injecting right
-            // after it would insert the snippet in the middle of the script or stylesheet source.
+            // within a script, a stylesheet or a title is not an encoding declaration, and
+            // injecting right after it would insert the snippet in the middle of that text.
             Some(TagName::RawText(name)) => i = find_raw_text_end(input, tag_end, name)?,
             Some(relevant_tag_name) => return Some((relevant_tag_name, tag_start, tag_end)),
             None => i = tag_end,
@@ -154,6 +154,10 @@ fn parse_tag_name(input: &[u8]) -> Option<TagName> {
         return Some(TagName::RawText(b"script"));
     } else if compare_case_insensitive(input, b"style") {
         return Some(TagName::RawText(b"style"));
+    } else if compare_case_insensitive(input, b"title") {
+        return Some(TagName::RawText(b"title"));
+    } else if compare_case_insensitive(input, b"textarea") {
+        return Some(TagName::RawText(b"textarea"));
     } else {
         return None;
     }
@@ -460,6 +464,15 @@ mod tests {
             "<html><head><SCRIPT><meta charset=utf-8></SCRIPT ><meta charset='utf-8'></head></html>",
             "<html><head><SCRIPT><meta charset=utf-8></SCRIPT ><meta charset='utf-8'>{{SNIPPET}}</head></html>",
         );
+        // The content of a title is text as well: a meta tag written there is displayed, not parsed.
+        test_injector(
+            "<html><head><title>Using <meta charset=utf-8></title></head></html>",
+            "<html><head>{{SNIPPET}}<title>Using <meta charset=utf-8></title></head></html>",
+        );
+        test_injector(
+            "<html><head><title>Using <meta charset=utf-8></title><meta charset='utf-8'></head></html>",
+            "<html><head><title>Using <meta charset=utf-8></title><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
         // A `</scriptfoo>` tag does not close the script element.
         test_injector(
             "<html><head><script></scriptfoo><meta charset=utf-8></script></head></html>",
@@ -481,8 +494,8 @@ mod tests {
     #[test]
     fn head_in_tag_attribute() {
         test_injector(
-            "<html><title foo='<head></head>' /><head></head></html>",
-            "<html><title foo='<head></head>' /><head>{{SNIPPET}}</head></html>",
+            "<html><link foo='<head></head>' /><head></head></html>",
+            "<html><link foo='<head></head>' /><head>{{SNIPPET}}</head></html>",
         );
     }
 

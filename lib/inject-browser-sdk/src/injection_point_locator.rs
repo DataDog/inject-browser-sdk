@@ -10,8 +10,10 @@
 /// The current implementation looks for the earliest valid position within the `<head>` tag:
 /// * right after the open `<head>` tag,
 /// * or right after a character encoding declaration (`<meta charset=...>` or
-///   `<meta http-equiv="content-type" ...>`), as the snippet must not push such a declaration
-///   further into the document.
+///   `<meta http-equiv="content-type" content="...; charset=...">`), as the snippet must not push
+///   such a declaration further into the document,
+/// * or right after an inert element (`<noscript>`, `<template>`) holding such a declaration, since
+///   a script injected within one would never run.
 ///
 /// The character encoding declaration is the only thing the snippet is kept behind. In particular,
 /// the snippet is deliberately injected *before* a `<meta http-equiv="content-security-policy">`
@@ -34,6 +36,21 @@ impl InjectionPointLocator {
                 TagName::Meta if has_encoding_attributes(&buffer[tag_start..tag_end]) => {
                     return Some(tag_end);
                 }
+                TagName::Inert(name) => {
+                    // The snippet cannot go within an inert element, but the encoding prescan runs
+                    // over the raw bytes and honours a declaration written there, so a declaration
+                    // inside keeps the snippet behind the element as a whole.
+                    let element_end = match find_inert_element_end(buffer, tag_end, name) {
+                        Some(element_end) => element_end,
+                        // The element is never closed, so everything that follows is inert too.
+                        None => break,
+                    };
+                    if contains_encoding_declaration(&buffer[tag_end..element_end]) {
+                        return Some(element_end);
+                    }
+                    offset = element_end;
+                    continue;
+                }
                 _ => {
                     // Skip unknown tags, continue scanning
                 }
@@ -52,6 +69,10 @@ enum TagName {
     /// An element whose content is text rather than markup (`script`, `style`, `title`,
     /// `textarea`), holding its lower case name. Such content must be skipped rather than scanned.
     RawText(&'static [u8]),
+    /// An element whose content is inert (`noscript` with scripting enabled, `template`), holding
+    /// its lower case name. Its content *is* markup, unlike [`TagName::RawText`], but a script
+    /// injected within it would never run.
+    Inert(&'static [u8]),
 }
 
 fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)> {
@@ -100,16 +121,8 @@ fn find_raw_text_end(input: &[u8], content_start: usize, name: &[u8]) -> Option<
             continue;
         }
 
-        // Only `</name` followed by whitespace, '/' or '>' closes a raw text element.
         let rest = &input[i + 1..];
-        if rest.first() == Some(&b'/')
-            && rest.len() > name.len() + 1
-            && compare_case_insensitive(&rest[1..name.len() + 1], name)
-            && matches!(
-                rest[name.len() + 1],
-                b'>' | b'/' | b'\t' | b'\n' | b'\x0C' | b'\r' | b' '
-            )
-        {
+        if is_tag_named(rest, true, name) {
             return Some(i + find_tag_close(rest)? + 2);
         }
 
@@ -117,6 +130,79 @@ fn find_raw_text_end(input: &[u8], content_start: usize, name: &[u8]) -> Option<
     }
 
     return None;
+}
+
+/// Returns the index just past the closing tag of the inert element named `name` whose content
+/// starts at `content_start`, or `None` if the element is never closed within `input`.
+fn find_inert_element_end(input: &[u8], content_start: usize, name: &[u8]) -> Option<usize> {
+    // `template` elements nest, so their closing tags have to be paired. `noscript` content is raw
+    // text when scripting is enabled, so it cannot nest.
+    let nests = name == b"template";
+    let mut depth = 1usize;
+    let mut i = content_start;
+
+    while i < input.len() {
+        if input[i] != b'<' {
+            i += 1;
+            continue;
+        }
+
+        let rest = &input[i + 1..];
+        if is_tag_named(rest, true, name) {
+            let tag_end = i + find_tag_close(rest)? + 2;
+            depth -= 1;
+            if depth == 0 {
+                return Some(tag_end);
+            }
+            i = tag_end;
+        } else if nests && is_tag_named(rest, false, name) {
+            depth += 1;
+            i += find_tag_close(rest)? + 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    return None;
+}
+
+/// Returns whether `rest`, the bytes just after a `<` character, starts an open (`closing` false) or
+/// close (`closing` true) tag for the element named `name`.
+///
+/// The name has to be followed by whitespace, `/` or `>`: `</scriptfoo>` does not close a `script`.
+fn is_tag_named(rest: &[u8], closing: bool, name: &[u8]) -> bool {
+    let start = if closing {
+        if rest.first() != Some(&b'/') {
+            return false;
+        }
+        1
+    } else {
+        0
+    };
+
+    return rest.len() > start + name.len()
+        && compare_case_insensitive(&rest[start..start + name.len()], name)
+        && matches!(
+            rest[start + name.len()],
+            b'>' | b'/' | b'\t' | b'\n' | b'\x0C' | b'\r' | b' '
+        );
+}
+
+/// Returns whether `content` holds a character encoding declaration.
+///
+/// Used to decide whether the snippet has to be kept behind an inert element: the browser's encoding
+/// prescan reads the raw bytes, so it honours a declaration wherever it is nested.
+fn contains_encoding_declaration(content: &[u8]) -> bool {
+    let mut offset = 0;
+
+    while let Some((tag_name, tag_start, tag_end)) = find_open_tag(content, offset) {
+        if tag_name == TagName::Meta && has_encoding_attributes(&content[tag_start..tag_end]) {
+            return true;
+        }
+        offset = tag_end;
+    }
+
+    return false;
 }
 
 /// Returns the index of the `>` character closing the tag whose content starts at the beginning of
@@ -158,6 +244,10 @@ fn parse_tag_name(input: &[u8]) -> Option<TagName> {
         return Some(TagName::RawText(b"title"));
     } else if compare_case_insensitive(input, b"textarea") {
         return Some(TagName::RawText(b"textarea"));
+    } else if compare_case_insensitive(input, b"noscript") {
+        return Some(TagName::Inert(b"noscript"));
+    } else if compare_case_insensitive(input, b"template") {
+        return Some(TagName::Inert(b"template"));
     } else {
         return None;
     }
@@ -171,27 +261,96 @@ fn parse_tag_name(input: &[u8]) -> Option<TagName> {
 /// `charset` (`data-charset`) and unrelated `http-equiv` values (`refresh`) are not mistaken for an
 /// encoding declaration: injecting right after those would place the snippet *before* the actual
 /// declaration.
+///
+/// Their values are checked as well, for the same reason: a `<meta charset="">` or a
+/// `<meta http-equiv="content-type" content="text/html">` gives the browser no encoding, so it goes
+/// on looking for the real declaration and the snippet has to do the same.
 fn has_encoding_attributes(tag: &[u8]) -> bool {
     // Attributes start after the tag name, at the first whitespace character.
     let Some(mut index) = tag.iter().position(|&b| return b.is_ascii_whitespace()) else {
         return false;
     };
 
+    let mut charset: Option<&[u8]> = None;
+    let mut http_equiv: Option<&[u8]> = None;
+    let mut content: Option<&[u8]> = None;
+
     loop {
         index = skip_whitespace(tag, index);
         if index >= tag.len() || tag[index] == b'>' {
-            return false;
+            break;
         }
 
         let (name, value, next_index) = parse_attribute(tag, index);
-        if compare_case_insensitive(name, b"charset")
-            || (compare_case_insensitive(name, b"http-equiv")
-                && compare_case_insensitive(value.trim_ascii(), b"content-type"))
-        {
-            return true;
+        for (attribute_name, slot) in [
+            (&b"charset"[..], &mut charset),
+            (&b"http-equiv"[..], &mut http_equiv),
+            (&b"content"[..], &mut content),
+        ] {
+            // Duplicate attributes are dropped by the parser, so only the first one counts. The
+            // attributes are collected rather than matched in place because `content` may be
+            // written before `http-equiv`.
+            if slot.is_none() && compare_case_insensitive(name, attribute_name) {
+                *slot = Some(value);
+            }
         }
         index = next_index;
     }
+
+    if charset.is_some_and(|value| return !value.trim_ascii().is_empty()) {
+        return true;
+    }
+
+    // A `http-equiv="content-type"` only declares the encoding through the `charset` parameter of
+    // its `content` value.
+    return http_equiv
+        .is_some_and(|value| return compare_case_insensitive(value.trim_ascii(), b"content-type"))
+        && content.is_some_and(has_charset_parameter);
+}
+
+/// Returns whether the given `content` attribute value carries a non-empty `charset` parameter, as
+/// in `text/html; charset=utf-8`.
+fn has_charset_parameter(content: &[u8]) -> bool {
+    let mut offset = 0;
+
+    while let Some(found) = position_case_insensitive(&content[offset..], b"charset") {
+        let mut index = skip_whitespace(content, offset + found + b"charset".len());
+        offset += found + b"charset".len();
+
+        if index >= content.len() || content[index] != b'=' {
+            continue;
+        }
+        index = skip_whitespace(content, index + 1);
+
+        let value = match content.get(index) {
+            Some(&quote) if quote == b'"' || quote == b'\'' => {
+                take_while(&content[index + 1..], |b| return b != quote)
+            }
+            _ => take_while(&content[index..], |b| {
+                return b != b';' && !b.is_ascii_whitespace();
+            }),
+        };
+        return !value.trim_ascii().is_empty();
+    }
+
+    return false;
+}
+
+fn take_while(input: &[u8], predicate: impl Fn(u8) -> bool) -> &[u8] {
+    let end = input
+        .iter()
+        .position(|&b| return !predicate(b))
+        .unwrap_or(input.len());
+    return &input[..end];
+}
+
+fn position_case_insensitive(haystack: &[u8], needle_lower_case: &[u8]) -> Option<usize> {
+    if haystack.len() < needle_lower_case.len() {
+        return None;
+    }
+    return haystack
+        .windows(needle_lower_case.len())
+        .position(|window| return compare_case_insensitive(window, needle_lower_case));
 }
 
 /// Parses the attribute starting at `index`, returning its name, its value (empty when the attribute
@@ -402,6 +561,83 @@ mod tests {
     }
 
     #[test]
+    fn meta_declaring_no_encoding_does_not_hide_a_later_one() {
+        // An empty `charset`, and a `http-equiv='content-type'` whose `content` carries no charset
+        // parameter, give the browser no encoding: it keeps looking, and so must the snippet.
+        test_injector(
+            "<html><head><meta charset=''><meta charset='utf-8'></head></html>",
+            "<html><head><meta charset=''><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        test_injector(
+            "<html><head><meta http-equiv='content-type' content='text/html'><meta charset='utf-8'></head></html>",
+            "<html><head><meta http-equiv='content-type' content='text/html'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        test_injector(
+            "<html><head><meta http-equiv='content-type'><meta charset='utf-8'></head></html>",
+            "<html><head><meta http-equiv='content-type'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+    }
+
+    #[test]
+    fn content_type_charset_parameter() {
+        // The `content` attribute may be written before `http-equiv`, and the charset parameter may
+        // be quoted.
+        test_injector(
+            "<html><head><meta content='text/html; charset=utf-8' http-equiv='Content-Type'></head></html>",
+            "<html><head><meta content='text/html; charset=utf-8' http-equiv='Content-Type'>{{SNIPPET}}</head></html>",
+        );
+        test_injector(
+            "<html><head><meta http-equiv='content-type' content=\"text/html; charset='utf-8'\"></head></html>",
+            "<html><head><meta http-equiv='content-type' content=\"text/html; charset='utf-8'\">{{SNIPPET}}</head></html>",
+        );
+        // A `content` mentioning 'charset' without a value declares nothing.
+        test_injector(
+            "<html><head><meta http-equiv='content-type' content='text/html; charset='></head></html>",
+            "<html><head>{{SNIPPET}}<meta http-equiv='content-type' content='text/html; charset='></head></html>",
+        );
+    }
+
+    #[test]
+    fn inert_elements_are_not_injection_points() {
+        // A script injected inside a `noscript` or a `template` would never run, but the encoding
+        // prescan does honour a declaration written there, so the snippet goes after the element.
+        test_injector(
+            "<html><head><noscript><meta charset='utf-8'></noscript></head></html>",
+            "<html><head><noscript><meta charset='utf-8'></noscript>{{SNIPPET}}</head></html>",
+        );
+        test_injector(
+            "<html><head><template><meta charset='utf-8'></template></head></html>",
+            "<html><head><template><meta charset='utf-8'></template>{{SNIPPET}}</head></html>",
+        );
+        // Without an encoding declaration inside, the earlier injection point still stands.
+        test_injector(
+            "<html><head><noscript><link rel='stylesheet' href='x.css'></noscript></head></html>",
+            "<html><head>{{SNIPPET}}<noscript><link rel='stylesheet' href='x.css'></noscript></head></html>",
+        );
+        // Templates nest, so the outer closing tag is the one that ends the element.
+        test_injector(
+            "<html><head><template><template><meta charset='utf-8'></template></template></head></html>",
+            "<html><head><template><template><meta charset='utf-8'></template></template>{{SNIPPET}}</head></html>",
+        );
+        // A declaration that follows the inert element is still the one to stay behind.
+        test_injector(
+            "<html><head><noscript><p>x</p></noscript><meta charset='utf-8'></head></html>",
+            "<html><head><noscript><p>x</p></noscript><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+    }
+
+    #[test]
+    fn unterminated_inert_element() {
+        // Everything following an unclosed template is inert, so the only valid injection point left
+        // is the one found before it.
+        test_injector(
+            "<html><head><template><meta charset='utf-8'>",
+            "<html><head>{{SNIPPET}}<template><meta charset='utf-8'>",
+        );
+        test_injector("<html><noscript><head>", "<html><noscript><head>");
+    }
+
+    #[test]
     fn several_tags_before_the_encoding_declaration() {
         test_injector(
             "<html><head><meta name='x'><meta name='y'><meta charset='utf-8'></head></html>",
@@ -507,7 +743,10 @@ mod tests {
     #[test]
     fn casing() {
         test_injector("<HeAd></head>", "<HeAd>{{SNIPPET}}</head>");
-        test_injector("<Meta charset=''> ", "<Meta charset=''>{{SNIPPET}} ");
+        test_injector(
+            "<Meta charset='UtF-8'> ",
+            "<Meta charset='UtF-8'>{{SNIPPET}} ",
+        );
     }
 
     #[test]
@@ -543,8 +782,8 @@ mod tests {
         fn script_before_meta() {
             // We would inject after a meta tag even if some script are defined before
             test_injector(
-                "<html><head></head><script></script><meta charset=''></html>",
-                "<html><head></head><script></script><meta charset=''>{{SNIPPET}}</html>",
+                "<html><head></head><script></script><meta charset='utf-8'></html>",
+                "<html><head></head><script></script><meta charset='utf-8'>{{SNIPPET}}</html>",
             );
         }
     }

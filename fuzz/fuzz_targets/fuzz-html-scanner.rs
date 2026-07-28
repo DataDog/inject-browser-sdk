@@ -10,7 +10,7 @@ extern crate libfuzzer_sys;
 
 use inject_browser_sdk::{
     generate_snippet,
-    injector::{InjectionStrategy, Injector},
+    injector::{InjectionStrategy, Injector, MetaCspPlacement},
     Configuration, RumConfiguration,
 };
 use libfuzzer_sys::fuzz_target;
@@ -39,8 +39,39 @@ fuzz_target!(|data: &[u8]| {
         None => (InjectionStrategy::default(), data),
     };
 
+    // And the second one on the meta CSP placement, so the reordering path is fuzzed too. It is the
+    // only path that moves bytes rather than inserting them.
+    let (csp_placement, data) = match data.split_first() {
+        Some((selector, rest)) => {
+            let placement = match selector % 2 {
+                0 => MetaCspPlacement::After,
+                _ => MetaCspPlacement::Before,
+            };
+            (placement, rest)
+        }
+        None => (MetaCspPlacement::default(), data),
+    };
+
     let snippet = generate_snippet(&conf).unwrap();
-    let mut injector = Injector::with_strategy(snippet.as_slice(), strategy);
-    let _res = injector.write(data);
-    let _res = injector.end();
+    let mut injector = Injector::with_options(snippet.as_slice(), strategy, csp_placement);
+
+    let mut emitted = 0usize;
+    let result = injector.write(data);
+    emitted += result.slices[..result.length]
+        .iter()
+        .map(|slice| slice.bytes.len())
+        .sum::<usize>();
+    let result = injector.end();
+    emitted += result.slices[..result.length]
+        .iter()
+        .map(|slice| slice.bytes.len())
+        .sum::<usize>();
+
+    // Whatever happens, the injector emits every input byte exactly once, plus either the snippet
+    // or the padding that stands in for it. This catches any arithmetic mistake in the slicing.
+    assert_eq!(
+        emitted,
+        data.len() + snippet.len(),
+        "emitted length must be the input length plus the snippet length"
+    );
 });

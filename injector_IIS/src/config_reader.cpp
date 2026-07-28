@@ -104,6 +104,37 @@ VARIANT get_property_value(IAppHostProperty& property) {
   return v;
 }
 
+// Reads an `enum`-typed attribute, which IIS hands back as an integer. Returns `fallback` when the
+// attribute is missing, of an unexpected type, or out of range: an unreadable knob must not take
+// injection down, and the fallback is always the historical behaviour.
+template <typename Enum>
+Enum read_enum_property(IAppHostElement& element, std::wstring_view name, Enum fallback,
+                        int max_value, Logger& logger) {
+  auto* property = get_property(element, name);
+  if (property == nullptr) {
+    return fallback;
+  }
+  const auto defer_property = defer([&] { property->Release(); });
+
+  auto value = get_property_value(*property);
+  const auto defer_value = defer([&] { VariantClear(&value); });
+  if (value.vt != VT_I4 && value.vt != VT_I2) {
+    if (value.vt != VT_EMPTY) {
+      logger.info(std::format("Unexpected '{}' type (vt={}), using the default",
+                              wstring_to_utf8(std::wstring(name)), value.vt));
+    }
+    return fallback;
+  }
+
+  int const raw = (value.vt == VT_I4) ? value.lVal : value.iVal;
+  if (raw < 0 || raw > max_value) {
+    logger.info(std::format("Out of range '{}' value ({}), using the default",
+                            wstring_to_utf8(std::wstring(name)), raw));
+    return fallback;
+  }
+  return static_cast<Enum>(raw);
+}
+
 }  // namespace
 
 std::string wstring_to_utf8(const std::wstring& wstr) {
@@ -220,6 +251,13 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     }
   }
 
+  auto const injection_strategy = read_enum_property(
+      *cfg_root_elem, L"injectionStrategy", InjectionStrategy::HeadCloseTag,
+      static_cast<int>(InjectionStrategy::HeadOpenTagWithCloseTagFallback), logger);
+  auto const meta_csp_placement =
+      read_enum_property(*cfg_root_elem, L"metaCspPlacement", MetaCspPlacement::After,
+                         static_cast<int>(MetaCspPlacement::Before), logger);
+
   // Iterate on the SDK configuration
   std::unordered_map<std::string, std::string> rum_sdk_opts;
 
@@ -303,7 +341,8 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     }
   }
 
-  return ReadConfResult::ok(RumConfig{cfg_version, std::move(rum_sdk_opts)});
+  return ReadConfResult::ok(
+      RumConfig{cfg_version, std::move(rum_sdk_opts), injection_strategy, meta_csp_placement});
 }
 
 void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR config_path,
@@ -320,6 +359,8 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
     }
     ctx.application_id_tag.clear();
     ctx.remote_config_tag.clear();
+    ctx.injection_strategy = InjectionStrategy::HeadCloseTag;
+    ctx.meta_csp_placement = MetaCspPlacement::After;
     return;
   }
 
@@ -352,6 +393,11 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
     snippet_cleanup(ctx.snippet);
   }
   ctx.snippet = snippet;
+
+  // Only updated alongside the snippet: on a failed read the previous settings stay in force, for
+  // the same reason the previous snippet does.
+  ctx.injection_strategy = config.injection_strategy;
+  ctx.meta_csp_placement = config.meta_csp_placement;
 
   ctx.application_id_tag.clear();
   if (auto appIdIt = config.sdk_options.find("applicationId");

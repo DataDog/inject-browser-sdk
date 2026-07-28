@@ -2,7 +2,7 @@ use std::{env, fs, io::Write as _, process};
 
 use inject_browser_sdk::{
     generate_snippet,
-    injector::{InjectionStrategy, Injector, Result as InjectorResult},
+    injector::{InjectionStrategy, Injector, MetaCspPlacement, Result as InjectorResult},
     Configuration, RumConfiguration,
 };
 
@@ -15,16 +15,29 @@ const STRATEGIES: [(&str, InjectionStrategy); 3] = [
     ),
 ];
 
+const CSP_PLACEMENTS: [(&str, MetaCspPlacement); 2] = [
+    ("after", MetaCspPlacement::After),
+    ("before", MetaCspPlacement::Before),
+];
+
+fn names<T>(options: &[(&'static str, T)]) -> String {
+    return options
+        .iter()
+        .map(|(name, _)| return *name)
+        .collect::<Vec<_>>()
+        .join(", ");
+}
+
 fn usage() -> ! {
     println!(
-        "Usage: {} <input_file> [strategy]\n\nstrategy is one of {} (default: {}).",
+        "Usage: {} <input_file> [strategy] [meta-csp-placement]\n\n\
+         strategy is one of {} (default: {}).\n\
+         meta-csp-placement is one of {} (default: {}).",
         env::args().next().unwrap(),
-        STRATEGIES
-            .iter()
-            .map(|(name, _)| return *name)
-            .collect::<Vec<_>>()
-            .join(", "),
+        names(&STRATEGIES),
         STRATEGIES[0].0,
+        names(&CSP_PLACEMENTS),
+        CSP_PLACEMENTS[0].0,
     );
     process::exit(1);
 }
@@ -40,6 +53,17 @@ fn main() {
             Some((_, strategy)) => *strategy,
             None => {
                 println!("Unknown strategy: {}", name);
+                usage();
+            }
+        },
+    };
+
+    let csp_placement = match env::args().nth(3) {
+        None => MetaCspPlacement::default(),
+        Some(name) => match CSP_PLACEMENTS.iter().find(|(n, _)| return *n == name) {
+            Some((_, placement)) => *placement,
+            None => {
+                println!("Unknown meta CSP placement: {}", name);
                 usage();
             }
         },
@@ -70,7 +94,7 @@ fn main() {
         }
     };
 
-    let mut injector = Injector::with_strategy(&snippet, strategy);
+    let mut injector = Injector::with_options(&snippet, strategy, csp_placement);
     print_injector_result(injector.write(&input_file_content));
     print_injector_result(injector.end());
 }

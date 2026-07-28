@@ -8,7 +8,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
 
-use crate::injection_point_locator::{HeadCloseTagLocator, InjectionPointLocator, Location};
+use crate::injection_point_locator::{
+    HeadCloseTagLocator, InjectionPoint, InjectionPointLocator, Location,
+};
 
 /// Number of bytes at the start of the document within which a character encoding declaration has
 /// to be serialized to be honoured by browsers, as per the HTML spec
@@ -26,7 +28,8 @@ const DOCUMENT_CHARSET_SCAN_LIMIT: usize = 1024;
 /// decide where it goes. The earlier the snippet runs, the more of the page lifecycle RUM observes,
 /// but injecting early means proving that no character encoding declaration follows, which cannot be
 /// done without buffering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum InjectionStrategy {
     /// Inject right before the `</head>` tag.
     ///
@@ -52,6 +55,39 @@ pub enum InjectionStrategy {
     /// Same buffering cost as [`InjectionStrategy::HeadOpenTag`], but instruments documents whose
     /// head does not start within the window.
     HeadOpenTagWithCloseTagFallback,
+}
+
+/// Where the snippet should sit relative to a `<meta http-equiv="content-security-policy">` element
+/// that *precedes* the character encoding declaration.
+///
+/// The snippet is kept behind the encoding declaration, so when a meta-delivered policy comes first
+/// the snippet lands after it and is governed by it. Being an inline script with no nonce, a strict
+/// `script-src` then blocks RUM entirely.
+///
+/// Orthogonal to [`InjectionStrategy`], and meaningless for [`InjectionStrategy::HeadCloseTag`],
+/// which always injects past any meta-delivered policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MetaCspPlacement {
+    /// Default. Never reorder; when a meta-delivered policy precedes the encoding declaration the
+    /// snippet lands after it and is governed by it.
+    #[default]
+    After,
+
+    /// Hoist the encoding declaration above the policy so the snippet precedes it.
+    ///
+    /// The exemption rests on browser timing: the inline snippet synchronously inserts the CDN
+    /// `<script async>`, and that fetch is checked against the policy in force at insertion time,
+    /// before the parser reaches the meta element.
+    ///
+    /// Two caveats:
+    /// * this only exempts the snippet from a *meta*-delivered policy. A `Content-Security-Policy`
+    ///   response header applies as well, and the injector never sees response headers, so it
+    ///   cannot detect one.
+    /// * classic scripts within the hoisted span now run *after* the snippet. The
+    ///   `h[d] = h[d] || {...}` guard in the snippet copes with that, but a customer script that
+    ///   *replaces* `window.DD_RUM` rather than augmenting it changes behaviour.
+    Before,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -95,6 +131,9 @@ pub struct Injector<'snippet> {
     /// Where to inject the snippet.
     strategy: InjectionStrategy,
 
+    /// Whether the snippet may be hoisted above a meta-delivered Content Security Policy.
+    csp_placement: MetaCspPlacement,
+
     /// Tracks the current state of the injection process.
     injector_state: InjectorState,
 
@@ -110,8 +149,10 @@ pub struct Injector<'snippet> {
     /// data to decide where to inject. During the `</head>` pass, it holds a partially matched tag
     /// that may turn out to be an injection point once more data arrives.
     ///
-    /// Either way it stays below DOCUMENT_CHARSET_SCAN_LIMIT bytes: an incoming chunk only ever
-    /// contributes the bytes that complete the window, never its whole length.
+    /// Either way it stays within DOCUMENT_CHARSET_SCAN_LIMIT bytes. While buffering the window, an
+    /// incoming chunk only ever contributes the bytes that complete it, never its whole length.
+    /// During the `</head>` pass, the locator abandons a match that spans more than
+    /// MAX_PENDING_CLOSE_TAG bytes, which is the same figure.
     ///
     /// There are two buffers here, because in some cases we need to return previously held data
     /// *and* hold part of the current chunk back. Once emitted, the buffer needs to be emptied, so
@@ -141,6 +182,14 @@ pub struct Injector<'snippet> {
     /// If we don't find any injection point, we need to pad the document with spaces, so the
     /// document has the same size as if the snippet was successfully injected.
     padding_spaces: Vec<u8>,
+
+    /// The head window, rewritten with the encoding declaration hoisted above a meta-delivered
+    /// policy and the snippet behind it. Only ever used by [`MetaCspPlacement::Before`].
+    ///
+    /// The reordered window is five fragments plus the tail, over what a single [`Result`] can
+    /// carry, and raising that cap would be an ABI change. Assembling the window here instead costs
+    /// one memcpy of at most DOCUMENT_CHARSET_SCAN_LIMIT bytes, once per hoisted response.
+    reordered_window: Vec<u8>,
 }
 
 impl<'snippet> Injector<'snippet> {
@@ -149,11 +198,22 @@ impl<'snippet> Injector<'snippet> {
         return Self::with_strategy(snippet, InjectionStrategy::default());
     }
 
-    /// Creates an injector using the given [`InjectionStrategy`].
+    /// Creates an injector using the given [`InjectionStrategy`] and the default
+    /// [`MetaCspPlacement`].
     pub fn with_strategy(snippet: &'snippet [u8], strategy: InjectionStrategy) -> Self {
+        return Self::with_options(snippet, strategy, MetaCspPlacement::default());
+    }
+
+    /// Creates an injector using the given [`InjectionStrategy`] and [`MetaCspPlacement`].
+    pub fn with_options(
+        snippet: &'snippet [u8],
+        strategy: InjectionStrategy,
+        csp_placement: MetaCspPlacement,
+    ) -> Self {
         return Self {
             snippet,
             strategy,
+            csp_placement,
             injector_state: match strategy {
                 // No head window to buffer: start scanning for `</head>` right away.
                 InjectionStrategy::HeadCloseTag => InjectorState::ScanningForHeadCloseTag,
@@ -167,6 +227,7 @@ impl<'snippet> Injector<'snippet> {
             incomplete_data: Vec::new(),
             incomplete_data_public_ref: Vec::new(),
             padding_spaces: Vec::new(),
+            reordered_window: Vec::new(),
         };
     }
 
@@ -249,15 +310,44 @@ impl<'snippet> Injector<'snippet> {
             }
         };
 
-        if let Some(point) = InjectionPointLocator::find(window) {
-            self.injected = true;
-            self.injector_state = InjectorState::PassingThrough;
-            return self.create_result(&[
-                BytesSlice::new(&window[..point], from_incoming_chunk),
-                BytesSlice::new(self.snippet, false),
-                BytesSlice::new(&window[point..], from_incoming_chunk),
-                BytesSlice::new(tail, true),
-            ]);
+        match InjectionPointLocator::find(window, self.csp_placement) {
+            Some(InjectionPoint::Insert(point)) => {
+                self.injected = true;
+                self.injector_state = InjectorState::PassingThrough;
+                return self.create_result(&[
+                    BytesSlice::new(&window[..point], from_incoming_chunk),
+                    BytesSlice::new(self.snippet, false),
+                    BytesSlice::new(&window[point..], from_incoming_chunk),
+                    BytesSlice::new(tail, true),
+                ]);
+            }
+
+            Some(InjectionPoint::HoistDeclaration {
+                head_end,
+                decl_start,
+                decl_end,
+            }) => {
+                // Five fragments do not fit in a `Result`, so the window is reassembled in a buffer
+                // of our own and emitted as one slice. `from_incoming_chunk` is `false` for it: the
+                // bytes live in the injector, not in the caller's chunk.
+                self.reordered_window.clear();
+                self.reordered_window.extend_from_slice(&window[..head_end]);
+                self.reordered_window
+                    .extend_from_slice(&window[decl_start..decl_end]);
+                self.reordered_window.extend_from_slice(self.snippet);
+                self.reordered_window
+                    .extend_from_slice(&window[head_end..decl_start]);
+                self.reordered_window.extend_from_slice(&window[decl_end..]);
+
+                self.injected = true;
+                self.injector_state = InjectorState::PassingThrough;
+                return self.create_result(&[
+                    BytesSlice::new(&self.reordered_window, false),
+                    BytesSlice::new(tail, true),
+                ]);
+            }
+
+            None => {}
         }
 
         if self.strategy == InjectionStrategy::HeadOpenTagWithCloseTagFallback {
@@ -311,8 +401,8 @@ impl<'snippet> Injector<'snippet> {
                 }
 
                 // A partial `</head>` at the very end of the data: hold it back, unless the document
-                // ends here, in which case it was never a real tag. Such a partial match is at most
-                // a few bytes long, so this does not reintroduce unbounded buffering.
+                // ends here, in which case it was never a real tag. The locator caps a pending match
+                // at MAX_PENDING_CLOSE_TAG bytes, so this does not reintroduce unbounded buffering.
                 Location::PotentialFromIndex(index) if !eof => {
                     self.incomplete_data.extend_from_slice(&tail[index..]);
                     return self.create_result(&[
@@ -542,7 +632,8 @@ mod tests {
         fn spaces() {
             test_injector(["abc </head>def"], "abc {{SNIPPET}}</head>def");
             test_injector(["abc< /head>def"], "abc< /head>def           ");
-            test_injector(["abc</ head>def"], "abc{{SNIPPET}}</ head>def");
+            // `</` followed by anything but a letter is a bogus comment, not an end tag.
+            test_injector(["abc</ head>def"], "abc</ head>def           ");
             test_injector(["abc</h ead>def"], "abc</h ead>def           ");
             test_injector(["abc</he ad>def"], "abc</he ad>def           ");
             test_injector(["abc</hea d>def"], "abc</hea d>def           ");
@@ -555,8 +646,8 @@ mod tests {
         fn ignores_head_open_tag() {
             test_injector(["<head>abc"], "<head>abc           ");
             test_injector(
-                ["<head><meta charset='...'>abc</head>def"],
-                "<head><meta charset='...'>abc{{SNIPPET}}</head>def",
+                ["<head><meta charset='utf-8'>abc</head>def"],
+                "<head><meta charset='utf-8'>abc{{SNIPPET}}</head>def",
             );
         }
 
@@ -575,7 +666,7 @@ mod tests {
 
             let parts: [Part; 16] = [
                 Part::new("</head>", true),
-                Part::new("</ head>", true),
+                Part::new("</ head>", false),
                 Part::new("</HeAd>", true),
                 Part::new("</HEAD>", true),
                 Part::new("</h ead>", false),
@@ -662,8 +753,8 @@ mod tests {
         #[test]
         fn injects_after_meta_charset() {
             test_injector(
-                ["<head><meta charset='...'>abc</head>def"],
-                "<head><meta charset='...'>{{SNIPPET}}abc</head>def",
+                ["<head><meta charset='utf-8'>abc</head>def"],
+                "<head><meta charset='utf-8'>{{SNIPPET}}abc</head>def",
             );
         }
 
@@ -724,9 +815,9 @@ mod tests {
 
         #[test]
         fn meta_after_1_kb_fallback_to_head() {
-            let input = format!("<head>{}<meta charset='...'></head>def", "a".repeat(1024));
+            let input = format!("<head>{}<meta charset='utf-8'></head>def", "a".repeat(1024));
             let expected = format!(
-                "<head>{}{}<meta charset='...'></head>def",
+                "<head>{}{}<meta charset='utf-8'></head>def",
                 "{{SNIPPET}}",
                 "a".repeat(1024)
             );
@@ -978,7 +1069,7 @@ mod tests {
             // ever come from a single `has_head_close` part.
             let parts: [Part; 16] = [
                 Part::new("</head>", true),
-                Part::new("</ head>", true),
+                Part::new("</ head>", false),
                 Part::new("</HeAd>", true),
                 Part::new("</HEAD>", true),
                 Part::new("</h ead>", false),
@@ -1052,6 +1143,102 @@ mod tests {
         }
     }
 
+    /// Hoisting the encoding declaration above a meta-delivered policy, so the snippet precedes it.
+    mod meta_csp_placement_before {
+        use super::*;
+
+        const CSP: &str =
+            "<meta http-equiv='content-security-policy' content=\"script-src 'self'\">";
+
+        fn test_injector<T: AsRef<[u8]> + core::fmt::Debug>(
+            input_chunks: impl IntoIterator<Item = T>,
+            expected: &str,
+        ) {
+            return run_injector(
+                Injector::with_options(
+                    b"{{SNIPPET}}",
+                    InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+                    MetaCspPlacement::Before,
+                ),
+                input_chunks,
+                expected,
+            );
+        }
+
+        /// The window is buffered over several writes and flushed by `end`.
+        #[test]
+        fn buffered_window() {
+            test_injector(
+                [
+                    "<html><head>",
+                    CSP,
+                    "<meta charset='utf-8'></head><body>hi</body></html>",
+                ],
+                &format!(
+                    "<html><head><meta charset='utf-8'>{{{{SNIPPET}}}}{CSP}</head><body>hi</body></html>"
+                ),
+            );
+        }
+
+        /// A single chunk covers the whole window, so it is scanned in place and the tail past the
+        /// window is emitted alongside the reordered buffer.
+        #[test]
+        fn window_scanned_in_place_with_a_tail() {
+            let head = format!("<html><head>{CSP}<meta charset='utf-8'></head>");
+            let filler = "a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - head.len());
+            let input = head + &filler + "tail data";
+            let expected = format!(
+                "<html><head><meta charset='utf-8'>{{{{SNIPPET}}}}{CSP}</head>{filler}tail data"
+            );
+
+            test_injector([input], &expected);
+        }
+
+        /// The reorder is length preserving, which is what keeps the padding path able to stand in
+        /// for a missing snippet.
+        #[test]
+        fn preserves_length() {
+            let input = format!("<html><head>{CSP}<meta charset='utf-8'></head></html>");
+            let mut injector = Injector::with_options(
+                b"{{SNIPPET}}",
+                InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+                MetaCspPlacement::Before,
+            );
+
+            let mut emitted: usize = injector
+                .write(input.as_bytes())
+                .iter()
+                .map(|slice| return slice.bytes.len())
+                .sum();
+            emitted += injector
+                .end()
+                .iter()
+                .map(|slice| return slice.bytes.len())
+                .sum::<usize>();
+
+            pretty_assertions::assert_eq!(emitted, input.len() + "{{SNIPPET}}".len());
+        }
+
+        /// Nothing to escape, so the output is the plain insertion the default placement produces.
+        #[test]
+        fn no_policy_falls_back_to_a_plain_insertion() {
+            test_injector(
+                ["<html><head><meta charset='utf-8'></head></html>"],
+                "<html><head><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+            );
+        }
+
+        /// The `</head>` fallback runs past any meta-delivered policy already, so it never hoists.
+        #[test]
+        fn head_close_tag_fallback_is_unaffected() {
+            let filler = "A".repeat(DOCUMENT_CHARSET_SCAN_LIMIT);
+            test_injector(
+                [filler.clone() + "<head>abc</head>def"],
+                &(filler + "<head>abc{{SNIPPET}}</head>def"),
+            );
+        }
+    }
+
     fn test_injector_with_strategy<T: AsRef<[u8]> + core::fmt::Debug>(
         strategy: InjectionStrategy,
         input_chunks: impl IntoIterator<Item = T>,
@@ -1113,11 +1300,12 @@ mod tests {
                     );
                 }
 
-                if !injected {
-                    // Look for the snippet in the slice
+                if !injected && slice.bytes.len() >= snippet.len() {
+                    // Look for the snippet anywhere in the slice: it is not necessarily a slice of
+                    // its own, as the hoisting path emits it embedded in a reordered buffer.
                     injected = slice
                         .bytes
-                        .windows(slice.bytes.len())
+                        .windows(snippet.len())
                         .any(|w| return w == snippet);
                 }
                 output_slices.extend_from_slice(slice.bytes);

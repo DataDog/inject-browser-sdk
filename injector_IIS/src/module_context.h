@@ -24,6 +24,10 @@ struct ModuleContext final : public IHttpStoredContext {
   IHttpServer* server = nullptr;
   std::string application_id_tag;
   std::string remote_config_tag;
+  // Injection settings resolved from the `datadogRum` section, applied when the injector is
+  // created. Defaults match the historical behaviour of `injector_create`.
+  InjectionStrategy injection_strategy = InjectionStrategy::HeadCloseTag;
+  MetaCspPlacement meta_csp_placement = MetaCspPlacement::After;
 
   ~ModuleContext() {
     if (snippet != nullptr) {

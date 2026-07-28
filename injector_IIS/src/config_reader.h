@@ -21,6 +21,10 @@ namespace datadog::rum {
 struct RumConfig {  // NOLINT(bugprone-exception-escape)
   int version;
   std::unordered_map<std::string, std::string> sdk_options;
+  // Injection settings. These configure the module rather than the Browser SDK, so they are read
+  // as their own attributes instead of going through the `option` collection.
+  InjectionStrategy injection_strategy = InjectionStrategy::HeadCloseTag;
+  MetaCspPlacement meta_csp_placement = MetaCspPlacement::After;
 };
 
 enum class ReadConfStatus {

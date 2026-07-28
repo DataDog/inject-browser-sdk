@@ -65,6 +65,48 @@ impl From<InjectionStrategy> for injector::InjectionStrategy {
     }
 }
 
+/// Where the snippet should sit relative to a `<meta http-equiv="content-security-policy">` element
+/// that *precedes* the character encoding declaration, see [`injector_create_with_options`].
+///
+/// The snippet is kept behind the encoding declaration, so when a meta-delivered policy comes first
+/// the snippet lands after it and is governed by it. Being an inline script with no nonce, a strict
+/// `script-src` then blocks RUM entirely.
+///
+/// Orthogonal to [`InjectionStrategy`], and meaningless for [`InjectionStrategy::HeadCloseTag`],
+/// which always injects past any meta-delivered policy.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetaCspPlacement {
+    /// Never reorder; when a meta-delivered policy precedes the encoding declaration the snippet
+    /// lands after it and is governed by it. This is what [`injector_create`] and
+    /// [`injector_create_with_strategy`] use.
+    After = 0,
+
+    /// Hoist the encoding declaration above the policy so the snippet precedes it.
+    ///
+    /// The exemption rests on browser timing: the inline snippet synchronously inserts the CDN
+    /// `<script async>`, and that fetch is checked against the policy in force at insertion time,
+    /// before the parser reaches the meta element.
+    ///
+    /// Three caveats:
+    /// * this only exempts the snippet from a *meta*-delivered policy. A `Content-Security-Policy`
+    ///   response header applies as well, and the injector never sees response headers, so it
+    ///   cannot detect one.
+    /// * classic scripts within the hoisted span now run *after* the snippet.
+    /// * the output is no longer a monotonic mapping of input offsets: bytes are moved, not just
+    ///   inserted. The total length is still the input length plus the snippet length.
+    Before = 1,
+}
+
+impl From<MetaCspPlacement> for injector::MetaCspPlacement {
+    fn from(placement: MetaCspPlacement) -> Self {
+        return match placement {
+            MetaCspPlacement::After => injector::MetaCspPlacement::After,
+            MetaCspPlacement::Before => injector::MetaCspPlacement::Before,
+        };
+    }
+}
+
 /// Create an [`Injector`] injector based on a [`Snippet`], injecting before the `</head>` tag.
 ///
 /// Equivalent to calling [`injector_create_with_strategy`] with
@@ -108,6 +150,8 @@ pub unsafe extern "C" fn injector_create(snippet: *const Snippet) -> *mut Inject
 /// Behaves exactly like [`injector_create`] with respect to `NULL` handling, memory ownership and
 /// usage; see its documentation. `strategy` must be one of the [`InjectionStrategy`] enumerators.
 ///
+/// Equivalent to calling [`injector_create_with_options`] with [`MetaCspPlacement::After`].
+///
 /// # Example
 ///
 /// ```c
@@ -119,6 +163,32 @@ pub unsafe extern "C" fn injector_create_with_strategy(
     snippet: *const Snippet,
     strategy: InjectionStrategy,
 ) -> *mut Injector {
+    return injector_create_with_options(snippet, strategy, MetaCspPlacement::After);
+}
+
+/// Create an [`Injector`] injector based on a [`Snippet`], choosing where the snippet is injected and
+/// whether it may be hoisted above a meta-delivered Content Security Policy.
+///
+/// Behaves exactly like [`injector_create`] with respect to `NULL` handling, memory ownership and
+/// usage; see its documentation. `strategy` must be one of the [`InjectionStrategy`] enumerators and
+/// `csp_placement` one of the [`MetaCspPlacement`] enumerators.
+///
+/// With [`MetaCspPlacement::Before`], the emitted bytes are no longer a monotonic mapping of the
+/// input offsets: the encoding declaration may be moved ahead of everything that preceded it. The
+/// total emitted length is unchanged, so `Content-Length` handling is unaffected.
+///
+/// # Example
+///
+/// ```c
+/// Injector* injector = injector_create_with_options(
+///     snippet, InjectionStrategy::HeadOpenTagWithCloseTagFallback, MetaCspPlacement::Before);
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn injector_create_with_options(
+    snippet: *const Snippet,
+    strategy: InjectionStrategy,
+    csp_placement: MetaCspPlacement,
+) -> *mut Injector {
     if snippet.is_null() {
         return core::ptr::null_mut();
     }
@@ -128,7 +198,11 @@ pub unsafe extern "C" fn injector_create_with_strategy(
     };
 
     return Box::into_raw(Box::new(Injector {
-        inner: injector::Injector::with_strategy(snippet_content, strategy.into()),
+        inner: injector::Injector::with_options(
+            snippet_content,
+            strategy.into(),
+            csp_placement.into(),
+        ),
         slices_memory_storage: core::array::from_fn(|_| return BytesSlice::empty()),
     }));
 }
@@ -436,6 +510,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn injector_create_with_options_null_snippet_returns_null() {
+        for csp_placement in [MetaCspPlacement::After, MetaCspPlacement::Before] {
+            let injector = unsafe {
+                injector_create_with_options(
+                    null(),
+                    InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+                    csp_placement,
+                )
+            };
+            assert!(injector.is_null());
+        }
+    }
+
+    #[test]
+    fn injector_create_with_options_hoists_the_encoding_declaration() {
+        let html = b"<head><meta http-equiv='content-security-policy' content='x'><meta charset='utf-8'></head>def";
+
+        assert_eq!(
+            inject_with_options(
+                Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback),
+                MetaCspPlacement::Before,
+                html
+            ),
+            "<head><meta charset='utf-8'><SNIPPET><meta http-equiv='content-security-policy' content='x'></head>def"
+        );
+
+        // The default placement leaves the document in order, with the snippet behind the policy.
+        assert_eq!(
+            inject_with_options(
+                Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback),
+                MetaCspPlacement::After,
+                html
+            ),
+            "<head><meta http-equiv='content-security-policy' content='x'><meta charset='utf-8'><SNIPPET></head>def"
+        );
+    }
+
     /// Length of the snippet built by [`test_snippet`], used to check padding.
     fn snippet_len() -> usize {
         let snippet = test_snippet();
@@ -451,9 +563,19 @@ mod tests {
     /// Drives a full injection through the C API and returns the concatenated output, with the
     /// snippet itself replaced by `<SNIPPET>` so assertions stay readable.
     fn inject(strategy: Option<InjectionStrategy>, html: &[u8]) -> String {
+        return inject_with_options(strategy, MetaCspPlacement::After, html);
+    }
+
+    fn inject_with_options(
+        strategy: Option<InjectionStrategy>,
+        csp_placement: MetaCspPlacement,
+        html: &[u8],
+    ) -> String {
         let snippet = test_snippet();
         let injector = match strategy {
-            Some(strategy) => unsafe { injector_create_with_strategy(snippet, strategy) },
+            Some(strategy) => unsafe {
+                injector_create_with_options(snippet, strategy, csp_placement)
+            },
             None => unsafe { injector_create(snippet) },
         };
         assert!(!injector.is_null());
@@ -471,11 +593,7 @@ mod tests {
             for index in 0..result.slices_length as usize {
                 let slice = unsafe { &*result.slices.add(index) };
                 let bytes = unsafe { slice::from_raw_parts(slice.start, slice.length as usize) };
-                if bytes == snippet_content.as_slice() {
-                    output.push_str("<SNIPPET>");
-                } else {
-                    output.push_str(core::str::from_utf8(bytes).expect("valid UTF-8"));
-                }
+                output.push_str(core::str::from_utf8(bytes).expect("valid UTF-8"));
             }
         };
         append(unsafe { injector_write(injector, html.as_ptr(), html.len() as u32) });
@@ -483,7 +601,13 @@ mod tests {
 
         unsafe { injector_cleanup(injector) };
         unsafe { snippet_cleanup(snippet) };
-        return output;
+
+        // Substituted on the assembled output rather than per slice: the hoisting path emits the
+        // snippet embedded in a reordered window, not as a slice of its own.
+        return output.replace(
+            core::str::from_utf8(&snippet_content).expect("valid UTF-8"),
+            "<SNIPPET>",
+        );
     }
 
     fn test_snippet() -> *mut Snippet {

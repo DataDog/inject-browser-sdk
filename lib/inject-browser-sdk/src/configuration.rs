@@ -214,6 +214,9 @@ fn is_valid_datacenter_prefix(s: &str) -> bool {
 
 const MAJOR_VERSIONS: [u32; 2] = [5, 6];
 
+/// Browser SDK major version used when `DD_RUM_MAJOR_VERSION` is not set.
+const DEFAULT_MAJOR_VERSION: u32 = 6;
+
 /// Parse a [`Configuration`] from JSON.
 ///
 /// Unknown top-level keys (e.g. a typo like `"rumm"`) are rejected by
@@ -309,7 +312,7 @@ impl Configuration {
     /// not read.
     pub fn from_lookup<'a>(lookup: impl Fn(&str) -> Option<&'a str>) -> Result<Self, Error> {
         let mut cfg = Configuration {
-            major_version: 5,
+            major_version: DEFAULT_MAJOR_VERSION,
             rum: RumConfiguration::default(),
         };
         for &(name, setter) in DD_FIELDS {
@@ -561,7 +564,7 @@ mod test {
         let config = Configuration::from_lookup(lookup_from_map(&map)).unwrap();
         assert_eq!(config.rum.application_id.as_deref(), Some("app-1"));
         assert_eq!(config.rum.client_token.as_deref(), Some("tok-1"));
-        assert_eq!(config.major_version, 5);
+        assert_eq!(config.major_version, DEFAULT_MAJOR_VERSION);
         assert_eq!(config.rum.site, None);
     }
 

@@ -210,6 +210,25 @@ mod tests {
     }
 
     #[test]
+    fn default_major_version_selects_the_v6_cdn_url() {
+        // No DD_RUM_MAJOR_VERSION on disk, so the default applies. The URL shape is the one
+        // documented by the browser-sdk: `/{region}/v{major}/datadog-rum.js`.
+        let snippet = snippet_from_stable_config_with_reader(
+            &crate::platform::tests::PopulatedReader,
+            "browser-sdk",
+            false,
+            None,
+        )
+        .expect("should build snippet");
+
+        let text = core::str::from_utf8(&snippet.bytes).expect("snippet is UTF-8");
+        assert!(
+            text.contains("https://www.datadoghq-browser-agent.com/us1/v6/datadog-rum.js"),
+            "expected the v6 CDN URL, got:\n{text}"
+        );
+    }
+
+    #[test]
     fn overlay_wins_over_populated_disk_config() {
         use crate::configuration::RumConfiguration;
 

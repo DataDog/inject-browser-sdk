@@ -49,6 +49,9 @@ impl InjectionPointLocator {
 enum TagName {
     Meta,
     Head,
+    /// An element whose content is raw text (`script`, `style`), holding its lower case name. Such
+    /// content is not markup, so it must be skipped rather than scanned.
+    RawText(&'static [u8]),
 }
 
 fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)> {
@@ -73,11 +76,44 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
             .iter()
             .position(|&b| return b.is_ascii_whitespace() || b == b'>')?;
 
-        if let Some(relevant_tag_name) = parse_tag_name(&rest[..name_end]) {
-            return Some((relevant_tag_name, tag_start, tag_end));
+        match parse_tag_name(&rest[..name_end]) {
+            // The content of a raw text element is text, not markup: a `<meta charset>` written
+            // within a script or a stylesheet is not an encoding declaration, and injecting right
+            // after it would insert the snippet in the middle of the script or stylesheet source.
+            Some(TagName::RawText(name)) => i = find_raw_text_end(input, tag_end, name)?,
+            Some(relevant_tag_name) => return Some((relevant_tag_name, tag_start, tag_end)),
+            None => i = tag_end,
+        }
+    }
+
+    return None;
+}
+
+/// Returns the index just past the closing tag of the raw text element named `name` whose content
+/// starts at `content_start`, or `None` if the element is never closed within `input`.
+fn find_raw_text_end(input: &[u8], content_start: usize, name: &[u8]) -> Option<usize> {
+    let mut i = content_start;
+
+    while i < input.len() {
+        if input[i] != b'<' {
+            i += 1;
+            continue;
         }
 
-        i = tag_end;
+        // Only `</name` followed by whitespace, '/' or '>' closes a raw text element.
+        let rest = &input[i + 1..];
+        if rest.first() == Some(&b'/')
+            && rest.len() > name.len() + 1
+            && compare_case_insensitive(&rest[1..name.len() + 1], name)
+            && matches!(
+                rest[name.len() + 1],
+                b'>' | b'/' | b'\t' | b'\n' | b'\x0C' | b'\r' | b' '
+            )
+        {
+            return Some(i + find_tag_close(rest)? + 2);
+        }
+
+        i += 1;
     }
 
     return None;
@@ -114,6 +150,10 @@ fn parse_tag_name(input: &[u8]) -> Option<TagName> {
         return Some(TagName::Meta);
     } else if compare_case_insensitive(input, b"head") {
         return Some(TagName::Head);
+    } else if compare_case_insensitive(input, b"script") {
+        return Some(TagName::RawText(b"script"));
+    } else if compare_case_insensitive(input, b"style") {
+        return Some(TagName::RawText(b"style"));
     } else {
         return None;
     }
@@ -401,6 +441,41 @@ mod tests {
             "<html><head><meta charset='...'><meta http-equiv='...'></head></html>",
             "<html><head><meta charset='...'>{{SNIPPET}}<meta http-equiv='...'></head></html>",
         );
+    }
+
+    #[test]
+    fn tags_within_raw_text_elements_are_not_markup() {
+        // A meta tag written in a script or a stylesheet source is not an encoding declaration:
+        // injecting after it would corrupt the script or the stylesheet.
+        test_injector(
+            "<html><head><script>const x = '<meta charset=utf-8>';</script></head></html>",
+            "<html><head>{{SNIPPET}}<script>const x = '<meta charset=utf-8>';</script></head></html>",
+        );
+        test_injector(
+            "<html><head><style>/* <meta charset=utf-8> */</style><meta charset='utf-8'></head></html>",
+            "<html><head><style>/* <meta charset=utf-8> */</style><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        // The closing tag is matched case insensitively and may carry trailing spaces.
+        test_injector(
+            "<html><head><SCRIPT><meta charset=utf-8></SCRIPT ><meta charset='utf-8'></head></html>",
+            "<html><head><SCRIPT><meta charset=utf-8></SCRIPT ><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        // A `</scriptfoo>` tag does not close the script element.
+        test_injector(
+            "<html><head><script></scriptfoo><meta charset=utf-8></script></head></html>",
+            "<html><head>{{SNIPPET}}<script></scriptfoo><meta charset=utf-8></script></head></html>",
+        );
+    }
+
+    #[test]
+    fn unterminated_raw_text_element() {
+        // Everything following an unclosed script tag is script source, so the only valid injection
+        // point left is the one found before it.
+        test_injector(
+            "<html><head><script><meta charset=utf-8>",
+            "<html><head>{{SNIPPET}}<script><meta charset=utf-8>",
+        );
+        test_injector("<html><script><head>", "<html><script><head>");
     }
 
     #[test]

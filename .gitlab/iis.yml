@@ -20,7 +20,6 @@ variables:
     BUILD_CONFIGURATION: Release
     ARCH: x64
     GIT_DEPTH: 500 #Default is 20
-    GIT_SUBMODULE_STRATEGY: recursive
   script:
     - |
       $image = "${WINDOWS_BUILD_IMAGE}"
@@ -132,8 +131,6 @@ injector_IIS_unit_test_linux_wine:
   image: $DEVCONTAINER_IMAGE
   needs:
     - devcontainer_image
-  variables:
-    GIT_SUBMODULE_STRATEGY: recursive
   script:
     - make test-iis
 

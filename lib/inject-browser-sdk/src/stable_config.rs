@@ -11,13 +11,9 @@ use alloc::vec::Vec;
 use libdd_library_config::ConfigRead;
 use libdd_library_config::LibraryConfig;
 
-use crate::configuration::{
-    parse_bool, parse_injection_strategy, parse_meta_csp_placement, Configuration,
-    ConfigurationOverlay,
-};
+use crate::configuration::{parse_bool, Configuration, ConfigurationOverlay};
 use crate::error::Error;
 use crate::generate_snippet;
-use crate::injector::{InjectionStrategy, MetaCspPlacement};
 
 /// A generated snippet and its resolved host-side values.
 #[cfg_attr(test, derive(Debug))]
@@ -31,12 +27,6 @@ pub struct StableConfigSnippet {
     pub application_id: Option<String>,
     /// Resolved `remoteConfigurationId`, for host-side telemetry tagging.
     pub remote_configuration_id: Option<String>,
-    /// Resolved `DD_RUM_INJECTION_STRATEGY`, or `None` when nothing configured
-    /// it. Hosts own the default for `None`.
-    pub injection_strategy: Option<InjectionStrategy>,
-    /// Resolved `DD_RUM_META_CSP_PLACEMENT`, or `None` when nothing configured
-    /// it. Hosts own the default for `None`.
-    pub meta_csp_placement: Option<MetaCspPlacement>,
 }
 
 /// Stable configuration read from disk once and reusable across overlays.
@@ -55,39 +45,10 @@ impl StableConfig {
             .map(|config| return config.value.as_str());
     }
 
-    /// Resolves `DD_RUM_INJECTION_STRATEGY` and `DD_RUM_META_CSP_PLACEMENT`,
-    /// with the overlay winning over the stable-configuration entry.
-    ///
-    /// These configure the host, not the Browser SDK, so they are resolved here
-    /// rather than through [`Configuration::from_lookup`], and they are reported
-    /// even when injection is disabled: the host needs a complete picture.
-    fn host_injection_options(
-        &self,
-        overlay: Option<&ConfigurationOverlay>,
-    ) -> Result<(Option<InjectionStrategy>, Option<MetaCspPlacement>), Error> {
-        let injection_strategy = match overlay.and_then(|value| return value.injection_strategy) {
-            Some(strategy) => Some(strategy),
-            None => self
-                .lookup("DD_RUM_INJECTION_STRATEGY")
-                .map(|raw| return parse_injection_strategy(raw, "DD_RUM_INJECTION_STRATEGY"))
-                .transpose()?,
-        };
-        let meta_csp_placement = match overlay.and_then(|value| return value.meta_csp_placement) {
-            Some(placement) => Some(placement),
-            None => self
-                .lookup("DD_RUM_META_CSP_PLACEMENT")
-                .map(|raw| return parse_meta_csp_placement(raw, "DD_RUM_META_CSP_PLACEMENT"))
-                .transpose()?,
-        };
-        return Ok((injection_strategy, meta_csp_placement));
-    }
-
     fn disabled_snippet(
         &self,
         overlay: Option<&ConfigurationOverlay>,
         enabled: Option<bool>,
-        injection_strategy: Option<InjectionStrategy>,
-        meta_csp_placement: Option<MetaCspPlacement>,
     ) -> StableConfigSnippet {
         let application_id = overlay
             .and_then(|value| return value.rum.application_id.clone())
@@ -106,8 +67,6 @@ impl StableConfig {
             enabled,
             application_id,
             remote_configuration_id,
-            injection_strategy,
-            meta_csp_placement,
         };
     }
 
@@ -146,16 +105,8 @@ impl StableConfig {
                 .map(|raw| return parse_bool(raw, "DD_RUM_ENABLED"))
                 .transpose()?,
         };
-        let (injection_strategy, meta_csp_placement) =
-            self.host_injection_options(overlay.as_ref())?;
-
         if enabled == Some(false) {
-            return Ok(self.disabled_snippet(
-                overlay.as_ref(),
-                enabled,
-                injection_strategy,
-                meta_csp_placement,
-            ));
+            return Ok(self.disabled_snippet(overlay.as_ref(), enabled));
         }
 
         let mut config = Configuration::from_lookup(|key| return self.lookup(key))?;
@@ -169,8 +120,6 @@ impl StableConfig {
             enabled,
             application_id: config.rum.application_id.clone(),
             remote_configuration_id: config.rum.remote_configuration_id.clone(),
-            injection_strategy,
-            meta_csp_placement,
         });
     }
 }
@@ -340,19 +289,6 @@ mod tests {
   DD_SERVICE: unrelated-service
 "#;
 
-    const HOST_OPTIONS_CONFIG: &[u8] = br#"apm_configuration_default:
-  DD_RUM_APPLICATION_ID: app-1
-  DD_RUM_CLIENT_TOKEN: tok-1
-  DD_RUM_INJECTION_STRATEGY: head-open-tag-with-close-tag-fallback
-  DD_RUM_META_CSP_PLACEMENT: before
-"#;
-
-    const INVALID_HOST_OPTIONS_CONFIG: &[u8] = br#"apm_configuration_default:
-  DD_RUM_APPLICATION_ID: app-1
-  DD_RUM_CLIENT_TOKEN: tok-1
-  DD_RUM_INJECTION_STRATEGY: head-middle-tag
-"#;
-
     struct ContentReader(Option<&'static [u8]>);
 
     impl ConfigRead for ContentReader {
@@ -474,83 +410,6 @@ mod tests {
             assert_eq!(snippet.enabled, Some(overlay_enabled));
             assert_eq!(snippet.bytes.is_empty(), !overlay_enabled);
         }
-    }
-
-    #[test]
-    fn host_injection_options_are_resolved_from_disk() {
-        let snippet = snippet_from_stable_config_with_reader(
-            &ContentReader(Some(HOST_OPTIONS_CONFIG)),
-            "browser-sdk",
-            false,
-            None,
-        )
-        .expect("should build snippet");
-
-        assert_eq!(
-            snippet.injection_strategy,
-            Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback)
-        );
-        assert_eq!(snippet.meta_csp_placement, Some(MetaCspPlacement::Before));
-        // The host settings must not leak into `DD_RUM.init`.
-        let bytes = String::from_utf8(snippet.bytes).expect("valid UTF-8");
-        assert!(!bytes.contains("injectionStrategy"), "got: {bytes}");
-        assert!(!bytes.contains("metaCspPlacement"), "got: {bytes}");
-    }
-
-    #[test]
-    fn overlay_overrides_host_injection_options() {
-        let overlay = ConfigurationOverlay {
-            meta_csp_placement: Some(MetaCspPlacement::After),
-            ..Default::default()
-        };
-        let snippet = snippet_from_stable_config_with_reader(
-            &ContentReader(Some(HOST_OPTIONS_CONFIG)),
-            "browser-sdk",
-            false,
-            Some(overlay),
-        )
-        .expect("should build snippet");
-
-        assert_eq!(snippet.meta_csp_placement, Some(MetaCspPlacement::After));
-        // Unset on the overlay, so the disk value still stands.
-        assert_eq!(
-            snippet.injection_strategy,
-            Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback)
-        );
-    }
-
-    #[test]
-    fn host_injection_options_are_reported_when_disabled() {
-        // The host needs a complete picture even when injection is off, just like `enabled` and
-        // the ids already reported by `disabled_snippet`.
-        let overlay = ConfigurationOverlay {
-            enabled: Some(false),
-            ..Default::default()
-        };
-        let snippet = snippet_from_stable_config_with_reader(
-            &ContentReader(Some(HOST_OPTIONS_CONFIG)),
-            "browser-sdk",
-            false,
-            Some(overlay),
-        )
-        .expect("should build snippet");
-
-        assert_eq!(snippet.enabled, Some(false));
-        assert!(snippet.bytes.is_empty());
-        assert_eq!(snippet.meta_csp_placement, Some(MetaCspPlacement::Before));
-    }
-
-    #[test]
-    fn invalid_host_injection_option_surfaces_an_error() {
-        let error = snippet_from_stable_config_with_reader(
-            &ContentReader(Some(INVALID_HOST_OPTIONS_CONFIG)),
-            "browser-sdk",
-            false,
-            None,
-        )
-        .expect_err("an unparseable strategy must not be silently ignored");
-
-        assert_eq!(error.code(), 6);
     }
 
     #[test]

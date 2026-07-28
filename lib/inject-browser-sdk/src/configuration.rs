@@ -5,7 +5,6 @@
 // Copyright 2024-Present Datadog, Inc.
 
 use crate::error::Error;
-use crate::injector::{InjectionStrategy, MetaCspPlacement};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap as Map;
 use alloc::format;
@@ -91,14 +90,6 @@ pub struct RumConfiguration {
 pub struct ConfigurationOverlay {
     pub major_version: Option<u32>,
     pub enabled: Option<bool>,
-    /// Where the host should inject the snippet. A host concern rather than a
-    /// Browser SDK init option, so it sits here rather than on
-    /// [`RumConfiguration`], whose fields are serialised into `DD_RUM.init`.
-    pub injection_strategy: Option<InjectionStrategy>,
-    /// Whether the host may hoist the encoding declaration above a
-    /// meta-delivered Content Security Policy. Same reasoning as
-    /// [`ConfigurationOverlay::injection_strategy`].
-    pub meta_csp_placement: Option<MetaCspPlacement>,
     #[serde(default)]
     pub rum: RumConfiguration,
 }
@@ -303,19 +294,11 @@ const DD_FIELDS: &[(&str, Setter)] = &[
     }),
 ];
 
-/// Stable-configuration keys that configure the *host* rather than the Browser
-/// SDK, and so are resolved by [`crate::stable_config::StableConfig`] rather
-/// than [`Configuration::from_lookup`]: they never reach `DD_RUM.init`.
-pub(crate) const HOST_KEYS: &[&str] = &[
-    "DD_RUM_ENABLED",
-    "DD_RUM_INJECTION_STRATEGY",
-    "DD_RUM_META_CSP_PLACEMENT",
-];
-
 /// Whether a stable-configuration key is consumed by the RUM configuration
-/// path, either as a Browser SDK option or as one of the [`HOST_KEYS`].
+/// path. `DD_RUM_ENABLED` is resolved by [`crate::stable_config::StableConfig`]
+/// rather than [`Configuration::from_lookup`].
 pub(crate) fn is_rum_configuration_key(name: &str) -> bool {
-    return HOST_KEYS.contains(&name)
+    return name == "DD_RUM_ENABLED"
         || DD_FIELDS
             .iter()
             .any(|(field_name, _)| return *field_name == name);
@@ -399,49 +382,6 @@ pub(crate) fn parse_bool(raw: &str, key: &str) -> Result<bool, Error> {
             )))
         }
     }
-}
-
-/// Accepted values for `DD_RUM_INJECTION_STRATEGY`, matching the JSON overlay
-/// spelling of [`InjectionStrategy`].
-const INJECTION_STRATEGIES: &[(&str, InjectionStrategy)] = &[
-    ("head-close-tag", InjectionStrategy::HeadCloseTag),
-    ("head-open-tag", InjectionStrategy::HeadOpenTag),
-    (
-        "head-open-tag-with-close-tag-fallback",
-        InjectionStrategy::HeadOpenTagWithCloseTagFallback,
-    ),
-];
-
-/// Accepted values for `DD_RUM_META_CSP_PLACEMENT`, matching the JSON overlay
-/// spelling of [`MetaCspPlacement`].
-const META_CSP_PLACEMENTS: &[(&str, MetaCspPlacement)] = &[
-    ("after", MetaCspPlacement::After),
-    ("before", MetaCspPlacement::Before),
-];
-
-fn parse_enum<T: Copy>(table: &[(&str, T)], raw: &str, key: &str) -> Result<T, Error> {
-    let lower_case = raw.to_ascii_lowercase();
-    for (name, value) in table {
-        if *name == lower_case {
-            return Ok(*value);
-        }
-    }
-    let accepted = table
-        .iter()
-        .map(|(name, _)| return *name)
-        .collect::<alloc::vec::Vec<_>>()
-        .join(", ");
-    return Err(Error::StableConfig(format!(
-        "Invalid value '{raw}' for key '{key}', expected one of {accepted}"
-    )));
-}
-
-pub(crate) fn parse_injection_strategy(raw: &str, key: &str) -> Result<InjectionStrategy, Error> {
-    return parse_enum(INJECTION_STRATEGIES, raw, key);
-}
-
-pub(crate) fn parse_meta_csp_placement(raw: &str, key: &str) -> Result<MetaCspPlacement, Error> {
-    return parse_enum(META_CSP_PLACEMENTS, raw, key);
 }
 
 pub(crate) fn parse_u32(raw: &str, key: &str) -> Result<u32, Error> {
@@ -597,72 +537,6 @@ mod test {
             assert_eq!(
                 test_case.input.validate().unwrap_err().code(),
                 test_case.expected.code()
-            );
-        }
-    }
-
-    #[test]
-    fn parse_host_injection_enums() {
-        assert_eq!(
-            parse_injection_strategy("head-open-tag", "k").unwrap(),
-            InjectionStrategy::HeadOpenTag
-        );
-        // Matching is case insensitive, like the boolean parser.
-        assert_eq!(
-            parse_injection_strategy("Head-Close-Tag", "k").unwrap(),
-            InjectionStrategy::HeadCloseTag
-        );
-        assert_eq!(
-            parse_meta_csp_placement("before", "k").unwrap(),
-            MetaCspPlacement::Before
-        );
-
-        // An unknown value is an error rather than a silent fallback to the default: it is almost
-        // certainly a typo, and silently ignoring it would leave the operator with no signal.
-        let err = parse_injection_strategy("head-middle-tag", "DD_RUM_INJECTION_STRATEGY")
-            .expect_err("unknown strategy must fail");
-        assert_eq!(err.code(), 6);
-        assert!(
-            err.to_string().contains("head-open-tag"),
-            "error should list the accepted values, got: {err}"
-        );
-        assert!(parse_meta_csp_placement("maybe", "k").is_err());
-    }
-
-    #[test]
-    fn overlay_carries_host_injection_options() {
-        let overlay = parse_configuration_overlay(
-            br#"{"injectionStrategy":"head-open-tag-with-close-tag-fallback","metaCspPlacement":"before"}"#,
-        )
-        .expect("host options must parse");
-        assert_eq!(
-            overlay.injection_strategy,
-            Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback)
-        );
-        assert_eq!(overlay.meta_csp_placement, Some(MetaCspPlacement::Before));
-    }
-
-    #[test]
-    fn overlay_rejects_unknown_host_injection_value() {
-        let err =
-            serde_json::from_slice::<ConfigurationOverlay>(br#"{"injectionStrategy":"nowhere"}"#)
-                .expect_err("unknown variant must be rejected");
-        assert!(
-            err.to_string().contains("nowhere"),
-            "error should name the bad value, got: {err}"
-        );
-    }
-
-    #[test]
-    fn host_keys_are_rum_configuration_keys() {
-        // They must be recognised, so a file that only sets them is not reported as empty, but
-        // they must not reach `Configuration`: everything on `RumConfiguration` is serialised into
-        // `DD_RUM.init`, and these configure the host.
-        for key in HOST_KEYS {
-            assert!(is_rum_configuration_key(key), "{key} must be recognised");
-            assert!(
-                !DD_FIELDS.iter().any(|(name, _)| return name == key),
-                "{key} must not be a Browser SDK option"
             );
         }
     }

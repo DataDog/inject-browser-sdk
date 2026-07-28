@@ -28,8 +28,7 @@ const DOCUMENT_CHARSET_SCAN_LIMIT: usize = 1024;
 /// decide where it goes. The earlier the snippet runs, the more of the page lifecycle RUM observes,
 /// but injecting early means proving that no character encoding declaration follows, which cannot be
 /// done without buffering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InjectionStrategy {
     /// Inject right before the `</head>` tag.
     ///
@@ -66,8 +65,7 @@ pub enum InjectionStrategy {
 ///
 /// Orthogonal to [`InjectionStrategy`], and meaningless for [`InjectionStrategy::HeadCloseTag`],
 /// which always injects past any meta-delivered policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MetaCspPlacement {
     /// Default. Never reorder; when a meta-delivered policy precedes the encoding declaration the
     /// snippet lands after it and is governed by it.

@@ -17,10 +17,7 @@ use core::{
 };
 
 use inject_browser_sdk::{
-    error::Error,
-    generate_snippet,
-    injector::{InjectionStrategy, MetaCspPlacement},
-    parse_configuration, StableConfigSnippet,
+    error::Error, generate_snippet, parse_configuration, StableConfigSnippet,
 };
 
 /// A Browser SDK snippet. Use [`snippet_create_from_json`] or
@@ -68,14 +65,6 @@ pub struct Snippet {
     pub application_id: *const c_char,
     /// Resolved `remoteConfigurationId`, or `NULL` when unset.
     pub remote_configuration_id: *const c_char,
-    /// Resolved `DD_RUM_INJECTION_STRATEGY`, using the `INJECTION_STRATEGY_*`
-    /// constants below. Plain JSON snippets always report
-    /// [`INJECTION_STRATEGY_UNSET`].
-    pub injection_strategy: u8,
-    /// Resolved `DD_RUM_META_CSP_PLACEMENT`, using the `META_CSP_PLACEMENT_*`
-    /// constants below. Plain JSON snippets always report
-    /// [`META_CSP_PLACEMENT_UNSET`].
-    pub meta_csp_placement: u8,
 }
 
 /// `DD_RUM_ENABLED` was not configured; the host decides.
@@ -84,22 +73,6 @@ pub const RUM_ENABLED_UNSET: u8 = 0;
 pub const RUM_ENABLED_TRUE: u8 = 1;
 /// `DD_RUM_ENABLED` resolved to false.
 pub const RUM_ENABLED_FALSE: u8 = 2;
-
-/// `DD_RUM_INJECTION_STRATEGY` was not configured; the host decides.
-pub const INJECTION_STRATEGY_UNSET: u8 = 0;
-/// Matches `InjectionStrategy::HeadCloseTag`.
-pub const INJECTION_STRATEGY_HEAD_CLOSE_TAG: u8 = 1;
-/// Matches `InjectionStrategy::HeadOpenTag`.
-pub const INJECTION_STRATEGY_HEAD_OPEN_TAG: u8 = 2;
-/// Matches `InjectionStrategy::HeadOpenTagWithCloseTagFallback`.
-pub const INJECTION_STRATEGY_HEAD_OPEN_TAG_WITH_CLOSE_TAG_FALLBACK: u8 = 3;
-
-/// `DD_RUM_META_CSP_PLACEMENT` was not configured; the host decides.
-pub const META_CSP_PLACEMENT_UNSET: u8 = 0;
-/// Matches `MetaCspPlacement::After`.
-pub const META_CSP_PLACEMENT_AFTER: u8 = 1;
-/// Matches `MetaCspPlacement::Before`.
-pub const META_CSP_PLACEMENT_BEFORE: u8 = 2;
 
 /// The [`Snippet`] structure exposes only public fields, but we want to store internal data that
 /// is not FFI-safe in the snippet instance. This is why this `SnippetInternal` struct need to
@@ -112,8 +85,6 @@ pub(crate) struct SnippetInternal {
     pub rum_enabled: u8,
     pub application_id: *const c_char,
     pub remote_configuration_id: *const c_char,
-    pub injection_strategy: u8,
-    pub meta_csp_placement: u8,
     // The following fields are kept internal, so they don't need to be FFI-safe and they can be
     // changed at any time without breaking change.
     pub inner: Result<Vec<u8>, CString>,
@@ -131,8 +102,6 @@ impl SnippetInternal {
                     rum_enabled: RUM_ENABLED_UNSET,
                     application_id: null(),
                     remote_configuration_id: null(),
-                    injection_strategy: INJECTION_STRATEGY_UNSET,
-                    meta_csp_placement: META_CSP_PLACEMENT_UNSET,
                     inner: Ok(content),
                     owned_ids: [None, None],
                 }
@@ -156,8 +125,6 @@ impl SnippetInternal {
                     rum_enabled: RUM_ENABLED_UNSET,
                     application_id: null(),
                     remote_configuration_id: null(),
-                    injection_strategy: INJECTION_STRATEGY_UNSET,
-                    meta_csp_placement: META_CSP_PLACEMENT_UNSET,
                     inner: Err(error_message),
                     owned_ids: [None, None],
                 };
@@ -185,19 +152,6 @@ impl SnippetInternal {
             None => RUM_ENABLED_UNSET,
             Some(true) => RUM_ENABLED_TRUE,
             Some(false) => RUM_ENABLED_FALSE,
-        };
-        this.injection_strategy = match snippet.injection_strategy {
-            None => INJECTION_STRATEGY_UNSET,
-            Some(InjectionStrategy::HeadCloseTag) => INJECTION_STRATEGY_HEAD_CLOSE_TAG,
-            Some(InjectionStrategy::HeadOpenTag) => INJECTION_STRATEGY_HEAD_OPEN_TAG,
-            Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback) => {
-                INJECTION_STRATEGY_HEAD_OPEN_TAG_WITH_CLOSE_TAG_FALLBACK
-            }
-        };
-        this.meta_csp_placement = match snippet.meta_csp_placement {
-            None => META_CSP_PLACEMENT_UNSET,
-            Some(MetaCspPlacement::After) => META_CSP_PLACEMENT_AFTER,
-            Some(MetaCspPlacement::Before) => META_CSP_PLACEMENT_BEFORE,
         };
         this.application_id = owned_ids[0].as_ref().map_or(null(), |s| return s.as_ptr());
         this.remote_configuration_id = owned_ids[1].as_ref().map_or(null(), |s| return s.as_ptr());
@@ -401,36 +355,11 @@ mod tests {
             enabled: Some(false),
             application_id: None,
             remote_configuration_id: None,
-            injection_strategy: None,
-            meta_csp_placement: None,
         }));
 
         assert_eq!(snippet.error_code, 0);
         assert_eq!(snippet.length, 0);
         assert_eq!(snippet.rum_enabled, RUM_ENABLED_FALSE);
-        assert_eq!(snippet.injection_strategy, INJECTION_STRATEGY_UNSET);
-        assert_eq!(snippet.meta_csp_placement, META_CSP_PLACEMENT_UNSET);
-    }
-
-    /// The host settings are reported through the snippet, which is the only channel the FFI has to
-    /// hand them to the injector.
-    #[test]
-    fn stable_config_surfaces_host_injection_options() {
-        let snippet = SnippetInternal::new_from_stable_config(Ok(StableConfigSnippet {
-            bytes: Vec::from(b"<script></script>".as_slice()),
-            enabled: Some(true),
-            application_id: None,
-            remote_configuration_id: None,
-            injection_strategy: Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback),
-            meta_csp_placement: Some(MetaCspPlacement::Before),
-        }));
-
-        assert_eq!(snippet.error_code, 0);
-        assert_eq!(
-            snippet.injection_strategy,
-            INJECTION_STRATEGY_HEAD_OPEN_TAG_WITH_CLOSE_TAG_FALLBACK
-        );
-        assert_eq!(snippet.meta_csp_placement, META_CSP_PLACEMENT_BEFORE);
     }
 
     #[test]
@@ -464,14 +393,6 @@ mod tests {
         assert_eq!(
             mem::offset_of!(Snippet, remote_configuration_id),
             mem::offset_of!(SnippetInternal, remote_configuration_id),
-        );
-        assert_eq!(
-            mem::offset_of!(Snippet, injection_strategy),
-            mem::offset_of!(SnippetInternal, injection_strategy),
-        );
-        assert_eq!(
-            mem::offset_of!(Snippet, meta_csp_placement),
-            mem::offset_of!(SnippetInternal, meta_csp_placement),
         );
     }
 }

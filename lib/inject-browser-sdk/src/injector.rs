@@ -71,6 +71,19 @@ enum InjectorState {
     Ended,
 }
 
+/// The data [`Injector::scan_head_window`] works on: the head window itself, and whatever of the
+/// incoming chunk follows it.
+enum HeadWindow<'a> {
+    /// The window was accumulated in `incomplete_data` over several writes. `tail` is the part of
+    /// the incoming chunk that completed it, minus the bytes that went into the window. It is empty
+    /// at EOF, and when the window was completed exactly.
+    Buffered { tail: &'a [u8] },
+
+    /// A single incoming chunk covered the whole window, so it is scanned in place: `window` is its
+    /// first DOCUMENT_CHARSET_SCAN_LIMIT bytes, and `tail` everything after them.
+    InPlace { window: &'a [u8], tail: &'a [u8] },
+}
+
 /// Stateful object used to inject the provided snippet within a streamed HTML document.
 ///
 /// See [`InjectionStrategy`] for where the snippet is injected. [`Injector::new`] keeps the
@@ -96,6 +109,9 @@ pub struct Injector<'snippet> {
     /// While buffering the head window, this accumulates the incoming chunks until we have enough
     /// data to decide where to inject. During the `</head>` pass, it holds a partially matched tag
     /// that may turn out to be an injection point once more data arrives.
+    ///
+    /// Either way it stays below DOCUMENT_CHARSET_SCAN_LIMIT bytes: an incoming chunk only ever
+    /// contributes the bytes that complete the window, never its whole length.
     ///
     /// There are two buffers here, because in some cases we need to return previously held data
     /// *and* hold part of the current chunk back. Once emitted, the buffer needs to be emptied, so
@@ -157,19 +173,31 @@ impl<'snippet> Injector<'snippet> {
     pub fn write<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
         match self.injector_state {
             InjectorState::BufferingHeadWindow => {
-                if self.incomplete_data.is_empty() && chunk.len() >= DOCUMENT_CHARSET_SCAN_LIMIT {
+                // Invariant: while in this state, the buffer holds less than a full window, so at
+                // least one more byte is needed to complete it. We leave this state as soon as it
+                // is complete, and only ever buffer the bytes that are missing from it.
+                debug_assert!(self.incomplete_data.len() < DOCUMENT_CHARSET_SCAN_LIMIT);
+                let missing = DOCUMENT_CHARSET_SCAN_LIMIT - self.incomplete_data.len();
+
+                if chunk.len() < missing {
+                    // Still not enough data to tell where the injection point is.
+                    self.incomplete_data.extend_from_slice(chunk);
+                    return self.create_result(&[]);
+                }
+
+                if self.incomplete_data.is_empty() {
                     // Optimization: the chunk already covers the whole head window, so scan it
                     // directly instead of copying it into the buffer first.
-                    return self.scan_head_window(Some(chunk), false);
+                    let (window, tail) = chunk.split_at(DOCUMENT_CHARSET_SCAN_LIMIT);
+                    return self.scan_head_window(HeadWindow::InPlace { window, tail }, false);
                 }
 
-                self.incomplete_data.extend_from_slice(chunk);
-
-                if self.incomplete_data.len() >= DOCUMENT_CHARSET_SCAN_LIMIT {
-                    return self.scan_head_window(None, false);
-                }
-
-                return self.create_result(&[]);
+                // Buffer only what completes the window. Everything past it is emitted as part of
+                // this very call, so the buffer never grows beyond the window, however large the
+                // incoming chunk is.
+                let (completion, tail) = chunk.split_at(missing);
+                self.incomplete_data.extend_from_slice(completion);
+                return self.scan_head_window(HeadWindow::Buffered { tail }, false);
             }
 
             InjectorState::ScanningForHeadCloseTag => return self.scan_head_close_tag(chunk),
@@ -182,7 +210,9 @@ impl<'snippet> Injector<'snippet> {
 
     pub fn end(&mut self) -> Result<'_> {
         match self.injector_state {
-            InjectorState::BufferingHeadWindow => return self.scan_head_window(None, true),
+            InjectorState::BufferingHeadWindow => {
+                return self.scan_head_window(HeadWindow::Buffered { tail: b"" }, true);
+            }
 
             InjectorState::ScanningForHeadCloseTag | InjectorState::PassingThrough => {
                 self.injector_state = InjectorState::Ended;
@@ -204,57 +234,106 @@ impl<'snippet> Injector<'snippet> {
 
     /// Looks for the earliest valid injection point within the head window. If there is none, falls
     /// back to the `</head>` tag and scans the very same data for it.
-    fn scan_head_window<'a>(
-        &'a mut self,
-        incoming_chunk: Option<&'a [u8]>,
-        eof: bool,
-    ) -> Result<'a> {
-        let from_incoming_chunk = incoming_chunk.is_some();
-        if incoming_chunk.is_none() {
-            // Hand the held data out through `incomplete_data_public_ref`, so the `</head>` pass
-            // can start refilling `incomplete_data`.
-            self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-        }
-        let chunk = match incoming_chunk {
-            Some(chunk) => chunk,
-            None => &self.incomplete_data_public_ref,
+    ///
+    /// `input` also carries the data that follows the window within the incoming chunk, if any: it
+    /// is emitted by this call rather than buffered, so completing the window never requires holding
+    /// more than the window itself.
+    fn scan_head_window<'a>(&'a mut self, input: HeadWindow<'a>, eof: bool) -> Result<'a> {
+        let (window, tail, from_incoming_chunk) = match input {
+            HeadWindow::InPlace { window, tail } => (window, tail, true),
+            HeadWindow::Buffered { tail } => {
+                // Hand the held data out through `incomplete_data_public_ref`, so the `</head>`
+                // pass can start refilling `incomplete_data`.
+                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
+                (&self.incomplete_data_public_ref[..], tail, false)
+            }
         };
 
-        let window = &chunk[..chunk.len().min(DOCUMENT_CHARSET_SCAN_LIMIT)];
         if let Some(point) = InjectionPointLocator::find(window) {
             self.injected = true;
             self.injector_state = InjectorState::PassingThrough;
             return self.create_result(&[
-                BytesSlice::new(&chunk[..point], from_incoming_chunk),
+                BytesSlice::new(&window[..point], from_incoming_chunk),
                 BytesSlice::new(self.snippet, false),
-                BytesSlice::new(&chunk[point..], from_incoming_chunk),
+                BytesSlice::new(&window[point..], from_incoming_chunk),
+                BytesSlice::new(tail, true),
             ]);
         }
 
         if self.strategy == InjectionStrategy::HeadOpenTagWithCloseTagFallback {
             self.injector_state = InjectorState::ScanningForHeadCloseTag;
 
-            match self.head_close_locator.scan(chunk) {
+            // The `</head>` locator is sequential, so scanning the window then the tail is the same
+            // as scanning their concatenation. They are scanned separately only because they are
+            // emitted separately.
+            //
+            // `window_location` cannot be one of the `*FromPreviousChunk` variants: this is the
+            // first data the locator sees.
+            let window_location = self.head_close_locator.scan(window);
+            if let Location::MatchFromIndex(index) = window_location {
+                self.injected = true;
+                self.injector_state = InjectorState::PassingThrough;
+                return self.create_result(&[
+                    BytesSlice::new(&window[..index], from_incoming_chunk),
+                    BytesSlice::new(self.snippet, false),
+                    BytesSlice::new(&window[index..], from_incoming_chunk),
+                    BytesSlice::new(tail, true),
+                ]);
+            }
+
+            match self.head_close_locator.scan(tail) {
+                // A `</head>` that starts and ends within the tail. Any partial match left by the
+                // window was invalidated along the way, so the window is emitted whole.
                 Location::MatchFromIndex(index) => {
                     self.injected = true;
                     self.injector_state = InjectorState::PassingThrough;
                     return self.create_result(&[
-                        BytesSlice::new(&chunk[..index], from_incoming_chunk),
+                        BytesSlice::new(window, from_incoming_chunk),
+                        BytesSlice::new(&tail[..index], true),
                         BytesSlice::new(self.snippet, false),
-                        BytesSlice::new(&chunk[index..], from_incoming_chunk),
+                        BytesSlice::new(&tail[index..], true),
                     ]);
                 }
 
-                // A partial `</head>` at the very end of the data: hold it back, unless the
-                // document ends here, in which case it was never a real tag.
-                Location::PotentialFromIndex(index) if !eof => {
-                    self.incomplete_data.extend_from_slice(&chunk[index..]);
-                    return self
-                        .create_result(&[BytesSlice::new(&chunk[..index], from_incoming_chunk)]);
+                // The partial match left by the window turned out to be a real `</head>`.
+                Location::MatchFromPreviousChunk => {
+                    let Location::PotentialFromIndex(index) = window_location else {
+                        unreachable!("a match from previous data implies a pending partial match")
+                    };
+                    self.injected = true;
+                    self.injector_state = InjectorState::PassingThrough;
+                    return self.create_result(&[
+                        BytesSlice::new(&window[..index], from_incoming_chunk),
+                        BytesSlice::new(self.snippet, false),
+                        BytesSlice::new(&window[index..], from_incoming_chunk),
+                        BytesSlice::new(tail, true),
+                    ]);
                 }
 
-                // `Location::None`, or an `eof` partial match. The `*FromPreviousChunk` variants
-                // cannot happen here: this is the first data the `</head>` locator sees.
+                // A partial `</head>` at the very end of the data: hold it back, unless the document
+                // ends here, in which case it was never a real tag. Such a partial match is at most
+                // a few bytes long, so this does not reintroduce unbounded buffering.
+                Location::PotentialFromIndex(index) if !eof => {
+                    self.incomplete_data.extend_from_slice(&tail[index..]);
+                    return self.create_result(&[
+                        BytesSlice::new(window, from_incoming_chunk),
+                        BytesSlice::new(&tail[..index], true),
+                    ]);
+                }
+
+                // Same, for a partial match that started within the window and runs to the end of
+                // the tail.
+                Location::PotentialFromPreviousChunk if !eof => {
+                    let Location::PotentialFromIndex(index) = window_location else {
+                        unreachable!("a partial match from previous data implies a pending one")
+                    };
+                    self.incomplete_data.extend_from_slice(&window[index..]);
+                    self.incomplete_data.extend_from_slice(tail);
+                    return self
+                        .create_result(&[BytesSlice::new(&window[..index], from_incoming_chunk)]);
+                }
+
+                // `Location::None`, or an `eof` partial match.
                 _ => {}
             }
         } else {
@@ -266,12 +345,16 @@ impl<'snippet> Injector<'snippet> {
             self.injector_state = InjectorState::Ended;
             self.padding_spaces = vec![b' '; self.snippet.len()];
             return self.create_result(&[
-                BytesSlice::new(chunk, from_incoming_chunk),
+                BytesSlice::new(window, from_incoming_chunk),
+                BytesSlice::new(tail, true),
                 BytesSlice::new(&self.padding_spaces, false),
             ]);
         }
 
-        return self.create_result(&[BytesSlice::new(chunk, from_incoming_chunk)]);
+        return self.create_result(&[
+            BytesSlice::new(window, from_incoming_chunk),
+            BytesSlice::new(tail, true),
+        ]);
     }
 
     /// Second pass: stream-scan for the `</head>` tag, holding back only partially matched tags.
@@ -327,6 +410,12 @@ impl<'snippet> Injector<'snippet> {
     fn create_result<'a>(&'a self, slices: &[BytesSlice<'a>]) -> Result<'a> {
         let mut result_slices = [BytesSlice::default(); 4];
         let mut length = 0;
+
+        // Emitting more than `Result` can carry would silently truncate the response body.
+        debug_assert!(
+            slices.iter().filter(|s| return !s.bytes.is_empty()).count() <= result_slices.len(),
+            "too many non-empty slices for a single result"
+        );
 
         for slice in slices.iter().filter(|s| return !s.bytes.is_empty()).take(4) {
             result_slices[length] = *slice;
@@ -600,6 +689,17 @@ mod tests {
             test_injector::<&str>([], "           ");
             test_injector([""], "           ");
         }
+
+        /// The chunk that completes the window carries more data than the window needs: the rest of
+        /// it has to be emitted, not buffered.
+        #[test]
+        fn emits_the_rest_of_the_chunk_completing_the_window() {
+            let filler = "A".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 1);
+            let input = [filler.clone(), String::from("B<head>def")];
+            let expected = filler + "B<head>def           ";
+
+            test_injector(input, &expected);
+        }
     }
 
     /// Inject inside the `<head>` tag, falling back to just before `</head>`.
@@ -686,6 +786,84 @@ mod tests {
             chunks.extend(input[1024..].chars().map(String::from));
 
             test_injector(chunks, &expected);
+        }
+
+        /// The chunk that completes the window carries the injection point of the `</head>` pass:
+        /// the window and the rest of that chunk are scanned and emitted within the same call.
+        #[test]
+        fn head_close_tag_in_the_rest_of_the_chunk_completing_the_window() {
+            let filler = "A".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 1);
+            let input = [filler.clone(), String::from("Bcd</head>efg")];
+            let expected = filler + "Bcd{{SNIPPET}}</head>efg";
+
+            test_injector(input, &expected);
+        }
+
+        #[test]
+        fn head_close_tag_straddling_the_window_boundary() {
+            let filler = "A".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 4);
+            // The window ends within the `</head>` tag, four bytes in.
+            let input = [filler.clone(), String::from("</head>xyz")];
+            let expected = filler + "{{SNIPPET}}</head>xyz";
+
+            test_injector(input, &expected);
+        }
+
+        #[test]
+        fn partial_head_close_tag_at_the_end_of_the_chunk_completing_the_window() {
+            let filler = "A".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 1);
+            let input = [
+                filler.clone(),
+                String::from("Bxy</he"),
+                String::from("ad>z"),
+            ];
+            let expected = filler + "Bxy{{SNIPPET}}</head>z";
+
+            test_injector(input, &expected);
+        }
+
+        /// A partial `</head>` that starts within the window and runs to the end of the chunk
+        /// completing it: both parts have to be held back together.
+        #[test]
+        fn partial_head_close_tag_straddling_the_window_boundary() {
+            let filler = "A".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 2);
+            let input = [filler.clone(), String::from("</h"), String::from("ead>z")];
+            let expected = filler + "{{SNIPPET}}</head>z";
+
+            test_injector(input, &expected);
+        }
+
+        #[test]
+        fn injects_in_the_buffered_window_and_emits_the_rest_of_the_chunk() {
+            let filler = "a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - "<head>".len());
+            let input = [String::from("<head>"), filler.clone() + "tail data"];
+            let expected = String::from("<head>{{SNIPPET}}") + &filler + "tail data";
+
+            test_injector(input, &expected);
+        }
+
+        /// Completing the window must not pull a whole large chunk into the buffers: everything past
+        /// the window is emitted straight away.
+        #[test]
+        fn buffering_stays_bounded_by_the_window_size() {
+            let mut injector = Injector::with_strategy(
+                b"{{SNIPPET}}",
+                InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+            );
+
+            injector.write(b"a");
+            let big_chunk = alloc::vec![b'b'; 8 * DOCUMENT_CHARSET_SCAN_LIMIT];
+            let emitted: usize = injector
+                .write(&big_chunk)
+                .iter()
+                .map(|slice| return slice.bytes.len())
+                .sum();
+
+            pretty_assertions::assert_eq!(emitted, 1 + big_chunk.len());
+            assert!(
+                injector.incomplete_data.len() + injector.incomplete_data_public_ref.len()
+                    <= DOCUMENT_CHARSET_SCAN_LIMIT
+            );
         }
 
         #[test]

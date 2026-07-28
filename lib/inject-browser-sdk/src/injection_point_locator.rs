@@ -9,8 +9,14 @@
 ///
 /// The current implementation looks for the earliest valid position within the `<head>` tag:
 /// * right after the open `<head>` tag,
-/// * or right after a `<meta charset=...>` / `<meta http-equiv=...>` tag, as those must not be
-///   preceded by the snippet.
+/// * or right after a character encoding declaration (`<meta charset=...>` or
+///   `<meta http-equiv="content-type" ...>`), as the snippet must not push such a declaration
+///   further into the document.
+///
+/// The character encoding declaration is the only thing the snippet is kept behind. In particular,
+/// the snippet is deliberately injected *before* a `<meta http-equiv="content-security-policy">`
+/// element that follows the encoding declaration: injecting as early as possible is the point of
+/// this locator, and a meta-delivered policy only governs what the parser sees after it.
 pub struct InjectionPointLocator;
 
 impl InjectionPointLocator {
@@ -32,7 +38,7 @@ impl InjectionPointLocator {
                     // Skip unknown tags, continue scanning
                 }
             }
-            offset += tag_end;
+            offset = tag_end;
         }
 
         return head_tag_point;
@@ -59,7 +65,7 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
         let rest = &input[tag_start + 1..];
 
         // find end of tag
-        let tag_close: usize = rest.iter().position(|&b| return b == b'>')?;
+        let tag_close: usize = find_tag_close(rest)?;
         let tag_end = tag_start + tag_close + 2;
 
         // extract tag name
@@ -77,6 +83,32 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
     return None;
 }
 
+/// Returns the index of the `>` character closing the tag whose content starts at the beginning of
+/// `input`, or `None` if there is none.
+///
+/// `>` characters appearing within a quoted attribute value do not close the tag, so they are
+/// skipped: injecting at such a position would insert the snippet inside the attribute value.
+fn find_tag_close(input: &[u8]) -> Option<usize> {
+    let mut quote: Option<u8> = None;
+
+    for (index, &byte) in input.iter().enumerate() {
+        match quote {
+            Some(quote_byte) => {
+                if byte == quote_byte {
+                    quote = None;
+                }
+            }
+            None => match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b'>' => return Some(index),
+                _ => {}
+            },
+        }
+    }
+
+    return None;
+}
+
 fn parse_tag_name(input: &[u8]) -> Option<TagName> {
     if compare_case_insensitive(input, b"meta") {
         return Some(TagName::Meta);
@@ -87,9 +119,79 @@ fn parse_tag_name(input: &[u8]) -> Option<TagName> {
     }
 }
 
-fn has_encoding_attributes(buffer: &[u8]) -> bool {
-    return find_case_insensitive(buffer, b"charset=")
-        || find_case_insensitive(buffer, b"http-equiv=");
+/// Returns whether the given open tag, from `<` to `>` included, declares the character encoding of
+/// the document, in other words whether it carries a `charset` attribute or is a
+/// `http-equiv="content-type"` declaration.
+///
+/// Attributes are parsed rather than matched as substrings, so that attributes merely containing
+/// `charset` (`data-charset`) and unrelated `http-equiv` values (`refresh`) are not mistaken for an
+/// encoding declaration: injecting right after those would place the snippet *before* the actual
+/// declaration.
+fn has_encoding_attributes(tag: &[u8]) -> bool {
+    // Attributes start after the tag name, at the first whitespace character.
+    let Some(mut index) = tag.iter().position(|&b| return b.is_ascii_whitespace()) else {
+        return false;
+    };
+
+    loop {
+        index = skip_whitespace(tag, index);
+        if index >= tag.len() || tag[index] == b'>' {
+            return false;
+        }
+
+        let (name, value, next_index) = parse_attribute(tag, index);
+        if compare_case_insensitive(name, b"charset")
+            || (compare_case_insensitive(name, b"http-equiv")
+                && compare_case_insensitive(value.trim_ascii(), b"content-type"))
+        {
+            return true;
+        }
+        index = next_index;
+    }
+}
+
+/// Parses the attribute starting at `index`, returning its name, its value (empty when the attribute
+/// has none) and the index at which the next attribute may start.
+///
+/// `tag[index]` must be neither a whitespace character nor `>`, which guarantees that the returned
+/// index is greater than `index`.
+fn parse_attribute(tag: &[u8], index: usize) -> (&[u8], &[u8], usize) {
+    let mut i = index;
+
+    while i < tag.len() && !tag[i].is_ascii_whitespace() && tag[i] != b'=' && tag[i] != b'>' {
+        i += 1;
+    }
+    let name = &tag[index..i];
+
+    // Whitespace is allowed around the '=' sign.
+    i = skip_whitespace(tag, i);
+    if i >= tag.len() || tag[i] != b'=' {
+        return (name, b"", i);
+    }
+    i = skip_whitespace(tag, i + 1);
+
+    if i < tag.len() && (tag[i] == b'"' || tag[i] == b'\'') {
+        let quote = tag[i];
+        let value_start = i + 1;
+        i = value_start;
+        while i < tag.len() && tag[i] != quote {
+            i += 1;
+        }
+        return (name, &tag[value_start..i], (i + 1).min(tag.len()));
+    }
+
+    let value_start = i;
+    while i < tag.len() && !tag[i].is_ascii_whitespace() && tag[i] != b'>' {
+        i += 1;
+    }
+    return (name, &tag[value_start..i], i);
+}
+
+fn skip_whitespace(input: &[u8], mut index: usize) -> usize {
+    while index < input.len() && input[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    return index;
 }
 
 fn compare_case_insensitive(a: &[u8], b_lower_case: &[u8]) -> bool {
@@ -100,12 +202,6 @@ fn compare_case_insensitive(a: &[u8], b_lower_case: &[u8]) -> bool {
         .iter()
         .zip(b_lower_case)
         .all(|(a, &b_lower_case)| return a.to_ascii_lowercase() == b_lower_case);
-}
-
-fn find_case_insensitive(input: &[u8], pattern: &[u8]) -> bool {
-    return input
-        .windows(pattern.len())
-        .any(|window| return compare_case_insensitive(window, pattern));
 }
 
 /// The location of an injection point, as computed by the [`HeadCloseTagLocator`].
@@ -223,10 +319,63 @@ mod tests {
     }
 
     #[test]
-    fn meta_with_http_equiv() {
+    fn meta_with_http_equiv_content_type() {
         test_injector(
-            "<html><head><meta http-equiv='...'></head></html>",
-            "<html><head><meta http-equiv='...'>{{SNIPPET}}</head></html>",
+            "<html><head><meta http-equiv='content-type' content='text/html; charset=utf-8'></head></html>",
+            "<html><head><meta http-equiv='content-type' content='text/html; charset=utf-8'>{{SNIPPET}}</head></html>",
+        );
+    }
+
+    #[test]
+    fn spaces_around_attribute_equal_sign() {
+        test_injector(
+            "<html><head><meta charset = 'utf-8'></head></html>",
+            "<html><head><meta charset = 'utf-8'>{{SNIPPET}}</head></html>",
+        );
+    }
+
+    #[test]
+    fn unquoted_attribute_value() {
+        test_injector(
+            "<html><head><meta charset=utf-8></head></html>",
+            "<html><head><meta charset=utf-8>{{SNIPPET}}</head></html>",
+        );
+    }
+
+    #[test]
+    fn meta_without_encoding_declaration_does_not_hide_a_later_one() {
+        // Attributes that merely contain 'charset', and `http-equiv` values other than
+        // 'content-type', are not encoding declarations: the snippet must still land after the
+        // actual one.
+        test_injector(
+            "<html><head><meta data-charset='x'><meta charset='utf-8'></head></html>",
+            "<html><head><meta data-charset='x'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        test_injector(
+            "<html><head><meta http-equiv='refresh' content='0'><meta charset='utf-8'></head></html>",
+            "<html><head><meta http-equiv='refresh' content='0'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+    }
+
+    #[test]
+    fn several_tags_before_the_encoding_declaration() {
+        test_injector(
+            "<html><head><meta name='x'><meta name='y'><meta charset='utf-8'></head></html>",
+            "<html><head><meta name='x'><meta name='y'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+    }
+
+    #[test]
+    fn greater_than_in_quoted_attribute_value() {
+        // The '>' inside the attribute value does not close the tag, so the snippet must not be
+        // inserted within the value.
+        test_injector(
+            "<html><head data-x='>'><meta charset='>'></head></html>",
+            "<html><head data-x='>'><meta charset='>'>{{SNIPPET}}</head></html>",
+        );
+        test_injector(
+            "<html><head data-x='>'><meta name='>'></head></html>",
+            "<html><head data-x='>'>{{SNIPPET}}<meta name='>'></head></html>",
         );
     }
 

@@ -29,7 +29,7 @@ pub struct StableConfigSnippet {
     pub remote_configuration_id: Option<String>,
 }
 
-/// Stable configuration read from disk once and reusable across overlays.
+/// Entries read once from the `application_monitoring.yaml` files, reusable across overlays.
 pub struct StableConfig {
     configs: Vec<LibraryConfig>,
     logs: Vec<String>,
@@ -135,10 +135,9 @@ fn empty_config_message(logs: &[String]) -> String {
 }
 
 fn stable_config_from_read(read: crate::platform::StableConfigRead) -> Result<StableConfig, Error> {
-    // The configurator can turn a source failure such as TooLarge into Ok,
-    // possibly preserving entries from a lower-priority source. Reject the
-    // partial result because the unread source may contain an overriding
-    // opt-out or other RUM settings.
+    // The configurator can turn a source failure such as TooLarge into Ok, keeping
+    // the entries of a lower-priority source. Reject that partial result: the source
+    // it could not read may hold an opt-out or other RUM settings that override them.
     if read.read_failed {
         return Err(Error::StableConfig(empty_config_message(&read.logs)));
     }
@@ -160,9 +159,8 @@ pub fn read_stable_config(language: &str, debug_logs: bool) -> Result<StableConf
 /// Build a snippet from Datadog stable configuration files, with an optional overlay.
 ///
 /// Convenience wrapper over [`read_stable_config`] followed by
-/// [`StableConfig::build_snippet`]. Reads from disk on every call; hold a
-/// [`StableConfig`] instead when building more than one snippet per
-/// configuration load.
+/// [`StableConfig::build_snippet`]. Re-reads the files on every call; hold a
+/// [`StableConfig`] to build several snippets from one read.
 pub fn snippet_from_stable_config(
     language: &str,
     debug_logs: bool,
@@ -192,9 +190,9 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::Value;
 
-    /// Extract the JSON object passed to `DD_RUM.init(...)` so tests can
-    /// assert on structured fields instead of raw-byte windows (which match
-    /// by accident inside the CDN URL, e.g. "us1" appears in `/us1/v5/`).
+    /// Extract the JSON object passed to `DD_RUM.init(...)`, so tests assert on fields
+    /// rather than on raw bytes that match by accident within the CDN URL ("us1" also
+    /// appears in `/us1/v5/`).
     fn extract_init_json(bytes: &[u8]) -> Value {
         let text = core::str::from_utf8(bytes).expect("snippet is UTF-8");
         let start_marker = "DD_RUM.init(";
@@ -211,7 +209,7 @@ mod tests {
 
     #[test]
     fn default_major_version_selects_the_v6_cdn_url() {
-        // No DD_RUM_MAJOR_VERSION on disk, so the default applies. The URL shape is the one
+        // No DD_RUM_MAJOR_VERSION configured, so the default applies. The URL shape is the one
         // documented by the browser-sdk: `/{region}/v{major}/datadog-rum.js`.
         let snippet = snippet_from_stable_config_with_reader(
             &crate::platform::tests::PopulatedReader,
@@ -229,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_wins_over_populated_disk_config() {
+    fn overlay_wins_over_populated_file_config() {
         use crate::configuration::RumConfiguration;
 
         let overlay = ConfigurationOverlay {
@@ -253,11 +251,9 @@ mod tests {
         assert_eq!(init["clientToken"], Value::from("tok-populated"));
     }
 
-    /// Reader whose files always exceed the configurator's size gate; the
-    /// configurator reclassifies the read as `Ok(empty)` while pushing a
-    /// `TooLarge` diagnostic into logs. Exercises the Windows-visible path
-    /// where stderr is a no-op: the diagnostics must be folded into the final
-    /// error message rather than silently dropped.
+    /// Reader whose files always exceed the configurator's size gate, which reclassifies
+    /// the read as `Ok(empty)` with a `TooLarge` diagnostic in the logs. On Windows stderr
+    /// is a no-op, so those diagnostics have to reach the error message.
     struct TooLargeReader;
 
     impl ConfigRead for TooLargeReader {
@@ -393,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_enabled_wins_before_disk_value_is_parsed() {
+    fn overlay_enabled_wins_before_the_file_value_is_parsed() {
         for overlay_enabled in [false, true] {
             let overlay = ConfigurationOverlay {
                 enabled: Some(overlay_enabled),
@@ -405,7 +401,7 @@ mod tests {
                 false,
                 Some(overlay),
             )
-            .expect("the overlay should replace an invalid lower-priority disk value");
+            .expect("the overlay should replace an invalid lower-priority file value");
 
             assert_eq!(snippet.enabled, Some(overlay_enabled));
             assert_eq!(snippet.bytes.is_empty(), !overlay_enabled);

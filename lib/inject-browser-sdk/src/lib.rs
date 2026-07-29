@@ -13,7 +13,6 @@ extern crate std;
 
 mod configuration;
 pub mod error;
-mod injection_point_locator;
 pub mod injector;
 pub mod platform;
 mod snippet;

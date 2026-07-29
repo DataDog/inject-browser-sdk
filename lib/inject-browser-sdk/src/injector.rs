@@ -8,49 +8,43 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
 
-use crate::injection_point_locator::{HeadCloseTagLocator, InjectionPointLocator, Location};
+mod encoding;
+mod head_close_tag;
+mod parser;
 
-/// Number of bytes at the start of the document within which a character encoding declaration has
-/// to be serialized to be honoured by browsers, as per the HTML spec
+use head_close_tag::{HeadCloseTagLocator, Location};
+use parser::InjectionPointLocator;
+
+/// Window at the start of the document within which a character encoding declaration is honoured by
+/// browsers, as per the HTML spec
 /// (<https://html.spec.whatwg.org/multipage/semantics.html#the-meta-element>).
 ///
-/// We hold back at most this many bytes while looking for the earliest valid injection point:
-/// injecting the snippet *before* a `<meta charset>` would push that declaration out of the window
-/// and change how the browser decodes the document. Conversely, a declaration that is already
-/// outside of the window is ignored by browsers anyway, so there is no point looking further.
+/// Injecting before a `<meta charset>` could push it out of this window and change how the document
+/// is decoded, so the earliest valid point is looked for within these bytes and no further.
 const DOCUMENT_CHARSET_SCAN_LIMIT: usize = 1024;
 
 /// Where the snippet should be injected within the HTML document.
 ///
-/// The trade-off is between how early the snippet runs and how much data has to be held back to
-/// decide where it goes. The earlier the snippet runs, the more of the page lifecycle RUM observes,
-/// but injecting early means proving that no character encoding declaration follows, which cannot be
-/// done without buffering.
+/// The earlier the snippet runs, the more of the page lifecycle RUM observes, but injecting early
+/// means proving that no character encoding declaration follows, which takes buffering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InjectionStrategy {
-    /// Inject right before the `</head>` tag.
+    /// Inject right before the `</head>` tag, the default and what [`Injector::new`] selects.
     ///
-    /// Scans in a streaming fashion and never holds back more than a partially matched tag, at the
-    /// cost of the snippet running as late as possible within the head. Injecting here can never
-    /// displace a character encoding declaration.
-    ///
-    /// This is the default, and the behaviour [`Injector::new`] selects.
+    /// Holds back no more than a partially matched tag, at the cost of the snippet running as late
+    /// as possible within the head.
     #[default]
     HeadCloseTag,
 
-    /// Inject at the earliest valid position within the `<head>` tag, and do not inject at all if
-    /// there is none within the first DOCUMENT_CHARSET_SCAN_LIMIT bytes.
+    /// Inject at the earliest valid position within the `<head>` tag, and not at all if there is
+    /// none within the first DOCUMENT_CHARSET_SCAN_LIMIT bytes.
     ///
-    /// Holds back up to DOCUMENT_CHARSET_SCAN_LIMIT bytes, which delays the start of the response
-    /// body by that much.
+    /// Holds that many bytes back, delaying the start of the response body by as much.
     HeadOpenTag,
 
-    /// Like [`InjectionStrategy::HeadOpenTag`], but fall back to
-    /// [`InjectionStrategy::HeadCloseTag`] when the head window holds no valid injection point,
-    /// rather than giving up.
-    ///
-    /// Same buffering cost as [`InjectionStrategy::HeadOpenTag`], but instruments documents whose
-    /// head does not start within the window.
+    /// Like [`InjectionStrategy::HeadOpenTag`], but falls back to
+    /// [`InjectionStrategy::HeadCloseTag`] rather than giving up, which instruments documents whose
+    /// head does not start within the window. Same buffering cost.
     HeadOpenTagWithCloseTagFallback,
 }
 
@@ -104,44 +98,23 @@ pub struct Injector<'snippet> {
     /// Locator for the `</head>` tag, see [`InjectorState::ScanningForHeadCloseTag`].
     head_close_locator: HeadCloseTagLocator,
 
-    /// Data that cannot be emitted yet.
+    /// Data that cannot be emitted yet: the head window as it accumulates, or a partially matched
+    /// `</head>` that more data may turn into an injection point.
     ///
-    /// While buffering the head window, this accumulates the incoming chunks until we have enough
-    /// data to decide where to inject. During the `</head>` pass, it holds a partially matched tag
-    /// that may turn out to be an injection point once more data arrives.
-    ///
-    /// Either way it stays within DOCUMENT_CHARSET_SCAN_LIMIT bytes. While buffering the window, an
-    /// incoming chunk only ever contributes the bytes that complete it, never its whole length.
-    /// During the `</head>` pass, the locator abandons a match that spans more than
+    /// Bounded by DOCUMENT_CHARSET_SCAN_LIMIT either way. A chunk only ever contributes the bytes
+    /// that complete the window, and the `</head>` locator abandons a match spanning more than
     /// MAX_PENDING_CLOSE_TAG bytes, which is the same figure.
     ///
-    /// There are two buffers here, because in some cases we need to return previously held data
-    /// *and* hold part of the current chunk back. Once emitted, the buffer needs to be emptied, so
-    /// we don't emit the same data twice. To keep things simple, as a convention, we only write in
-    /// `incomplete_data` and move it to the exposed `incomplete_data_public_ref` buffer when needed.
-    ///
-    /// Example: imagine we write the following chunks: `foo</he`, `ad>bar` (past the head window).
-    /// * When writing the first chunk, the injector will return `foo`, but hold `</he` back, as the
-    ///   snippet might be injected before it.
-    /// * When writing the second chunk, the injector will realize that `</he` was indeed the
-    ///   beginning of the `</head>` tag, so it will emit the snippet, then the held data `</he`,
-    ///   then the chunk `ad>bar`.
-    ///
-    /// Second example: imagine we write the following chunks: `foo</he`, `ader>bar`.
-    /// * Same as before, the injector will return `foo` and hold `</he` back
-    /// * When writing the second chunk, the injector will realize that `</he` was not the start of
-    ///   a `</head>` tag, so it will emit the held data `</he`, then the chunk `ader>bar`.
-    ///
-    /// Third example: imagine we write the following chunks: `foo</he`, `ader>bar</`
-    /// * Same as before, the injector will return `foo` and hold `</he` back
-    /// * When writing the second chunk, the injector will realize that `</he` was not the start of
-    ///   a `</head>` tag, so it will emit it, then emit `ader>bar`. But it will need to put `</` in
-    ///   a second buffer, as it cannot tell yet if it is a valid injection point.
+    /// Two buffers, because a single call may have to emit previously held data *and* hold part of
+    /// the incoming chunk back. By convention only `incomplete_data` is written to, and it is moved
+    /// into `incomplete_data_public_ref` when it goes out, so nothing is emitted twice: writing
+    /// `foo</he` then `ader>bar</` emits `foo`, then `</he` and `ader>bar` once `</he` turns out not
+    /// to be a tag, while `</` goes back into the buffer.
     incomplete_data: Vec<u8>,
     incomplete_data_public_ref: Vec<u8>,
 
-    /// If we don't find any injection point, we need to pad the document with spaces, so the
-    /// document has the same size as if the snippet was successfully injected.
+    /// Spaces standing in for the snippet when no injection point was found, so that the response
+    /// keeps the length it would have had.
     padding_spaces: Vec<u8>,
 }
 
@@ -175,9 +148,8 @@ impl<'snippet> Injector<'snippet> {
     pub fn write<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
         match self.injector_state {
             InjectorState::BufferingHeadWindow => {
-                // Invariant: while in this state, the buffer holds less than a full window, so at
-                // least one more byte is needed to complete it. We leave this state as soon as it
-                // is complete, and only ever buffer the bytes that are missing from it.
+                // This state is left as soon as the window is complete, so it is always short of at
+                // least one byte here.
                 debug_assert!(self.incomplete_data.len() < DOCUMENT_CHARSET_SCAN_LIMIT);
                 let missing = DOCUMENT_CHARSET_SCAN_LIMIT - self.incomplete_data.len();
 
@@ -188,15 +160,14 @@ impl<'snippet> Injector<'snippet> {
                 }
 
                 if self.incomplete_data.is_empty() {
-                    // Optimization: the chunk already covers the whole head window, so scan it
-                    // directly instead of copying it into the buffer first.
+                    // The chunk already covers the whole window: scan it in place rather than copy
+                    // it into the buffer first.
                     let (window, tail) = chunk.split_at(DOCUMENT_CHARSET_SCAN_LIMIT);
                     return self.scan_head_window(HeadWindow::InPlace { window, tail }, false);
                 }
 
-                // Buffer only what completes the window. Everything past it is emitted as part of
-                // this very call, so the buffer never grows beyond the window, however large the
-                // incoming chunk is.
+                // Buffer only what completes the window; the rest is emitted by this very call, so
+                // the buffer never outgrows the window however large the chunk is.
                 let (completion, tail) = chunk.split_at(missing);
                 self.incomplete_data.extend_from_slice(completion);
                 return self.scan_head_window(HeadWindow::Buffered { tail }, false);
@@ -234,12 +205,11 @@ impl<'snippet> Injector<'snippet> {
         }
     }
 
-    /// Looks for the earliest valid injection point within the head window. If there is none, falls
-    /// back to the `</head>` tag and scans the very same data for it.
+    /// Looks for the earliest valid injection point within the head window, falling back to the
+    /// `</head>` tag over the very same data when there is none.
     ///
-    /// `input` also carries the data that follows the window within the incoming chunk, if any: it
-    /// is emitted by this call rather than buffered, so completing the window never requires holding
-    /// more than the window itself.
+    /// The data following the window within the chunk is emitted by this call rather than buffered,
+    /// so completing the window never requires holding more than the window itself.
     fn scan_head_window<'a>(&'a mut self, input: HeadWindow<'a>, eof: bool) -> Result<'a> {
         let (window, tail, from_incoming_chunk) = match input {
             HeadWindow::InPlace { window, tail } => (window, tail, true),
@@ -265,12 +235,10 @@ impl<'snippet> Injector<'snippet> {
         if self.strategy == InjectionStrategy::HeadOpenTagWithCloseTagFallback {
             self.injector_state = InjectorState::ScanningForHeadCloseTag;
 
-            // The `</head>` locator is sequential, so scanning the window then the tail is the same
-            // as scanning their concatenation. They are scanned separately only because they are
-            // emitted separately.
-            //
-            // `window_location` cannot be one of the `*FromPreviousChunk` variants: this is the
-            // first data the locator sees.
+            // The locator is sequential, so scanning the window then the tail is the same as
+            // scanning their concatenation; they are split only because they are emitted separately.
+            // `window_location` cannot be a `*FromPreviousChunk` variant, being the first data the
+            // locator sees.
             let window_location = self.head_close_locator.scan(window);
             if let Location::MatchFromIndex(index) = window_location {
                 self.injected = true;
@@ -312,9 +280,9 @@ impl<'snippet> Injector<'snippet> {
                     ]);
                 }
 
-                // A partial `</head>` at the very end of the data: hold it back, unless the document
-                // ends here, in which case it was never a real tag. The locator caps a pending match
-                // at MAX_PENDING_CLOSE_TAG bytes, so this does not reintroduce unbounded buffering.
+                // A partial `</head>` at the very end of the data: hold it back, unless the
+                // document ends here and it was never a tag. The locator caps a pending match at
+                // MAX_PENDING_CLOSE_TAG bytes, so buffering stays bounded.
                 Location::PotentialFromIndex(index) if !eof => {
                     self.incomplete_data.extend_from_slice(&tail[index..]);
                     return self.create_result(&[

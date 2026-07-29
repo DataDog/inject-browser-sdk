@@ -138,15 +138,21 @@ fn is_known_encoding_label(value: &[u8]) -> bool {
 /// `<meta charset="bogus">` naming no known encoding, or a
 /// `<meta http-equiv="content-type" content="text/html">` gives the browser no encoding, so it goes
 /// on looking for the real declaration and the snippet has to do the same.
+///
+/// The attributes are read in source order, as the prescan reads them, since which one provides the
+/// encoding depends on the order they are written in. See [`Charset`].
 pub(super) fn has_encoding_attributes(tag: &[u8]) -> bool {
     // Attributes start after the tag name, at the first whitespace character.
     let Some(mut index) = tag.iter().position(|&b| return b.is_ascii_whitespace()) else {
         return false;
     };
 
-    let mut charset: Option<&[u8]> = None;
-    let mut http_equiv: Option<&[u8]> = None;
-    let mut content: Option<&[u8]> = None;
+    let mut charset = Charset::Null;
+    // Whether the encoding was taken from a `content` value, which declares one only alongside a
+    // `http-equiv="content-type"`. Stays `None` while no attribute has provided an encoding at all.
+    let mut need_pragma: Option<bool> = None;
+    let mut got_pragma = false;
+    let (mut seen_charset, mut seen_http_equiv, mut seen_content) = (false, false, false);
 
     loop {
         index = skip_whitespace(tag, index);
@@ -155,30 +161,50 @@ pub(super) fn has_encoding_attributes(tag: &[u8]) -> bool {
         }
 
         let (name, value, next_index) = parse_attribute(tag, index);
-        for (attribute_name, slot) in [
-            (&b"charset"[..], &mut charset),
-            (&b"http-equiv"[..], &mut http_equiv),
-            (&b"content"[..], &mut content),
-        ] {
-            // Duplicate attributes are dropped by the parser, so only the first one counts. The
-            // attributes are collected rather than matched in place because `content` may be
-            // written before `http-equiv`.
-            if slot.is_none() && compare_case_insensitive(name, attribute_name) {
-                *slot = Some(value);
+        index = next_index;
+
+        // The prescan reads the attributes in source order, and duplicates are dropped by the
+        // parser, so only the first one of each name counts.
+        if !seen_charset && compare_case_insensitive(name, b"charset") {
+            seen_charset = true;
+            charset = match is_known_encoding_label(value) {
+                true => Charset::Known,
+                false => Charset::Failure,
+            };
+            need_pragma = Some(false);
+        } else if !seen_http_equiv && compare_case_insensitive(name, b"http-equiv") {
+            seen_http_equiv = true;
+            got_pragma = compare_case_insensitive(value.trim_ascii(), b"content-type");
+        } else if !seen_content && compare_case_insensitive(name, b"content") {
+            seen_content = true;
+            // A `content` value fills in an encoding only while none has been provided yet: a
+            // `charset` attribute written before it, even a bogus one, is the one that stands.
+            if charset == Charset::Null && has_charset_parameter(value) {
+                charset = Charset::Known;
+                need_pragma = Some(true);
             }
         }
-        index = next_index;
     }
 
-    if charset.is_some_and(is_known_encoding_label) {
-        return true;
-    }
+    return match need_pragma {
+        // No attribute provided an encoding, so the tag declares none.
+        None => false,
+        // A `content` value declares the encoding only alongside `http-equiv="content-type"`.
+        Some(true) if !got_pragma => false,
+        _ => charset == Charset::Known,
+    };
+}
 
-    // A `http-equiv="content-type"` only declares the encoding through the `charset` parameter of
-    // its `content` value.
-    return http_equiv
-        .is_some_and(|value| return compare_case_insensitive(value.trim_ascii(), b"content-type"))
-        && content.is_some_and(has_charset_parameter);
+/// The encoding the prescan has taken from the attributes read so far.
+///
+/// [`Failure`](Charset::Failure) is not the same as [`Null`](Charset::Null): a `charset` attribute
+/// naming no known encoding discards the one a `content` value provided, and leaves the browser
+/// looking for the next declaration rather than falling back to it.
+#[derive(PartialEq, Eq)]
+enum Charset {
+    Null,
+    Failure,
+    Known,
 }
 
 /// Returns whether the given `content` attribute value carries a `charset` parameter naming a known

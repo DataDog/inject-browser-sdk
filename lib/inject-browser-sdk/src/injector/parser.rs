@@ -17,8 +17,9 @@ use super::encoding::has_encoding_attributes;
 /// * or right after a character encoding declaration (`<meta charset=...>` or
 ///   `<meta http-equiv="content-type" content="...; charset=...">`), as the snippet must not push
 ///   such a declaration further into the document,
-/// * or right after an inert element (`<noscript>`, `<template>`) holding such a declaration, since
-///   a script injected within one would never run.
+/// * or right after a raw text element (`<script>`, `<title>`) or an inert one (`<noscript>`,
+///   `<template>`) holding such a declaration, since the snippet can go within neither, while the
+///   prescan honours a declaration written there all the same.
 ///
 /// The character encoding declaration is the only thing the snippet is kept behind. In particular,
 /// the snippet is deliberately injected *before* a `<meta http-equiv="content-security-policy">`
@@ -73,6 +74,18 @@ impl InjectionPointLocator {
                     offset = element_end;
                     continue;
                 }
+                // Nothing past either can run: `plaintext` switches the tokenizer to a state it
+                // never leaves, so what follows is text, and a `frameset` puts the tree builder in
+                // insertion modes that ignore a script start tag, within the frameset and after it
+                // alike. Fall back to the `<head>` point, unless what follows holds a declaration
+                // the prescan would honour, which that fallback would push further into the
+                // document.
+                TagName::Plaintext | TagName::Frameset => {
+                    if contains_encoding_declaration(&buffer[tag_end..]) {
+                        return None;
+                    }
+                    break;
+                }
                 _ => {
                     // Skip unknown tags, continue scanning
                 }
@@ -99,6 +112,9 @@ enum TagName {
     /// `plaintext`, which switches the tokenizer to a state it never leaves: everything that follows
     /// the tag is text, and no closing tag can end it.
     Plaintext,
+    /// `frameset`, which puts the tree builder in the `in frameset` insertion mode, and then in
+    /// `after frameset`: both ignore a script start tag, so nothing past the tag can run either.
+    Frameset,
 }
 
 fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)> {
@@ -149,9 +165,6 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
         let name_end = find_tag_name_end(rest)?;
 
         match parse_tag_name(&rest[..name_end]) {
-            // A `plaintext` tag turns the rest of the document into text: there is no tag left to
-            // find, and no point past it the snippet could run at.
-            Some(TagName::Plaintext) => return None,
             Some(relevant_tag_name) => return Some((relevant_tag_name, tag_start, tag_end)),
             None => i = tag_end,
         }
@@ -466,6 +479,8 @@ fn parse_tag_name(input: &[u8]) -> Option<TagName> {
         return Some(TagName::RawText(b"xmp"));
     } else if compare_case_insensitive(input, b"plaintext") {
         return Some(TagName::Plaintext);
+    } else if compare_case_insensitive(input, b"frameset") {
+        return Some(TagName::Frameset);
     } else if compare_case_insensitive(input, b"noscript") {
         return Some(TagName::Inert(b"noscript"));
     } else if compare_case_insensitive(input, b"noframes") {
@@ -613,6 +628,37 @@ mod tests {
         test_injector(
             "<html><head><meta http-equiv='content-type' content='text/html; charset='></head></html>",
             "<html><head>{{SNIPPET}}<meta http-equiv='content-type' content='text/html; charset='></head></html>",
+        );
+    }
+
+    #[test]
+    fn attribute_order_decides_which_one_declares_the_encoding() {
+        // The prescan reads the attributes in source order, and a `charset` naming no known encoding
+        // discards the encoding the `content` value provided rather than falling back to it. The
+        // browser goes on looking, so the snippet stays behind the declaration that follows.
+        test_injector(
+            "<html><head><meta http-equiv='content-type' content='text/html; charset=utf-8' charset='bogus'><meta charset='utf-8'></head></html>",
+            "<html><head><meta http-equiv='content-type' content='text/html; charset=utf-8' charset='bogus'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        // Written first, a bogus `charset` keeps the `content` value from providing one at all.
+        test_injector(
+            "<html><head><meta charset='bogus' http-equiv='content-type' content='text/html; charset=utf-8'><meta charset='utf-8'></head></html>",
+            "<html><head><meta charset='bogus' http-equiv='content-type' content='text/html; charset=utf-8'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        // A duplicate attribute is dropped, so the first `charset` is the one that counts, whether it
+        // is the valid one or the bogus one.
+        test_injector(
+            "<html><head><meta charset='utf-8' charset='bogus'></head></html>",
+            "<html><head><meta charset='utf-8' charset='bogus'>{{SNIPPET}}</head></html>",
+        );
+        test_injector(
+            "<html><head><meta charset='bogus' charset='utf-8'><meta charset='utf-8'></head></html>",
+            "<html><head><meta charset='bogus' charset='utf-8'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        // A `content` written before the `http-equiv` naming the pragma still declares the encoding.
+        test_injector(
+            "<html><head><meta content='text/html; charset=utf-8' http-equiv='content-type'></head></html>",
+            "<html><head><meta content='text/html; charset=utf-8' http-equiv='content-type'>{{SNIPPET}}</head></html>",
         );
     }
 
@@ -1017,19 +1063,53 @@ mod tests {
         // `plaintext` switches the tokenizer to a state it never leaves: everything that follows is
         // text, so the only valid injection point left is the one found before it.
         test_injector(
+            "<html><head><plaintext>hello",
+            "<html><head>{{SNIPPET}}<plaintext>hello",
+        );
+        // Unless the text holds a declaration the prescan would honour, as it knows no more about
+        // the plaintext state than about the raw text ones: injecting before it could push it out of
+        // the prescan window, and there is no point past it to inject at instead.
+        test_injector(
             "<html><head><plaintext><meta charset=utf-8>",
-            "<html><head>{{SNIPPET}}<plaintext><meta charset=utf-8>",
+            "<html><head><plaintext><meta charset=utf-8>",
         );
         // Not even a closing tag brings the markup back.
         test_injector(
             "<html><head><plaintext></plaintext><meta charset=utf-8></head></html>",
-            "<html><head>{{SNIPPET}}<plaintext></plaintext><meta charset=utf-8></head></html>",
+            "<html><head><plaintext></plaintext><meta charset=utf-8></head></html>",
         );
         test_injector("<html><plaintext><head>", "<html><plaintext><head>");
         // A declaration written before the tag is still the one to stay behind.
         test_injector(
             "<html><head><meta charset='utf-8'><plaintext>",
             "<html><head><meta charset='utf-8'>{{SNIPPET}}<plaintext>",
+        );
+    }
+
+    #[test]
+    fn a_frameset_ends_the_executable_markup() {
+        // A script start tag is ignored in the `in frameset` insertion mode as well as in the
+        // `after frameset` one, so nothing from the tag onwards can run: the point found before it is
+        // the only one left, and a script placed there still runs.
+        test_injector(
+            "<html><head></head><frameset><frame src='a.html'></frameset></html>",
+            "<html><head>{{SNIPPET}}</head><frameset><frame src='a.html'></frameset></html>",
+        );
+        // The prescan honours a declaration written within the frameset all the same, and the
+        // fallback point would push it further into the document, so injection is declined.
+        test_injector(
+            "<html><head></head><frameset><meta charset=utf-8><frame src='a.html'></frameset>",
+            "<html><head></head><frameset><meta charset=utf-8><frame src='a.html'></frameset>",
+        );
+        // A declaration written before the tag is still the one to stay behind.
+        test_injector(
+            "<html><head><meta charset='utf-8'></head><frameset>",
+            "<html><head><meta charset='utf-8'>{{SNIPPET}}</head><frameset>",
+        );
+        // With no point found before it, there is nowhere left to inject.
+        test_injector(
+            "<html><frameset><frame></frameset>",
+            "<html><frameset><frame></frameset>",
         );
     }
 

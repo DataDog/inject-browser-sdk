@@ -110,8 +110,29 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
             continue;
         }
 
+        // A `<![CDATA[` section runs to `]]>` within `svg` or `math` content and is a bogus comment
+        // ending at the first `>` anywhere else. Telling the two apart means tracking foreign
+        // content, and guessing wrong would either inject into CDATA text, where the snippet would
+        // never run, or skip real markup: decline instead, which leaves the point found so far.
+        if input[i..].starts_with(b"<![CDATA[") {
+            return None;
+        }
+
         let tag_start = i;
         let rest = &input[tag_start + 1..];
+
+        // A doctype or a bogus comment holds no attribute value a `>` could hide in, so it ends at
+        // the very next `>` rather than at the one `find_tag_close` looks for.
+        if ends_at_first_greater_than(rest) {
+            i = find_bogus_comment_end(input, tag_start)?;
+            continue;
+        }
+
+        if !starts_markup(rest) {
+            // A stray `<`, as in `a < b`, is text rather than the start of a tag.
+            i += 1;
+            continue;
+        }
 
         // find end of tag
         let tag_close: usize = find_tag_close(rest)?;
@@ -136,19 +157,62 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
     return None;
 }
 
+/// The state script content can be in. A `<!--` written in a script opens the escaped state, a
+/// `<script` tag written while escaped the double escaped one, and a `-->` returns to plain script
+/// data from either.
+///
+/// Only `script` has these states: a `<!--` written in a `title` or a `style` is plain text.
+#[derive(PartialEq, Eq)]
+enum ScriptState {
+    Data,
+    Escaped,
+    DoubleEscaped,
+}
+
 /// Returns the index just past the closing tag of the raw text element named `name` whose content
 /// starts at `content_start`, or `None` if the element is never closed within `input`.
+///
+/// A `</script>` read while the script is double escaped, as in `<script><!--<script></script>`, only
+/// leaves that state: the element stays open, and the script source goes on past it.
 fn find_raw_text_end(input: &[u8], content_start: usize, name: &[u8]) -> Option<usize> {
+    let script = name == b"script";
+    let mut state = ScriptState::Data;
     let mut i = content_start;
 
     while i < input.len() {
+        if script {
+            if state == ScriptState::Data && input[i..].starts_with(b"<!--") {
+                // Resume from the dashes: they are also the ones that end `<!-->` and `<!--->`.
+                state = ScriptState::Escaped;
+                i += b"<!".len();
+                continue;
+            }
+            if state != ScriptState::Data && input[i..].starts_with(b"-->") {
+                state = ScriptState::Data;
+                i += b"-->".len();
+                continue;
+            }
+        }
+
         if input[i] != b'<' {
             i += 1;
             continue;
         }
 
         let rest = &input[i + 1..];
+
+        if state == ScriptState::Escaped && is_tag_named(rest, false, b"script") {
+            state = ScriptState::DoubleEscaped;
+            i += 1;
+            continue;
+        }
+
         if is_tag_named(rest, true, name) {
+            if state == ScriptState::DoubleEscaped {
+                state = ScriptState::Escaped;
+                i += 1;
+                continue;
+            }
             return Some(i + find_tag_close(rest)? + 2);
         }
 
@@ -185,7 +249,21 @@ fn find_inert_element_end(input: &[u8], content_start: usize, name: &[u8]) -> Op
             continue;
         }
 
+        // A CDATA section cannot be told from a bogus comment without tracking foreign content, and
+        // the two end in different places, so where the template ends cannot be told either.
+        if input[i..].starts_with(b"<![CDATA[") {
+            return None;
+        }
+
         let rest = &input[i + 1..];
+
+        // A `</template>` written in a doctype or a bogus comment closes nothing either, and those
+        // end at the very next `>`, quoted or not.
+        if ends_at_first_greater_than(rest) {
+            i = find_bogus_comment_end(input, i)?;
+            continue;
+        }
+
         if !starts_markup(rest) {
             // A stray `<`, as in `a < b`, is text rather than the start of a tag.
             i += 1;
@@ -275,6 +353,29 @@ fn starts_markup(rest: &[u8]) -> bool {
         Some(byte) => byte.is_ascii_alphabetic(),
         None => false,
     };
+}
+
+/// Returns whether `rest`, the bytes just after a `<` character, starts markup that ends at the very
+/// next `>`: a doctype, or a bogus comment such as `<?x>`, `<!x>` or `</3>`.
+///
+/// Only a tag has attribute values a `>` can hide in, so those are the only ones whose end has to be
+/// looked for with [`find_tag_close`]. The tokenizer ends a bogus comment at the first `>` it reads,
+/// and so does the encoding prescan, which skips `<!`, `</` and `<?` up to the next `>`.
+fn ends_at_first_greater_than(rest: &[u8]) -> bool {
+    return match rest.first() {
+        Some(b'!' | b'?') => true,
+        Some(b'/') => !rest.get(1).is_some_and(|b| return b.is_ascii_alphabetic()),
+        _ => false,
+    };
+}
+
+/// Returns the index just past the `>` ending the markup that starts with the `<` at `start`, for the
+/// markup [`ends_at_first_greater_than`] describes, or `None` if there is no `>` within `input`.
+fn find_bogus_comment_end(input: &[u8], start: usize) -> Option<usize> {
+    return input[start..]
+        .iter()
+        .position(|&byte| return byte == b'>')
+        .map(|index| return start + index + 1);
 }
 
 /// Returns whether `rest`, the bytes just after a `<` character, starts an open (`closing` false) or
@@ -1165,6 +1266,77 @@ mod tests {
         test_injector(
             "<html><head><!---!><meta charset=utf-8>",
             "<html><head>{{SNIPPET}}<!---!><meta charset=utf-8>",
+        );
+    }
+
+    #[test]
+    fn bogus_comments_end_at_the_first_greater_than() {
+        // A processing instruction is a bogus comment: it holds no attribute value, so the quoted `>`
+        // ends it and the meta tag that follows is a real encoding declaration.
+        test_injector(
+            "<html><head><?x '><meta charset=windows-1252>'></head></html>",
+            "<html><head><?x '><meta charset=windows-1252>{{SNIPPET}}'></head></html>",
+        );
+        // Same for a `<!` that opens neither a comment nor a doctype, and for a `</` that is not
+        // followed by a tag name.
+        test_injector(
+            "<html><head><!x '><meta charset=utf-8>'></head></html>",
+            "<html><head><!x '><meta charset=utf-8>{{SNIPPET}}'></head></html>",
+        );
+        test_injector(
+            "<html><head></3 '><meta charset=utf-8>'></head></html>",
+            "<html><head></3 '><meta charset=utf-8>{{SNIPPET}}'></head></html>",
+        );
+        // A doctype ends at its first `>` as well, quoted or not, so the `<head>` after one is found.
+        test_injector(
+            "<!DOCTYPE html SYSTEM \"x>\"><html><head></head></html>",
+            "<!DOCTYPE html SYSTEM \"x>\"><html><head>{{SNIPPET}}</head></html>",
+        );
+    }
+
+    #[test]
+    fn cdata_sections_are_not_scanned() {
+        // `<![CDATA[` runs to `]]>` in foreign content and ends at the first `>` anywhere else. Which
+        // one it is cannot be told without tracking foreign content, so the scan stops and the point
+        // found before it stands rather than risking a snippet inside CDATA text.
+        test_injector(
+            "<html><head><svg><![CDATA[x > <meta charset=utf-8>]]></svg></head></html>",
+            "<html><head>{{SNIPPET}}<svg><![CDATA[x > <meta charset=utf-8>]]></svg></head></html>",
+        );
+        // A declaration written before the section is still the one to stay behind.
+        test_injector(
+            "<html><head><meta charset='utf-8'><svg><![CDATA[x]]></svg></head></html>",
+            "<html><head><meta charset='utf-8'>{{SNIPPET}}<svg><![CDATA[x]]></svg></head></html>",
+        );
+        test_injector(
+            "<html><svg><![CDATA[<head>]]>",
+            "<html><svg><![CDATA[<head>]]>",
+        );
+    }
+
+    #[test]
+    fn double_escaped_script_content() {
+        // A `</script>` read while the script is double escaped only leaves that state: the element
+        // stays open, so the meta tag that follows is script source rather than a declaration.
+        test_injector(
+            "<html><head><script><!--<script></script><meta charset=utf-8></script><meta charset='utf-8'></head></html>",
+            "<html><head><script><!--<script></script><meta charset=utf-8></script><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        // A `-->` returns to plain script data, where the next `</script>` does close the element.
+        test_injector(
+            "<html><head><script><!--<script>--></script><meta charset='utf-8'></head></html>",
+            "<html><head><script><!--<script>--></script><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        // Without a `<!--` opening the escaped state, a `<script>` written in the source changes
+        // nothing: the first closing tag is the one that ends the element.
+        test_injector(
+            "<html><head><script>var s = \"<script>\";</script><meta charset='utf-8'></head></html>",
+            "<html><head><script>var s = \"<script>\";</script><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        // The double escaped state is left for good: the second closing tag ends the element.
+        test_injector(
+            "<html><head><script><!--<script></script></script><meta charset='utf-8'></head></html>",
+            "<html><head><script><!--<script></script></script><meta charset='utf-8'>{{SNIPPET}}</head></html>",
         );
     }
 

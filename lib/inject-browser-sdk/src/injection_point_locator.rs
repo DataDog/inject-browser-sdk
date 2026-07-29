@@ -82,7 +82,8 @@ enum TagName {
     Meta,
     Head,
     /// An element whose content is text rather than markup (`script`, `style`, `title`,
-    /// `textarea`), holding its lower case name. Such content must be skipped rather than scanned.
+    /// `textarea`, `iframe`), holding its lower case name. Such content must be skipped rather than
+    /// scanned.
     RawText(&'static [u8]),
     /// An element whose content is inert (`noscript` with scripting enabled, `noframes`,
     /// `template`), holding its lower case name. A script injected within one would never run,
@@ -100,6 +101,12 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
             continue;
         }
 
+        // The content of a comment is not markup either, and the encoding prescan skips it too.
+        if input[i..].starts_with(b"<!--") {
+            i = find_comment_end(input, i)?;
+            continue;
+        }
+
         let tag_start = i;
         let rest = &input[tag_start + 1..];
 
@@ -108,9 +115,7 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
         let tag_end = tag_start + tag_close + 2;
 
         // extract tag name
-        let name_end = rest
-            .iter()
-            .position(|&b| return b.is_ascii_whitespace() || b == b'>')?;
+        let name_end = find_tag_name_end(rest)?;
 
         match parse_tag_name(&rest[..name_end]) {
             // The content of a raw text element is text, not markup: a `<meta charset>` written
@@ -167,6 +172,13 @@ fn find_inert_element_end(input: &[u8], content_start: usize, name: &[u8]) -> Op
             continue;
         }
 
+        // A `</template>` written within a comment closes nothing, so the comment has to be skipped
+        // through its own `-->` terminator rather than through the first `>` it holds.
+        if input[i..].starts_with(b"<!--") {
+            i = find_comment_end(input, i)?;
+            continue;
+        }
+
         let rest = &input[i + 1..];
         if !starts_markup(rest) {
             // A stray `<`, as in `a < b`, is text rather than the start of a tag.
@@ -189,9 +201,7 @@ fn find_inert_element_end(input: &[u8], content_start: usize, name: &[u8]) -> Op
             i = tag_end;
         } else {
             // The content of a raw text element is not markup either.
-            let name_end = rest
-                .iter()
-                .position(|&b| return b.is_ascii_whitespace() || b == b'>')?;
+            let name_end = find_tag_name_end(rest)?;
             i = match parse_tag_name(&rest[..name_end]) {
                 Some(TagName::RawText(raw_text_name)) => {
                     find_raw_text_end(input, tag_end, raw_text_name)?
@@ -202,6 +212,28 @@ fn find_inert_element_end(input: &[u8], content_start: usize, name: &[u8]) -> Op
     }
 
     return None;
+}
+
+/// Returns the index just past the `-->` closing the comment whose `<!--` starts at `start`, or
+/// `None` if the comment is never closed within `input`.
+fn find_comment_end(input: &[u8], start: usize) -> Option<usize> {
+    let content_start = start + b"<!--".len();
+
+    return input[content_start..]
+        .windows(3)
+        .position(|window| return window == b"-->")
+        .map(|index| return content_start + index + 3);
+}
+
+/// Returns the index at which the tag name starting `rest`, the bytes just after a `<` character,
+/// ends, or `None` if it does not end within `rest`.
+///
+/// `/` delimits the name as whitespace and `>` do: browsers ignore the self-closing flag on a
+/// non-void element, so `<script/>` opens a script element like `<script>` does.
+fn find_tag_name_end(rest: &[u8]) -> Option<usize> {
+    return rest
+        .iter()
+        .position(|&b| return b.is_ascii_whitespace() || b == b'>' || b == b'/');
 }
 
 /// Returns whether `rest`, the bytes just after a `<` character, starts a tag, a comment or a
@@ -293,6 +325,8 @@ fn parse_tag_name(input: &[u8]) -> Option<TagName> {
         return Some(TagName::RawText(b"title"));
     } else if compare_case_insensitive(input, b"textarea") {
         return Some(TagName::RawText(b"textarea"));
+    } else if compare_case_insensitive(input, b"iframe") {
+        return Some(TagName::RawText(b"iframe"));
     } else if compare_case_insensitive(input, b"noscript") {
         return Some(TagName::Inert(b"noscript"));
     } else if compare_case_insensitive(input, b"noframes") {
@@ -1002,6 +1036,77 @@ mod tests {
     }
 
     #[test]
+    fn tags_within_comments_are_not_markup() {
+        // A tag written in a comment is text: the snippet would never run there, and the encoding
+        // prescan skips comments too, so a meta tag written in one is not a declaration.
+        test_injector("<!--<html><head></head>-->", "<!--<html><head></head>-->");
+        test_injector(
+            "<html><head><!-- <meta charset=utf-8> --></head></html>",
+            "<html><head>{{SNIPPET}}<!-- <meta charset=utf-8> --></head></html>",
+        );
+        // A '>' within the comment does not end it, so the meta tag that follows it is text as
+        // well: the snippet stays behind the real declaration written after the comment.
+        test_injector(
+            "<html><head><!-- > <meta charset=utf-8> --><meta charset='utf-8'></head></html>",
+            "<html><head><!-- > <meta charset=utf-8> --><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        test_injector(
+            "<html><head><!-- > <meta charset=utf-8> --></head></html>",
+            "<html><head>{{SNIPPET}}<!-- > <meta charset=utf-8> --></head></html>",
+        );
+        // An unclosed comment swallows everything that follows, so only the point found before it
+        // stands.
+        test_injector(
+            "<html><head><!-- <meta charset=utf-8>",
+            "<html><head>{{SNIPPET}}<!-- <meta charset=utf-8>",
+        );
+        test_injector("<!-- <head> -->", "<!-- <head> -->");
+    }
+
+    #[test]
+    fn comments_within_inert_elements() {
+        // A `</template>` written in a comment closes nothing, so the snippet must not be placed
+        // after it: it would sit in both the comment and the template.
+        test_injector(
+            "<html><head><template><meta charset=utf-8><!-- > </template> --></template><meta charset='utf-8'></head>",
+            "<html><head><template><meta charset=utf-8><!-- > </template> --></template>{{SNIPPET}}<meta charset='utf-8'></head>",
+        );
+        // A comment left unclosed within a template is one the template never closes either.
+        test_injector(
+            "<html><head><template><p>x</p><!-- </template>",
+            "<html><head>{{SNIPPET}}<template><p>x</p><!-- </template>",
+        );
+    }
+
+    #[test]
+    fn self_closing_start_tag() {
+        // Browsers ignore the self-closing flag on a non-void element: `<script/>` stays in script
+        // data state, so the meta tag written in the source below is not a declaration.
+        test_injector(
+            "<html><head><script/>const x = '<meta charset=utf-8>';</script></head></html>",
+            "<html><head>{{SNIPPET}}<script/>const x = '<meta charset=utf-8>';</script></head></html>",
+        );
+        test_injector("<html><head/></html>", "<html><head/>{{SNIPPET}}</html>");
+        test_injector(
+            "<html><head><meta charset='utf-8'/></head></html>",
+            "<html><head><meta charset='utf-8'/>{{SNIPPET}}</head></html>",
+        );
+    }
+
+    #[test]
+    fn tags_within_an_iframe_are_not_markup() {
+        // An iframe holds raw text, and a snippet written there would never run.
+        test_injector(
+            "<html><head></head><body><iframe><meta charset=utf-8></iframe>",
+            "<html><head>{{SNIPPET}}</head><body><iframe><meta charset=utf-8></iframe>",
+        );
+        test_injector(
+            "<html><body><iframe><meta charset=utf-8></iframe><head>",
+            "<html><body><iframe><meta charset=utf-8></iframe><head>{{SNIPPET}}",
+        );
+    }
+
+    #[test]
     fn head_in_tag_attribute() {
         test_injector(
             "<html><link foo='<head></head>' /><head></head></html>",
@@ -1040,15 +1145,6 @@ mod tests {
             test_injector(
                 "<html><foo <head ></head></html>",
                 "<html><foo <head ></head></html>",
-            );
-        }
-
-        #[test]
-        fn comment_tags() {
-            // If we first find a commented open head tag we would inject in the comment
-            test_injector(
-                "<!--<html><head></head></html>-->",
-                "<!--<html><head>{{SNIPPET}}</head></html>-->",
             );
         }
 

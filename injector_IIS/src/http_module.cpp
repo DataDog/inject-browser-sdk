@@ -11,6 +11,7 @@
 #include <cassert>
 #include <datadog/telemetry/telemetry.h>
 #include <format>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -284,7 +285,15 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
           injector_write(injector, (uint8_t*)dataChunk.FromMemory.pBuffer, chunkLength);
       if (injectorResult.injected) {
         const size_t bufferLength = sizeof(uint8_t) * (chunkLength + snippet->length);
-        void* buffer = pHttpContext.AllocateRequestMemory(bufferLength);
+        // See the DWORD bound in the buffering path below.
+        if (bufferLength > (std::numeric_limits<DWORD>::max)()) {
+          logger.error("Chunk too large to rewrite for injection: " + std::to_string(bufferLength) +
+                       " bytes");
+          injector_cleanup(injector);
+          return RQ_NOTIFICATION_CONTINUE;
+        }
+
+        void* buffer = pHttpContext.AllocateRequestMemory(static_cast<DWORD>(bufferLength));
         if (!buffer) {
           logger.error("Failed to allocate memory for injection buffer");
           injector_cleanup(injector);
@@ -299,7 +308,7 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
         }
 
         dataChunk.FromMemory.pBuffer = (PVOID)buffer;
-        dataChunk.FromMemory.BufferLength = bufferLength;
+        dataChunk.FromMemory.BufferLength = static_cast<ULONG>(bufferLength);
 
         injected = true;
 
@@ -332,7 +341,16 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
     }
     total_length += snippet->length;
 
-    void* buffer = pHttpContext.AllocateRequestMemory(total_length);
+    // `AllocateRequestMemory` takes a DWORD and `BufferLength` is a ULONG, while the lengths above
+    // are 64 bit: a response that does not fit would be allocated short and written past its end.
+    if (total_length > (std::numeric_limits<DWORD>::max)()) {
+      logger.error("Response too large to buffer for injection: " + std::to_string(total_length) +
+                   " bytes");
+      injector_cleanup(injector);
+      return RQ_NOTIFICATION_CONTINUE;
+    }
+
+    void* buffer = pHttpContext.AllocateRequestMemory(static_cast<DWORD>(total_length));
     if (!buffer) {
       logger.error("Failed to allocate memory for injection buffer");
       injector_cleanup(injector);

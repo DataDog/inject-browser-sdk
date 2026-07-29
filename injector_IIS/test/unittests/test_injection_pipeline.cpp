@@ -755,6 +755,45 @@ TEST(InjectionPipeline, UnresolvedHeadCloseTagLeavesTheResponseUntouched) {
   mod.global->Terminate();
 }
 
+// A response with no injection point at all leaves the injector padding the body with spaces to
+// keep its length constant. The buffering path must not serve that padding: like the streaming
+// path, it leaves the queued chunks as they are when nothing was injected.
+TEST(InjectionPipeline, UninjectedBufferedResponseLeavesTheResponseUntouched) {
+  const std::vector<std::string> bodies = {"<body><pre>hel", "lo"};
+
+  MockRumConfigElement rumConfig;
+  rumConfig.SetInjectionStrategy(InjectionStrategy::HeadOpenTagWithCloseTagFallback);
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  ASSERT_NE(mod.global, nullptr);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+
+  CHttpModule* httpMod = nullptr;
+  ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  PreparedChunkedResponse pr;
+  setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, bodies);
+
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _)).Times(0);
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_TRUE(httpCtx.AllocationGuardIntact()) << "wrote past the end of the injection buffer";
+  EXPECT_EQ(assembleResponseBody(pr), "<body><pre>hello");
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
 // The head-open strategies buffer the whole body, so a response too large to copy is passed through
 // uninstrumented rather than doubling the worker process' memory for it.
 TEST(InjectionPipeline, OversizedResponseIsNotBuffered) {

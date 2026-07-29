@@ -82,10 +82,10 @@ enum TagName {
     Meta,
     Head,
     /// An element whose content is text rather than markup (`script`, `style`, `title`,
-    /// `textarea`, `iframe`), holding its lower case name. Such content must be skipped rather than
-    /// scanned.
+    /// `textarea`, `iframe`, `xmp`), holding its lower case name. Such content must be skipped
+    /// rather than scanned.
     RawText(&'static [u8]),
-    /// An element whose content is inert (`noscript` with scripting enabled, `noframes`,
+    /// An element whose content is inert (`noscript` with scripting enabled, `noframes`, `noembed`,
     /// `template`), holding its lower case name. A script injected within one would never run,
     /// while the encoding prescan still honours a declaration written there.
     Inert(&'static [u8]),
@@ -155,8 +155,8 @@ fn find_raw_text_end(input: &[u8], content_start: usize, name: &[u8]) -> Option<
 /// Returns the index just past the closing tag of the inert element named `name` whose content
 /// starts at `content_start`, or `None` if the element is never closed within `input`.
 fn find_inert_element_end(input: &[u8], content_start: usize, name: &[u8]) -> Option<usize> {
-    // `noscript` (when scripting is enabled) and `noframes` hold raw text, so they cannot nest and
-    // the first matching closing tag ends them, wherever it appears.
+    // `noscript` (when scripting is enabled), `noframes` and `noembed` hold raw text, so they
+    // cannot nest and the first matching closing tag ends them, wherever it appears.
     if name != b"template" {
         return find_raw_text_end(input, content_start, name);
     }
@@ -214,15 +214,26 @@ fn find_inert_element_end(input: &[u8], content_start: usize, name: &[u8]) -> Op
     return None;
 }
 
-/// Returns the index just past the `-->` closing the comment whose `<!--` starts at `start`, or
-/// `None` if the comment is never closed within `input`.
+/// Returns the index just past the `-->` or `--!>` closing the comment whose `<!--` starts at
+/// `start`, or `None` if the comment is never closed within `input`.
+///
+/// The tokenizer ends a comment on `--!>` as well as on `-->`, so the markup that follows one is
+/// real markup. The encoding prescan only knows `-->`, but ending the comment at the earlier of the
+/// two terminators only ever keeps the snippet behind more of the document, never less.
 fn find_comment_end(input: &[u8], start: usize) -> Option<usize> {
-    let content_start = start + b"<!--".len();
+    let mut i = start + b"<!--".len();
 
-    return input[content_start..]
-        .windows(3)
-        .position(|window| return window == b"-->")
-        .map(|index| return content_start + index + 3);
+    while i < input.len() {
+        if input[i..].starts_with(b"-->") {
+            return Some(i + b"-->".len());
+        }
+        if input[i..].starts_with(b"--!>") {
+            return Some(i + b"--!>".len());
+        }
+        i += 1;
+    }
+
+    return None;
 }
 
 /// Returns the index at which the tag name starting `rest`, the bytes just after a `<` character,
@@ -327,10 +338,14 @@ fn parse_tag_name(input: &[u8]) -> Option<TagName> {
         return Some(TagName::RawText(b"textarea"));
     } else if compare_case_insensitive(input, b"iframe") {
         return Some(TagName::RawText(b"iframe"));
+    } else if compare_case_insensitive(input, b"xmp") {
+        return Some(TagName::RawText(b"xmp"));
     } else if compare_case_insensitive(input, b"noscript") {
         return Some(TagName::Inert(b"noscript"));
     } else if compare_case_insensitive(input, b"noframes") {
         return Some(TagName::Inert(b"noframes"));
+    } else if compare_case_insensitive(input, b"noembed") {
+        return Some(TagName::Inert(b"noembed"));
     } else if compare_case_insensitive(input, b"template") {
         return Some(TagName::Inert(b"template"));
     } else {
@@ -908,6 +923,24 @@ mod tests {
     }
 
     #[test]
+    fn noembed_is_an_inert_element() {
+        // `noembed` holds raw text, and its content is only shown by a browser that cannot embed, so
+        // the snippet cannot go inside it; the encoding prescan still honours a declaration there.
+        test_injector(
+            "<html><head><noembed><meta charset='utf-8'></noembed></head></html>",
+            "<html><head><noembed><meta charset='utf-8'></noembed>{{SNIPPET}}</head></html>",
+        );
+        test_injector(
+            "<html><head></head><body><noembed><meta charset=utf-8></noembed>",
+            "<html><head></head><body><noembed><meta charset=utf-8></noembed>{{SNIPPET}}",
+        );
+        test_injector(
+            "<html><head><noembed>no embed here</noembed></head></html>",
+            "<html><head>{{SNIPPET}}<noembed>no embed here</noembed></head></html>",
+        );
+    }
+
+    #[test]
     fn literal_template_closing_tag_does_not_end_the_element() {
         // A `</template>` written within an attribute value or a raw text element is not markup, so
         // the outer one is the one that ends the element. Injecting at the literal occurrence would
@@ -1017,6 +1050,16 @@ mod tests {
             "<html><head><title>Using <meta charset=utf-8></title><meta charset='utf-8'></head></html>",
             "<html><head><title>Using <meta charset=utf-8></title><meta charset='utf-8'>{{SNIPPET}}</head></html>",
         );
+        // An `xmp` holds raw text as well: its content is displayed literally, so a snippet written
+        // there would be shown rather than run.
+        test_injector(
+            "<html><head><xmp><meta charset=utf-8></xmp></head></html>",
+            "<html><head>{{SNIPPET}}<xmp><meta charset=utf-8></xmp></head></html>",
+        );
+        test_injector(
+            "<html><head><xmp><meta charset=utf-8></xmp><meta charset='utf-8'></head></html>",
+            "<html><head><xmp><meta charset=utf-8></xmp><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
         // A `</scriptfoo>` tag does not close the script element.
         test_injector(
             "<html><head><script></scriptfoo><meta charset=utf-8></script></head></html>",
@@ -1061,6 +1104,22 @@ mod tests {
             "<html><head>{{SNIPPET}}<!-- <meta charset=utf-8>",
         );
         test_injector("<!-- <head> -->", "<!-- <head> -->");
+    }
+
+    #[test]
+    fn comment_closed_by_a_bang_terminator() {
+        // The tokenizer ends a comment on `--!>` too, so what follows one is markup: the snippet has
+        // to stay behind an encoding declaration written there rather than fall back to the `<head>`
+        // point, which would push that declaration further into the document.
+        test_injector(
+            "<html><head><!-- --!><meta charset=utf-8></head></html>",
+            "<html><head><!-- --!><meta charset=utf-8>{{SNIPPET}}</head></html>",
+        );
+        // `--!` not followed by `>` does not end the comment.
+        test_injector(
+            "<html><head><!-- --!- <meta charset=utf-8> --><meta charset='utf-8'></head></html>",
+            "<html><head><!-- --!- <meta charset=utf-8> --><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
     }
 
     #[test]

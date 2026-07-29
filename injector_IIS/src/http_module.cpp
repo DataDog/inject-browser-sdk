@@ -446,13 +446,18 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
       return RQ_NOTIFICATION_CONTINUE;
     }
 
-    pResponseStruct->pEntityChunks[0].FromMemory.pBuffer = (PVOID)buffer;
-    pResponseStruct->pEntityChunks[0].FromMemory.BufferLength = (ULONG)total_length;
-    for (int i = 1; i < pResponseStruct->EntityChunkCount; i++) {
-      pResponseStruct->pEntityChunks[i].FromMemory.BufferLength = 0;
-    }
-
+    // Only a response the snippet actually went into is replaced with the buffer. Without an
+    // injection point the buffer holds the original bytes plus the padding that stands in for the
+    // snippet to keep the length constant, while the queued chunks already carry those bytes at
+    // their original length: serving them as they are leaves the response untouched, as the
+    // streaming path does, rather than ending the body in snippet-length padding.
     if (injected) {
+      pResponseStruct->pEntityChunks[0].FromMemory.pBuffer = (PVOID)buffer;
+      pResponseStruct->pEntityChunks[0].FromMemory.BufferLength = (ULONG)total_length;
+      for (int i = 1; i < pResponseStruct->EntityChunkCount; i++) {
+        pResponseStruct->pEntityChunks[i].FromMemory.BufferLength = 0;
+      }
+
       HRESULT const result = pHttpResponse.SetHeader(k_injection_header, "1", 1, TRUE);
       if (result != S_OK) {
         logger.error("Error setting injection header: " + std::system_category().message(result));

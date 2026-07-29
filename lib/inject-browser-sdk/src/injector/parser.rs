@@ -74,13 +74,13 @@ impl InjectionPointLocator {
                     offset = element_end;
                     continue;
                 }
-                // Nothing past either can run: `plaintext` switches the tokenizer to a state it
-                // never leaves, so what follows is text, and a `frameset` puts the tree builder in
-                // insertion modes that ignore a script start tag, within the frameset and after it
-                // alike. Fall back to the `<head>` point, unless what follows holds a declaration
-                // the prescan would honour, which that fallback would push further into the
-                // document.
-                TagName::Plaintext | TagName::Frameset => {
+                // Nothing past these can be injected at: `plaintext` switches the tokenizer to a
+                // state it never leaves, so what follows is text; a `frameset` puts the tree builder
+                // in insertion modes that ignore a script start tag, within the frameset and after
+                // it alike; and where a CDATA section ends cannot be told at all. Fall back to the
+                // `<head>` point, unless what follows holds a declaration the prescan would honour,
+                // which that fallback would push further into the document.
+                TagName::Plaintext | TagName::Frameset | TagName::CdataSection => {
                     if contains_encoding_declaration(&buffer[tag_end..]) {
                         return None;
                     }
@@ -115,6 +115,10 @@ enum TagName {
     /// `frameset`, which puts the tree builder in the `in frameset` insertion mode, and then in
     /// `after frameset`: both ignore a script start tag, so nothing past the tag can run either.
     Frameset,
+    /// A `<![CDATA[` section, whose end cannot be located without tracking foreign content: it runs
+    /// to `]]>` within `svg` or `math` and ends at the first `>` anywhere else. Not a tag, but
+    /// reported as one so the scan can stop where it starts, holding the index just past the opener.
+    CdataSection,
 }
 
 fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)> {
@@ -136,9 +140,9 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
         // A `<![CDATA[` section runs to `]]>` within `svg` or `math` content and is a bogus comment
         // ending at the first `>` anywhere else. Telling the two apart means tracking foreign
         // content, and guessing wrong would either inject into CDATA text, where the snippet would
-        // never run, or skip real markup: decline instead, which leaves the point found so far.
+        // never run, or skip real markup. Hand it to the caller, which stops the scan there.
         if input[i..].starts_with(b"<![CDATA[") {
-            return None;
+            return Some((TagName::CdataSection, i, i + b"<![CDATA[".len()));
         }
 
         let tag_start = i;
@@ -434,27 +438,75 @@ fn contains_encoding_declaration(content: &[u8]) -> bool {
     return false;
 }
 
+/// Where within a tag [`find_tag_close`] is reading, which is what decides whether a quote opens an
+/// attribute value.
+#[derive(Clone, Copy)]
+enum TagPosition {
+    /// The tag name, where an `=` is part of the name rather than the start of a value.
+    TagName,
+    /// Between two attributes, where an `=` starts an attribute name of its own.
+    BeforeAttributeName,
+    /// An attribute name, or the whitespace that may follow it before its `=`.
+    AttributeName,
+    /// Just past the `=` of an attribute, the one place a quote opens a quoted value.
+    BeforeAttributeValue,
+    /// An unquoted attribute value.
+    UnquotedAttributeValue,
+    /// A quoted attribute value, holding the quote that ends it.
+    QuotedAttributeValue(u8),
+}
+
 /// Returns the index of the `>` character closing the tag whose content starts at the beginning of
 /// `input`, or `None` if there is none.
 ///
 /// `>` characters appearing within a quoted attribute value do not close the tag, so they are
 /// skipped: injecting at such a position would insert the snippet inside the attribute value.
+///
+/// A quote opens such a value only where the tokenizer reads one, right after an attribute's `=`.
+/// Written in a tag name, in an attribute name or in an unquoted value it is a parse error the
+/// tokenizer keeps as an ordinary character, so `<head '>` ends at its `>` like any other tag;
+/// skipping to a matching quote there would run past the real end of the tag and hand out an
+/// injection point within markup the browser has already parsed.
 fn find_tag_close(input: &[u8]) -> Option<usize> {
-    let mut quote: Option<u8> = None;
+    let mut position = TagPosition::TagName;
 
     for (index, &byte) in input.iter().enumerate() {
-        match quote {
-            Some(quote_byte) => {
-                if byte == quote_byte {
-                    quote = None;
-                }
-            }
-            None => match byte {
-                b'"' | b'\'' => quote = Some(byte),
-                b'>' => return Some(index),
-                _ => {}
+        position = match (position, byte) {
+            // Checked before `>`, which does not close the tag while within a quoted value.
+            (TagPosition::QuotedAttributeValue(quote), byte) => match byte == quote {
+                true => TagPosition::BeforeAttributeName,
+                false => TagPosition::QuotedAttributeValue(quote),
             },
-        }
+
+            (_, b'>') => return Some(index),
+
+            (TagPosition::BeforeAttributeValue, b'"' | b'\'') => {
+                TagPosition::QuotedAttributeValue(byte)
+            }
+            (TagPosition::BeforeAttributeValue, byte) if byte.is_ascii_whitespace() => position,
+            (TagPosition::BeforeAttributeValue, _) => TagPosition::UnquotedAttributeValue,
+
+            (TagPosition::AttributeName, b'=') => TagPosition::BeforeAttributeValue,
+
+            // A value ends at the whitespace following it, and the `/` of a self-closing tag ends
+            // whatever precedes it, so both leave the next attribute to start.
+            (
+                TagPosition::TagName
+                | TagPosition::UnquotedAttributeValue
+                | TagPosition::AttributeName,
+                b'/',
+            ) => TagPosition::BeforeAttributeName,
+            (TagPosition::TagName | TagPosition::UnquotedAttributeValue, byte)
+                if byte.is_ascii_whitespace() =>
+            {
+                TagPosition::BeforeAttributeName
+            }
+
+            (TagPosition::BeforeAttributeName, byte) if byte.is_ascii_whitespace() => position,
+            (TagPosition::BeforeAttributeName, _) => TagPosition::AttributeName,
+
+            _ => position,
+        };
     }
 
     return None;
@@ -799,6 +851,35 @@ mod tests {
     }
 
     #[test]
+    fn a_quote_outside_an_attribute_value_does_not_quote_anything() {
+        // The tokenizer opens a quoted value only right after an attribute's `=`. Elsewhere a quote
+        // is a parse error it keeps as an ordinary character, so these tags end at their first `>`
+        // and the `<plaintext>` that follows is a real tag: reading to the matching quote instead
+        // would hand out a point past it, where the snippet is displayed rather than run.
+        test_injector(
+            "<html><head '><plaintext>'></head></html>",
+            "<html><head '>{{SNIPPET}}<plaintext>'></head></html>",
+        );
+        // Same for a quote written within an unquoted value, and for one in a tag name.
+        test_injector(
+            "<html><head data-x=a'><plaintext>'></head></html>",
+            "<html><head data-x=a'>{{SNIPPET}}<plaintext>'></head></html>",
+        );
+        // A quote in a tag name is an ordinary character too, so the tag it opens ends at the first
+        // `>` and the declaration written after it is markup the snippet has to stay behind.
+        test_injector(
+            "<html><head><p'><meta charset=utf-8>'></head></html>",
+            "<html><head><p'><meta charset=utf-8>{{SNIPPET}}'></head></html>",
+        );
+        // A value quoted the usual way still hides the `>` it holds, whitespace around the `=`
+        // included.
+        test_injector(
+            "<html><head data-x = '>'><meta charset='utf-8'></head></html>",
+            "<html><head data-x = '>'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+    }
+
+    #[test]
     fn head_with_no_meta_tag() {
         test_injector(
             "<html><head></head></html>",
@@ -993,8 +1074,16 @@ mod tests {
         // one it is cannot be told without tracking foreign content, so the scan stops and the point
         // found before it stands rather than risking a snippet inside CDATA text.
         test_injector(
+            "<html><head><svg><![CDATA[x]]></svg></head></html>",
+            "<html><head>{{SNIPPET}}<svg><![CDATA[x]]></svg></head></html>",
+        );
+        // The prescan ends its `<!` skip at the first `>` and reads what follows as markup, so it
+        // honours a declaration written past that `>` whichever way the section ends. There is no
+        // point past the section to inject at, and the `<head>` point would push that declaration
+        // further into the document, so early injection is declined.
+        test_injector(
             "<html><head><svg><![CDATA[x > <meta charset=utf-8>]]></svg></head></html>",
-            "<html><head>{{SNIPPET}}<svg><![CDATA[x > <meta charset=utf-8>]]></svg></head></html>",
+            "<html><head><svg><![CDATA[x > <meta charset=utf-8>]]></svg></head></html>",
         );
         // A declaration written before the section is still the one to stay behind.
         test_injector(

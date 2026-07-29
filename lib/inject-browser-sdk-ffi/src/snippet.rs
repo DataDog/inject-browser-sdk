@@ -382,5 +382,17 @@ mod tests {
             mem::offset_of!(Snippet, length),
             mem::offset_of!(SnippetInternal, length),
         );
+        assert_eq!(
+            mem::offset_of!(Snippet, rum_enabled),
+            mem::offset_of!(SnippetInternal, rum_enabled),
+        );
+        assert_eq!(
+            mem::offset_of!(Snippet, application_id),
+            mem::offset_of!(SnippetInternal, application_id),
+        );
+        assert_eq!(
+            mem::offset_of!(Snippet, remote_configuration_id),
+            mem::offset_of!(SnippetInternal, remote_configuration_id),
+        );
     }
 }

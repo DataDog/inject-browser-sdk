@@ -18,7 +18,10 @@
 #include "gtest/gtest.h"
 
 #include <map>
+#include <optional>
+#include <string>
 #include <utility>
+#include <vector>
 
 using namespace datadog::rum;
 using ::testing::_;  // NOLINT(bugprone-reserved-identifier) — gtest matcher convention
@@ -174,6 +177,9 @@ class MockElementCollection : public IAppHostElementCollection {
 class MockRumConfigElement : public IAppHostElement {
   MockAppHostProperty enabled_prop_;
   MockAppHostProperty version_prop_;
+  // Unset by default, so the case every other test exercises really does go through the
+  // "attribute missing" path.
+  std::optional<MockAppHostProperty> injection_strategy_prop_;
   std::vector<MockOptionElement> options_;
   MockElementCollection collection_;
   HRESULT collection_result_ = S_OK;
@@ -204,6 +210,9 @@ class MockRumConfigElement : public IAppHostElement {
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
   void SetCollectionResult(HRESULT hr) { collection_result_ = hr; }
   void SetEnabledPropertyMissing(bool missing) { enabled_lookup_fails_ = missing; }
+  void SetInjectionStrategy(InjectionStrategy strategy) {
+    injection_strategy_prop_.emplace(L"injectionStrategy", int_variant(static_cast<int>(strategy)));
+  }
 
   HRESULT STDMETHODCALLTYPE get_Name(BSTR*) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE get_Collection(IAppHostElementCollection** ppCol) override {
@@ -233,6 +242,10 @@ class MockRumConfigElement : public IAppHostElement {
     }
     if (_wcsicmp(bstrName, L"version") == 0) {
       *ppProperty = &version_prop_;
+      return S_OK;
+    }
+    if (injection_strategy_prop_ && _wcsicmp(bstrName, L"injectionStrategy") == 0) {
+      *ppProperty = &*injection_strategy_prop_;
       return S_OK;
     }
     *ppProperty = nullptr;
@@ -433,8 +446,17 @@ struct PreparedResponse {
   HTTP_RESPONSE raw;
 };
 
-static void setupHtmlResponse(MockHttpContext& ctx, MockHttpResponse& resp, IHttpApplication* app,
-                              MockMetadataInfo* metadata, PreparedResponse& pr, const char* html) {
+// The entity chunks of a response whose body is split across several of them, as IIS does for a
+// streamed response. The bodies are owned here, so they outlive the chunks pointing into them.
+struct PreparedChunkedResponse {
+  std::vector<std::string> bodies;
+  std::vector<HTTP_DATA_CHUNK> chunks;
+  HTTP_RESPONSE raw;
+};
+
+// Everything but the entity chunks: a 200 text/html response, uncompressed and not yet injected.
+static void setupHtmlResponseMetadata(MockHttpContext& ctx, MockHttpResponse& resp,
+                                      IHttpApplication* app, MockMetadataInfo* metadata) {
   EXPECT_CALL(ctx, GetApplication()).WillRepeatedly(Return(app));
   EXPECT_CALL(ctx, GetResponse()).WillRepeatedly(Return(&resp));
   EXPECT_CALL(ctx, GetMetadata()).WillRepeatedly(Return(metadata));
@@ -453,6 +475,11 @@ static void setupHtmlResponse(MockHttpContext& ctx, MockHttpResponse& resp, IHtt
                                       _Out_ HRESULT*, PCWSTR*, _Out_ DWORD*,
                                       IAppHostConfigException**, _Out_ BOOL*) { *pCode = 200; }),
                             Return()));
+}
+
+static void setupHtmlResponse(MockHttpContext& ctx, MockHttpResponse& resp, IHttpApplication* app,
+                              MockMetadataInfo* metadata, PreparedResponse& pr, const char* html) {
+  setupHtmlResponseMetadata(ctx, resp, app, metadata);
 
   pr.chunk.DataChunkType = HttpDataChunkFromMemory;
   pr.chunk.FromMemory.pBuffer = (PVOID)html;
@@ -462,6 +489,38 @@ static void setupHtmlResponse(MockHttpContext& ctx, MockHttpResponse& resp, IHtt
   pr.raw.pEntityChunks = &pr.chunk;
 
   EXPECT_CALL(resp, GetRawHttpResponse()).WillRepeatedly(Return(&pr.raw));
+}
+
+// Same, with the body split across one entity chunk per element of `bodies`.
+static void setupChunkedHtmlResponse(MockHttpContext& ctx, MockHttpResponse& resp,
+                                     IHttpApplication* app, MockMetadataInfo* metadata,
+                                     PreparedChunkedResponse& pr,
+                                     const std::vector<std::string>& bodies) {
+  setupHtmlResponseMetadata(ctx, resp, app, metadata);
+
+  pr.bodies = bodies;
+  pr.chunks.clear();
+  for (auto& body : pr.bodies) {
+    HTTP_DATA_CHUNK chunk{};
+    chunk.DataChunkType = HttpDataChunkFromMemory;
+    chunk.FromMemory.pBuffer = (PVOID)body.data();
+    chunk.FromMemory.BufferLength = (ULONG)body.size();
+    pr.chunks.push_back(chunk);
+  }
+  pr.raw = {};
+  pr.raw.EntityChunkCount = (USHORT)pr.chunks.size();
+  pr.raw.pEntityChunks = pr.chunks.data();
+
+  EXPECT_CALL(resp, GetRawHttpResponse()).WillRepeatedly(Return(&pr.raw));
+}
+
+// The body IIS would send: every entity chunk at whatever length the module left it at.
+static std::string assembleResponseBody(const PreparedChunkedResponse& pr) {
+  std::string body;
+  for (const auto& chunk : pr.chunks) {
+    body.append(static_cast<const char*>(chunk.FromMemory.pBuffer), chunk.FromMemory.BufferLength);
+  }
+  return body;
 }
 
 // ---------------------------------------------------------------------------
@@ -516,6 +575,259 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
   EXPECT_NE(output.find("test-client-token"), std::string::npos);
   EXPECT_NE(output.find("test-service"), std::string::npos);
   EXPECT_NE(output.find("</head>"), std::string::npos);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// The `injectionStrategy` attribute reaches the injector. Without it the module would be stuck on
+// the `</head>` strategy and the head-open strategies would be unreachable from IIS.
+TEST(InjectionPipeline, InjectionStrategyFromConfig) {
+  struct TestCase {
+    std::string name;
+    InjectionStrategy strategy;
+    std::string expected_before_snippet;
+  };
+
+  const std::string html = "<html><head><meta charset='utf-8'></head><body>hi</body></html>";
+
+  const std::vector<TestCase> cases = {
+      // The default: the snippet lands right before `</head>`.
+      {"head close tag", InjectionStrategy::HeadCloseTag, "<html><head><meta charset='utf-8'>"},
+      // Injects right after the encoding declaration instead. Reaching this at all needs the
+      // buffering path in PerformInjection, since a short response emits nothing until
+      // `injector_end`.
+      {"head open tag", InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+       "<html><head><meta charset='utf-8'>"},
+  };
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+
+    MockRumConfigElement rumConfig;
+    rumConfig.SetInjectionStrategy(test_case.strategy);
+    MockAdminManager adminManager(&rumConfig);
+    MockServer mockServer;
+    EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+    auto mod = registerModule(mockServer);
+    ASSERT_NE(mod.global, nullptr);
+
+    MockAppWithContext app;
+    MockAppStartProvider appStart(app);
+    ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+
+    auto* ctx =
+        static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+    ASSERT_NE(ctx, nullptr);
+    ASSERT_NE(ctx->snippet, nullptr);
+    EXPECT_EQ(ctx->injection_strategy, test_case.strategy);
+
+    CHttpModule* httpMod = nullptr;
+    ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+    MockHttpContext httpCtx;
+    MockHttpResponse httpResp;
+    MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+    PreparedResponse pr;
+    setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html.c_str());
+
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+        .WillOnce(Return(S_OK));
+    EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+
+    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
+                             pr.chunk.FromMemory.BufferLength);
+    ASSERT_NE(output.find("DD_RUM"), std::string::npos) << "no snippet in output:\n" << output;
+    EXPECT_EQ(output.substr(0, test_case.expected_before_snippet.size()),
+              test_case.expected_before_snippet)
+        << "full output:\n"
+        << output;
+    EXPECT_NE(output.find("<body>hi</body></html>"), std::string::npos) << output;
+
+    mod.factory->Terminate();
+    mod.global->Terminate();
+  }
+}
+
+// A `</head>` straddling entity chunks. The locator holds the partial tag back and re-emits it with
+// the chunk that completes it, so the rewritten chunk has to be sized for those held-back bytes,
+// and the chunk that carried them has to give them up: sizing the allocation from this chunk plus
+// the snippet writes past its end, and leaving the earlier chunk alone serves the partial tag
+// twice.
+TEST(InjectionPipeline, HeadCloseTagSplitAcrossEntityChunks) {
+  const std::string html =
+      "<!DOCTYPE html><html><head><title>t</title></head><body>hi</body></html>";
+  const std::string close_tag = "</head>";
+  const size_t tag_start = html.find(close_tag);
+  ASSERT_NE(tag_start, std::string::npos);
+
+  // Every split point within the tag, plus the ones just before and just after it.
+  for (size_t split = tag_start; split <= tag_start + close_tag.size(); split++) {
+    SCOPED_TRACE("chunk boundary at byte " + std::to_string(split));
+
+    MockRumConfigElement rumConfig;
+    MockAdminManager adminManager(&rumConfig);
+    MockServer mockServer;
+    EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+    auto mod = registerModule(mockServer);
+    ASSERT_NE(mod.global, nullptr);
+
+    MockAppWithContext app;
+    MockAppStartProvider appStart(app);
+    ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+
+    auto* ctx =
+        static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+    ASSERT_NE(ctx, nullptr);
+    ASSERT_NE(ctx->snippet, nullptr);
+    ASSERT_EQ(ctx->injection_strategy, InjectionStrategy::HeadCloseTag);
+
+    CHttpModule* httpMod = nullptr;
+    ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+    MockHttpContext httpCtx;
+    MockHttpResponse httpResp;
+    MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+    PreparedChunkedResponse pr;
+    setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr,
+                             {html.substr(0, split), html.substr(split)});
+
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+        .WillOnce(Return(S_OK));
+    EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+    EXPECT_TRUE(httpCtx.AllocationGuardIntact()) << "wrote past the end of the injection buffer";
+
+    // The snippet goes right before `</head>` and nothing else moves: no byte of the response is
+    // dropped, duplicated or reordered around it.
+    const std::string body = assembleResponseBody(pr);
+    ASSERT_EQ(body.size(), html.size() + ctx->snippet->length) << "body:\n" << body;
+    EXPECT_EQ(body.substr(0, tag_start), html.substr(0, tag_start)) << "body:\n" << body;
+    EXPECT_EQ(body.substr(body.size() - (html.size() - tag_start)), html.substr(tag_start))
+        << "body:\n"
+        << body;
+    EXPECT_NE(body.find("DD_RUM"), std::string::npos) << "no snippet in body:\n" << body;
+
+    mod.factory->Terminate();
+    mod.global->Terminate();
+  }
+}
+
+// A partial `</head>` at the very end of the response never resolves into a tag. Nothing is
+// injected and nothing is rewritten, so the held-back bytes have to reach the client as part of the
+// chunk that already carries them.
+TEST(InjectionPipeline, UnresolvedHeadCloseTagLeavesTheResponseUntouched) {
+  const std::vector<std::string> bodies = {"<html><body>hi</body>", "</he"};
+
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  ASSERT_NE(mod.global, nullptr);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+
+  CHttpModule* httpMod = nullptr;
+  ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  PreparedChunkedResponse pr;
+  setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, bodies);
+
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _)).Times(0);
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_EQ(assembleResponseBody(pr), "<html><body>hi</body></he");
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// A response with no injection point at all leaves the injector padding the body with spaces to
+// keep its length constant. The buffering path must not serve that padding: like the streaming
+// path, it leaves the queued chunks as they are when nothing was injected.
+TEST(InjectionPipeline, UninjectedBufferedResponseLeavesTheResponseUntouched) {
+  const std::vector<std::string> bodies = {"<body><pre>hel", "lo"};
+
+  MockRumConfigElement rumConfig;
+  rumConfig.SetInjectionStrategy(InjectionStrategy::HeadOpenTagWithCloseTagFallback);
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  ASSERT_NE(mod.global, nullptr);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+
+  CHttpModule* httpMod = nullptr;
+  ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  PreparedChunkedResponse pr;
+  setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, bodies);
+
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _)).Times(0);
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_TRUE(httpCtx.AllocationGuardIntact()) << "wrote past the end of the injection buffer";
+  EXPECT_EQ(assembleResponseBody(pr), "<body><pre>hello");
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// The head-open strategies buffer the whole body, so a response too large to copy is passed through
+// uninstrumented rather than doubling the worker process' memory for it.
+TEST(InjectionPipeline, OversizedResponseIsNotBuffered) {
+  MockRumConfigElement rumConfig;
+  rumConfig.SetInjectionStrategy(InjectionStrategy::HeadOpenTagWithCloseTagFallback);
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  ASSERT_NE(mod.global, nullptr);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+
+  CHttpModule* httpMod = nullptr;
+  ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+  // One byte past the 8 MiB the module is willing to buffer.
+  std::string html = "<html><head><title>t</title></head><body>";
+  html.resize(8 * 1024 * 1024 + 1, 'a');
+
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  PreparedChunkedResponse pr;
+  setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, {html});
+
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _)).Times(0);
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
+
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
+  EXPECT_EQ(assembleResponseBody(pr), html);
 
   mod.factory->Terminate();
   mod.global->Terminate();

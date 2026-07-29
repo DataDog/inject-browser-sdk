@@ -95,7 +95,7 @@ set(DD_TRACE_STATIC_CRT ON)
 FetchContent_Declare(
   dd-trace-cpp
   GIT_REPOSITORY https://github.com/DataDog/dd-trace-cpp
-  GIT_TAG        290cc2780482318e6c7aa44b70063ad5eb19b361 
+  GIT_TAG        5d04dfd395b95b69f1c83f0d23324124e745dfb0 # v2.1.1
   GIT_SHALLOW    OFF
   GIT_PROGRESS   ON
 )
@@ -189,7 +189,7 @@ endif ()
 
 target_link_libraries(iis_injector-objects
   PUBLIC
-  inject_browser_sdk_ffi dd_trace::static rapidjson
+  inject_browser_sdk_ffi dd-trace-cpp::static rapidjson
   ws2_32.lib
   oleaut32.lib)
 

@@ -8,14 +8,25 @@
 #include "config_reader.h"
 #include "module_context.h"
 #include "telemetry.h"
+#include <algorithm>
 #include <cassert>
 #include <datadog/telemetry/telemetry.h>
 #include <format>
+#include <limits>
 #include <memory>
 #include <string>
 
 namespace datadog::rum {
 namespace {
+
+// Largest response the head-open strategies will copy into a single buffer.
+//
+// Those strategies cannot rewrite a chunk in place, so the whole body has to be drained into one
+// allocation, which doubles the memory this response holds for as long as the request lives. A
+// worker process serving many large HTML responses concurrently would run out of it, so past this
+// size the response is passed through uninstrumented rather than buffered. No HTML document that
+// benefits from RUM comes anywhere near it.
+constexpr size_t k_max_buffered_response_length = size_t{8} * 1024 * 1024;
 
 std::string_view get_header(IHttpResponse& http_response, const char* header) {
   USHORT length = 0;
@@ -253,7 +264,7 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  Injector* injector = injector_create(snippet);
+  Injector* injector = injector_create_with_strategy(snippet, ctx.injection_strategy);
   if (!injector) {
     logger.error("Error creating injector");
     return RQ_NOTIFICATION_CONTINUE;
@@ -261,24 +272,64 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
 
   bool injected = false;
 
-  // Write the existing data chunks to the injector, and then write the
-  // resulting byte slices into our new response string
-  for (int i = 0; i < pResponseStruct->EntityChunkCount; i++) {
-    HTTP_DATA_CHUNK& dataChunk = pResponseStruct->pEntityChunks[i];
-    if (dataChunk.DataChunkType != HttpDataChunkFromMemory) {
-      logger.debug("Skipping response which is not in memory: response type = " +
-                   std::to_string(dataChunk.DataChunkType));
-      injector_cleanup(injector);
-      return RQ_NOTIFICATION_CONTINUE;
-    }
+  if (ctx.injection_strategy == InjectionStrategy::HeadCloseTag) {
+    // Streaming path. The `</head>` locator never holds back more than a partially matched tag, so
+    // a chunk that carries the injection point is rewritten in place and the rest of the response
+    // is left untouched. `injector_end` is not needed: nothing can still be buffered once the
+    // snippet is out, and when it never is, the response is passed through at its original length.
+    //
+    // What the locator does hold back is always a suffix of the chunks already written, and it
+    // comes back out with the chunk that resolves the match. Those chunks stay queued with their
+    // original length, so that suffix has to be trimmed off them when the snippet finally comes
+    // out: it is part of the rewritten chunk, and would otherwise be served twice. Its length is
+    // also part of what the rewritten chunk has to hold, which is why the allocation is sized from
+    // the slices themselves rather than from this chunk plus the snippet.
+    size_t written = 0;   // bytes handed to the injector so far, before the current chunk
+    size_t withheld = 0;  // how many of them the injector is still holding back
+    for (int i = 0; i < pResponseStruct->EntityChunkCount; i++) {
+      HTTP_DATA_CHUNK& dataChunk = pResponseStruct->pEntityChunks[i];
+      if (dataChunk.DataChunkType != HttpDataChunkFromMemory) {
+        logger.debug("Skipping response which is not in memory: response type = " +
+                     std::to_string(dataChunk.DataChunkType));
+        injector_cleanup(injector);
+        return RQ_NOTIFICATION_CONTINUE;
+      }
 
-    auto chunkLength = dataChunk.FromMemory.BufferLength;
+      auto chunkLength = dataChunk.FromMemory.BufferLength;
 
-    auto injectorResult =
-        injector_write(injector, (uint8_t*)dataChunk.FromMemory.pBuffer, chunkLength);
-    if (injectorResult.injected) {
-      const size_t bufferLength = sizeof(uint8_t) * (chunkLength + snippet->length);
-      void* buffer = pHttpContext.AllocateRequestMemory(bufferLength);
+      auto injectorResult =
+          injector_write(injector, (uint8_t*)dataChunk.FromMemory.pBuffer, chunkLength);
+
+      size_t emitted = 0;
+      for (size_t slice = 0; slice < injectorResult.slices_length; ++slice) {
+        emitted += injectorResult.slices[slice].length;
+      }
+
+      if (!injectorResult.injected) {
+        // The untouched chunks already carry every byte of the response in order, so nothing has to
+        // be rewritten here; only the size of what is still held back has to be tracked.
+        withheld = withheld + chunkLength - emitted;
+        written += chunkLength;
+        continue;
+      }
+
+      // See the DWORD bound in the buffering path below.
+      if (emitted > (std::numeric_limits<DWORD>::max)()) {
+        logger.error("Chunk too large to rewrite for injection: " + std::to_string(emitted) +
+                     " bytes");
+        injector_cleanup(injector);
+        return RQ_NOTIFICATION_CONTINUE;
+      }
+
+      if (withheld > written) {
+        // The injector only ever holds back data it was given, so this should be unreachable. Bail
+        // out before touching the response rather than trim bytes that were never withheld.
+        logger.error("Injector held back more data than it was given, skipping injection");
+        injector_cleanup(injector);
+        return RQ_NOTIFICATION_CONTINUE;
+      }
+
+      void* buffer = pHttpContext.AllocateRequestMemory(static_cast<DWORD>(emitted));
       if (!buffer) {
         logger.error("Failed to allocate memory for injection buffer");
         injector_cleanup(injector);
@@ -286,23 +337,133 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
       }
 
       auto* offset = (uint8_t*)buffer;
-      for (size_t i = 0; i < injectorResult.slices_length; ++i) {
-        const auto& slice = injectorResult.slices[i];
-        memcpy(offset, slice.start, slice.length);
-        offset += slice.length;
+      for (size_t slice = 0; slice < injectorResult.slices_length; ++slice) {
+        memcpy(offset, injectorResult.slices[slice].start, injectorResult.slices[slice].length);
+        offset += injectorResult.slices[slice].length;
       }
 
+      // Drop the withheld suffix from the chunks that still carry it: the buffer above holds those
+      // bytes now, so leaving them in place would serve them twice.
+      size_t remaining = withheld;
+      for (int previous = i - 1; previous >= 0 && remaining > 0; previous--) {
+        auto& previousChunk = pResponseStruct->pEntityChunks[previous];
+        const auto trimmed = static_cast<ULONG>(
+            (std::min)(remaining, static_cast<size_t>(previousChunk.FromMemory.BufferLength)));
+        previousChunk.FromMemory.BufferLength -= trimmed;
+        remaining -= trimmed;
+      }
+      assert(remaining == 0);
+
       dataChunk.FromMemory.pBuffer = (PVOID)buffer;
-      dataChunk.FromMemory.BufferLength = bufferLength;
+      dataChunk.FromMemory.BufferLength = static_cast<ULONG>(emitted);
 
       injected = true;
 
       HRESULT const result = pHttpResponse.SetHeader(k_injection_header, "1", 1, TRUE);
       if (result != S_OK) {
         logger.error("Error setting injection header: " + std::system_category().message(result));
+        injector_cleanup(injector);
         return RQ_NOTIFICATION_CONTINUE;
       }
       break;
+    }
+  } else {
+    // Buffering path. The head-open strategies hold the first kilobyte back, so a short response
+    // produces nothing at all until `injector_end`, and the injection point can land in data that
+    // an earlier `injector_write` already accepted. Neither fits the in-place rewrite above, so the
+    // whole response is drained into one buffer and handed back as the first chunk.
+    //
+    // The injector is length preserving: it emits every input byte exactly once plus either the
+    // snippet or the padding that stands in for it, so the total is known up front.
+    size_t total_length = 0;
+    for (int i = 0; i < pResponseStruct->EntityChunkCount; i++) {
+      const HTTP_DATA_CHUNK& dataChunk = pResponseStruct->pEntityChunks[i];
+      if (dataChunk.DataChunkType != HttpDataChunkFromMemory) {
+        logger.debug("Skipping response which is not in memory: response type = " +
+                     std::to_string(dataChunk.DataChunkType));
+        injector_cleanup(injector);
+        return RQ_NOTIFICATION_CONTINUE;
+      }
+      total_length += dataChunk.FromMemory.BufferLength;
+    }
+    total_length += snippet->length;
+
+    // Bail out before allocating anything, so an oversized response is passed through rather than
+    // copied. The DWORD bound matters on its own: `AllocateRequestMemory` takes a DWORD and
+    // `BufferLength` is a ULONG, while the lengths above are 64 bit, so a response that does not
+    // fit would be allocated short and written past its end.
+    static_assert(k_max_buffered_response_length <= (std::numeric_limits<DWORD>::max)());
+    if (total_length > k_max_buffered_response_length) {
+      datadog::telemetry::counter::increment(
+          telemetry::injection_skipped,
+          telemetry::build_tags("reason:response_too_large", ctx.application_id_tag,
+                                ctx.remote_config_tag));
+      logger.debug("Skipping RUM injection: response too large to buffer (" +
+                   std::to_string(total_length) + " bytes)");
+      injector_cleanup(injector);
+      return RQ_NOTIFICATION_CONTINUE;
+    }
+
+    void* buffer = pHttpContext.AllocateRequestMemory(static_cast<DWORD>(total_length));
+    if (!buffer) {
+      logger.error("Failed to allocate memory for injection buffer");
+      injector_cleanup(injector);
+      return RQ_NOTIFICATION_CONTINUE;
+    }
+
+    auto* offset = (uint8_t*)buffer;
+    auto* const end = (uint8_t*)buffer + total_length;
+    // Each result must be consumed before the next call: consecutive calls reuse the same slice
+    // storage, and a slice may point into the chunk we just handed over.
+    auto append = [&](const InjectorResult& result) {
+      for (size_t i = 0; i < result.slices_length; ++i) {
+        const auto& slice = result.slices[i];
+        if (offset + slice.length > end) {
+          return false;
+        }
+        memcpy(offset, slice.start, slice.length);
+        offset += slice.length;
+      }
+      injected = injected || result.injected;
+      return true;
+    };
+
+    bool fits = true;
+    for (int i = 0; i < pResponseStruct->EntityChunkCount && fits; i++) {
+      const HTTP_DATA_CHUNK& dataChunk = pResponseStruct->pEntityChunks[i];
+      fits = append(injector_write(injector, (uint8_t*)dataChunk.FromMemory.pBuffer,
+                                   dataChunk.FromMemory.BufferLength));
+    }
+    if (fits) {
+      fits = append(injector_end(injector));
+    }
+
+    if (!fits || offset != end) {
+      // The length invariant is the injector's contract, so this should be unreachable. Bail out
+      // and pass the response through rather than serve a truncated body.
+      logger.error("Injector emitted an unexpected number of bytes, skipping injection");
+      injector_cleanup(injector);
+      return RQ_NOTIFICATION_CONTINUE;
+    }
+
+    // Only a response the snippet actually went into is replaced with the buffer. Without an
+    // injection point the buffer holds the original bytes plus the padding that stands in for the
+    // snippet to keep the length constant, while the queued chunks already carry those bytes at
+    // their original length: serving them as they are leaves the response untouched, as the
+    // streaming path does, rather than ending the body in snippet-length padding.
+    if (injected) {
+      pResponseStruct->pEntityChunks[0].FromMemory.pBuffer = (PVOID)buffer;
+      pResponseStruct->pEntityChunks[0].FromMemory.BufferLength = (ULONG)total_length;
+      for (int i = 1; i < pResponseStruct->EntityChunkCount; i++) {
+        pResponseStruct->pEntityChunks[i].FromMemory.BufferLength = 0;
+      }
+
+      HRESULT const result = pHttpResponse.SetHeader(k_injection_header, "1", 1, TRUE);
+      if (result != S_OK) {
+        logger.error("Error setting injection header: " + std::system_category().message(result));
+        injector_cleanup(injector);
+        return RQ_NOTIFICATION_CONTINUE;
+      }
     }
   }
 

@@ -20,7 +20,6 @@ variables:
     BUILD_CONFIGURATION: Release
     ARCH: x64
     GIT_DEPTH: 500 #Default is 20
-    GIT_SUBMODULE_STRATEGY: recursive
   script:
     - |
       $image = "${WINDOWS_BUILD_IMAGE}"
@@ -132,8 +131,6 @@ injector_IIS_unit_test_linux_wine:
   image: $DEVCONTAINER_IMAGE
   needs:
     - devcontainer_image
-  variables:
-    GIT_SUBMODULE_STRATEGY: recursive
   script:
     - make test-iis
 
@@ -275,7 +272,10 @@ manual_go_e2e_deps:
     ## the msi will have a version-specific name, but there should be only one.
     ## copy that to the filename expected by the test.
     - cp ${ARTIFACTS_DIR}/*.msi injector_IIS/test/e2e_tests/test_assets/injector_IIS.msi
-    - cd injector_IIS/test/e2e_tests && go test -v -timeout 30m
+    # Both suites provision their own Windows VM and install IIS on it, which alone takes upwards of
+    # ten minutes each: a green run sits at around 24 of the 30 minutes this used to allow, so a
+    # slower than usual VM setup timed the whole binary out rather than failing anything.
+    - cd injector_IIS/test/e2e_tests && go test -v -timeout 45m
   artifacts:
     expire_in: 2 weeks
     when: always

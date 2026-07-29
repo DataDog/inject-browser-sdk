@@ -8,7 +8,11 @@
 extern crate inject_browser_sdk;
 extern crate libfuzzer_sys;
 
-use inject_browser_sdk::{generate_snippet, injector::Injector, Configuration, RumConfiguration};
+use inject_browser_sdk::{
+    generate_snippet,
+    injector::{InjectionStrategy, Injector},
+    Configuration, RumConfiguration,
+};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -21,7 +25,40 @@ fuzz_target!(|data: &[u8]| {
         },
     };
 
+    // Spend the first byte on the strategy, so every strategy gets fuzzed. They differ in how much
+    // data they hold back, so they exercise quite different buffering paths.
+    let (strategy, data) = match data.split_first() {
+        Some((selector, rest)) => {
+            let strategy = match selector % 3 {
+                0 => InjectionStrategy::HeadCloseTag,
+                1 => InjectionStrategy::HeadOpenTag,
+                _ => InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+            };
+            (strategy, rest)
+        }
+        None => (InjectionStrategy::default(), data),
+    };
+
     let snippet = generate_snippet(&conf).unwrap();
-    let mut injector = Injector::new(snippet.as_slice());
-    let _res = injector.write(data);
+    let mut injector = Injector::with_strategy(snippet.as_slice(), strategy);
+
+    let mut emitted = 0usize;
+    let result = injector.write(data);
+    emitted += result.slices[..result.length]
+        .iter()
+        .map(|slice| slice.bytes.len())
+        .sum::<usize>();
+    let result = injector.end();
+    emitted += result.slices[..result.length]
+        .iter()
+        .map(|slice| slice.bytes.len())
+        .sum::<usize>();
+
+    // Whatever happens, the injector emits every input byte exactly once, plus either the snippet
+    // or the padding that stands in for it. This catches any arithmetic mistake in the slicing.
+    assert_eq!(
+        emitted,
+        data.len() + snippet.len(),
+        "emitted length must be the input length plus the snippet length"
+    );
 });

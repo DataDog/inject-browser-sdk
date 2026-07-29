@@ -46,16 +46,18 @@ impl InjectionPointLocator {
                 TagName::Meta if has_encoding_attributes(&buffer[tag_start..tag_end]) => {
                     return Some(tag_end);
                 }
-                TagName::Inert(name) => {
-                    // The snippet cannot go within an inert element, but the encoding prescan runs
-                    // over the raw bytes and honours a declaration written there, so a declaration
-                    // inside keeps the snippet behind the element as a whole.
-                    let element_end = match find_inert_element_end(buffer, tag_end, name) {
+                TagName::RawText(name) | TagName::Inert(name) => {
+                    // The snippet can go within neither: in a raw text element it would be text
+                    // rather than markup, and in an inert one it would never run. The encoding
+                    // prescan runs over the raw bytes and knows neither state, so it honours a
+                    // declaration written in either, and such a declaration keeps the snippet behind
+                    // the element as a whole.
+                    let element_end = match find_element_end(buffer, tag_end, name) {
                         Some(element_end) => element_end,
                         None => {
                             // The closing tag is not in `buffer`: either the element is never
-                            // closed, in which case everything that follows is inert too, or it
-                            // closes past the end of the buffer. Either way there is no point past
+                            // closed, in which case everything that follows is its content too, or
+                            // it closes past the end of the buffer. Either way there is no point past
                             // it to inject at, so fall back to the `<head>` point — unless the part
                             // we can see already holds an encoding declaration, which that fallback
                             // would push further into the document.
@@ -87,8 +89,8 @@ enum TagName {
     Meta,
     Head,
     /// An element whose content is text rather than markup (`script`, `style`, `title`,
-    /// `textarea`, `iframe`, `xmp`), holding its lower case name. Such content must be skipped
-    /// rather than scanned.
+    /// `textarea`, `iframe`, `xmp`), holding its lower case name. The snippet cannot go within such
+    /// content, while the encoding prescan still honours a declaration written there.
     RawText(&'static [u8]),
     /// An element whose content is inert (`noscript` with scripting enabled, `noframes`, `noembed`,
     /// `template`), holding its lower case name. A script injected within one would never run,
@@ -147,10 +149,6 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
         let name_end = find_tag_name_end(rest)?;
 
         match parse_tag_name(&rest[..name_end]) {
-            // The content of a raw text element is text, not markup: a `<meta charset>` written
-            // within a script, a stylesheet or a title is not an encoding declaration, and
-            // injecting right after it would insert the snippet in the middle of that text.
-            Some(TagName::RawText(name)) => i = find_raw_text_end(input, tag_end, name)?,
             // A `plaintext` tag turns the rest of the document into text: there is no tag left to
             // find, and no point past it the snippet could run at.
             Some(TagName::Plaintext) => return None,
@@ -227,11 +225,12 @@ fn find_raw_text_end(input: &[u8], content_start: usize, name: &[u8]) -> Option<
     return None;
 }
 
-/// Returns the index just past the closing tag of the inert element named `name` whose content
-/// starts at `content_start`, or `None` if the element is never closed within `input`.
-fn find_inert_element_end(input: &[u8], content_start: usize, name: &[u8]) -> Option<usize> {
-    // `noscript` (when scripting is enabled), `noframes` and `noembed` hold raw text, so they
-    // cannot nest and the first matching closing tag ends them, wherever it appears.
+/// Returns the index just past the closing tag of the raw text or inert element named `name` whose
+/// content starts at `content_start`, or `None` if the element is never closed within `input`.
+fn find_element_end(input: &[u8], content_start: usize, name: &[u8]) -> Option<usize> {
+    // Every element handled here but `template` holds raw text — `noscript` does when scripting is
+    // enabled — so they cannot nest and the first matching closing tag ends them, wherever it
+    // appears.
     if name != b"template" {
         return find_raw_text_end(input, content_start, name);
     }
@@ -779,44 +778,62 @@ mod tests {
 
     #[test]
     fn tags_within_raw_text_elements_are_not_markup() {
-        // A meta tag written in a script or a stylesheet source is not an encoding declaration:
-        // injecting after it would corrupt the script or the stylesheet.
+        // A tag written in a script or a stylesheet source is text: it opens no element, so the
+        // `<head>` written after the script below is the one the snippet goes after.
         test_injector(
-            "<html><head><script>const x = '<meta charset=utf-8>';</script></head></html>",
-            "<html><head>{{SNIPPET}}<script>const x = '<meta charset=utf-8>';</script></head></html>",
+            "<html><script>const x = '<head>';</script><head></head></html>",
+            "<html><script>const x = '<head>';</script><head>{{SNIPPET}}</head></html>",
+        );
+        // Without a declaration inside, the earlier injection point still stands, and the snippet
+        // never lands within the text itself.
+        test_injector(
+            "<html><head><script>const x = 1;</script></head></html>",
+            "<html><head>{{SNIPPET}}<script>const x = 1;</script></head></html>",
         );
         test_injector(
+            "<html><head><title>A <b>title</b></title></head></html>",
+            "<html><head>{{SNIPPET}}<title>A <b>title</b></title></head></html>",
+        );
+    }
+
+    #[test]
+    fn declarations_within_raw_text_elements_are_honoured_by_the_prescan() {
+        // A meta tag written in raw text declares no encoding for the tokenizer, but the prescan
+        // reads the raw bytes and knows no raw text state, so it honours the declaration all the
+        // same. The snippet cannot go within the text, so it goes after the element as a whole:
+        // injecting before it could push the declaration out of the prescan window.
+        test_injector(
+            "<html><head><script>const x = '<meta charset=utf-8>';</script></head></html>",
+            "<html><head><script>const x = '<meta charset=utf-8>';</script>{{SNIPPET}}</head></html>",
+        );
+        // The prescan stops at the first declaration it can resolve, so a real one written after the
+        // element is not one the snippet has to stay behind.
+        test_injector(
             "<html><head><style>/* <meta charset=utf-8> */</style><meta charset='utf-8'></head></html>",
-            "<html><head><style>/* <meta charset=utf-8> */</style><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+            "<html><head><style>/* <meta charset=utf-8> */</style>{{SNIPPET}}<meta charset='utf-8'></head></html>",
         );
         // The closing tag is matched case insensitively and may carry trailing spaces.
         test_injector(
             "<html><head><SCRIPT><meta charset=utf-8></SCRIPT ><meta charset='utf-8'></head></html>",
-            "<html><head><SCRIPT><meta charset=utf-8></SCRIPT ><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+            "<html><head><SCRIPT><meta charset=utf-8></SCRIPT >{{SNIPPET}}<meta charset='utf-8'></head></html>",
         );
-        // The content of a title is text as well: a meta tag written there is displayed, not parsed.
+        // The content of a title is text as well: a meta tag written there is displayed, not parsed,
+        // and the prescan honours it nonetheless.
         test_injector(
             "<html><head><title>Using <meta charset=utf-8></title></head></html>",
-            "<html><head>{{SNIPPET}}<title>Using <meta charset=utf-8></title></head></html>",
-        );
-        test_injector(
-            "<html><head><title>Using <meta charset=utf-8></title><meta charset='utf-8'></head></html>",
-            "<html><head><title>Using <meta charset=utf-8></title><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+            "<html><head><title>Using <meta charset=utf-8></title>{{SNIPPET}}</head></html>",
         );
         // An `xmp` holds raw text as well: its content is displayed literally, so a snippet written
         // there would be shown rather than run.
         test_injector(
             "<html><head><xmp><meta charset=utf-8></xmp></head></html>",
-            "<html><head>{{SNIPPET}}<xmp><meta charset=utf-8></xmp></head></html>",
+            "<html><head><xmp><meta charset=utf-8></xmp>{{SNIPPET}}</head></html>",
         );
-        test_injector(
-            "<html><head><xmp><meta charset=utf-8></xmp><meta charset='utf-8'></head></html>",
-            "<html><head><xmp><meta charset=utf-8></xmp><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-        );
-        // A `</scriptfoo>` tag does not close the script element.
+        // A `</scriptfoo>` tag does not close the script element, so the declaration is still part of
+        // its source.
         test_injector(
             "<html><head><script></scriptfoo><meta charset=utf-8></script></head></html>",
-            "<html><head>{{SNIPPET}}<script></scriptfoo><meta charset=utf-8></script></head></html>",
+            "<html><head><script></scriptfoo><meta charset=utf-8></script>{{SNIPPET}}</head></html>",
         );
     }
 
@@ -825,10 +842,17 @@ mod tests {
         // Everything following an unclosed script tag is script source, so the only valid injection
         // point left is the one found before it.
         test_injector(
-            "<html><head><script><meta charset=utf-8>",
-            "<html><head>{{SNIPPET}}<script><meta charset=utf-8>",
+            "<html><head><script>const x = 1;",
+            "<html><head>{{SNIPPET}}<script>const x = 1;",
         );
         test_injector("<html><script><head>", "<html><script><head>");
+        // Unless the source we can see holds a declaration the prescan would honour: there is no
+        // point past the element to inject at, and the `<head>` point would push that declaration
+        // further into the document, so early injection is declined.
+        test_injector(
+            "<html><head><script><meta charset=utf-8>",
+            "<html><head><script><meta charset=utf-8>",
+        );
     }
 
     #[test]
@@ -940,7 +964,9 @@ mod tests {
     #[test]
     fn double_escaped_script_content() {
         // A `</script>` read while the script is double escaped only leaves that state: the element
-        // stays open, so the meta tag that follows is script source rather than a declaration.
+        // stays open, so the meta tag that follows is script source rather than a declaration. The
+        // prescan skips it too, as the `<!--` it opens is never closed, so the declaration written
+        // after the element is the one the snippet stays behind.
         test_injector(
             "<html><head><script><!--<script></script><meta charset=utf-8></script><meta charset='utf-8'></head></html>",
             "<html><head><script><!--<script></script><meta charset=utf-8></script><meta charset='utf-8'>{{SNIPPET}}</head></html>",
@@ -1025,10 +1051,10 @@ mod tests {
     #[test]
     fn self_closing_start_tag() {
         // Browsers ignore the self-closing flag on a non-void element: `<script/>` stays in script
-        // data state, so the meta tag written in the source below is not a declaration.
+        // data state, so what follows is source the snippet cannot go within, up to the closing tag.
         test_injector(
             "<html><head><script/>const x = '<meta charset=utf-8>';</script></head></html>",
-            "<html><head>{{SNIPPET}}<script/>const x = '<meta charset=utf-8>';</script></head></html>",
+            "<html><head><script/>const x = '<meta charset=utf-8>';</script>{{SNIPPET}}</head></html>",
         );
         test_injector("<html><head/></html>", "<html><head/>{{SNIPPET}}</html>");
         test_injector(
@@ -1039,14 +1065,15 @@ mod tests {
 
     #[test]
     fn tags_within_an_iframe_are_not_markup() {
-        // An iframe holds raw text, and a snippet written there would never run.
+        // An iframe holds raw text, and a snippet written there would never run. The prescan still
+        // honours the declaration below, so the snippet goes after the element rather than before it.
         test_injector(
             "<html><head></head><body><iframe><meta charset=utf-8></iframe>",
-            "<html><head>{{SNIPPET}}</head><body><iframe><meta charset=utf-8></iframe>",
+            "<html><head></head><body><iframe><meta charset=utf-8></iframe>{{SNIPPET}}",
         );
         test_injector(
-            "<html><body><iframe><meta charset=utf-8></iframe><head>",
-            "<html><body><iframe><meta charset=utf-8></iframe><head>{{SNIPPET}}",
+            "<html><body><iframe>a <b>frame</b></iframe><head>",
+            "<html><body><iframe>a <b>frame</b></iframe><head>{{SNIPPET}}",
         );
     }
 

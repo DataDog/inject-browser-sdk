@@ -106,6 +106,7 @@
 		<Feature Id="MainFeature" Title="Datadog RUM Feature" Level="1">
 			<ComponentRef Id="InjectorDLL" />
 			<ComponentRef Id="InjectorPsModule" />
+			<ComponentRef Id="InjectorSchemaFile" />
 			<ComponentRef Id="InjectorConfiguration" />
 			<ComponentRef Id="ToolsScript" />
 		</Feature>
@@ -326,9 +327,25 @@
 				<File Id="ConfigScriptManifest" Name="Datadog.RUM.psd1" Source="..\resources\modules\Datadog.RUM.psd1"/>
       </Component>
 			
+      <!-- Permanent, because the section declarations below outlive the product: IIS needs this
+           schema to parse them, so removing it would turn the leftover declarations into the very
+           500.19 they are kept to avoid. Left on disk it is inert, a schema no section uses. -->
+      <Component Id="InjectorSchemaFile" Guid="{21502865-98E3-459C-A65C-6E5F48020685}"
+                 Directory="InetsrvSchemaDir" Permanent="yes">
+        <File Id="InjectorSchema" Name="RUM_schema.xml" Source="..\resources\RUM_schema.xml"
+              KeyPath="yes" />
+      </Component>
+
       <Component Id="InjectorConfiguration" Guid="{8F1996EE-7046-468F-94F1-DC9526F3F965}" Directory="InetsrvSchemaDir">
-        <File Id="InjectorSchema" Name="RUM_schema.xml" Source="..\resources\RUM_schema.xml" />
-        
+        <!-- This component carries configuration edits rather than files, so it needs a key path of
+             its own now that the schema lives in its own component. -->
+        <RegistryValue Root="HKLM"
+                       Key="Software\!(loc.CompanyNameShort)\!(loc.ProductName)"
+                       Name="ConfigSectionsRegistered"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+
         <!-- system.webServer datadogRum section -->
         <util:XmlConfig Id='ApplicationHostSectionElement' On='install' Action='create'
                         File='[InetsrvDir]config\applicationHost.config' Node='element'

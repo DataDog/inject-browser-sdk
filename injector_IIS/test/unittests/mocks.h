@@ -9,6 +9,8 @@
 #pragma once
 #include "framework.h"
 #include "gmock/gmock.h"
+#include <cstdlib>
+#include <cstring>
 
 class MockModule : public IHttpModuleRegistrationInfo {
  public:
@@ -84,12 +86,29 @@ class MockServer : public IHttpServer {
 
 class MockHttpContext : public IHttpContext {
   VOID* m_allocatedMemory;
+  DWORD m_allocatedSize = 0;
 
  public:
+  // Bytes of guard pattern placed just past every allocation, so a write that runs off the end of
+  // the requested size is caught by `AllocationGuardIntact()` instead of silently corrupting the
+  // heap. 64 is well over the length of anything the injector can emit past its buffer.
+  static constexpr size_t k_allocationGuardSize = 64;
+  static constexpr unsigned char k_allocationGuardByte = 0xAB;
+
   MockHttpContext() : m_allocatedMemory(nullptr) {};
   ~MockHttpContext() {
     if (m_allocatedMemory != nullptr) free(m_allocatedMemory);
   };
+
+  // Whether the guard region past the last allocation is untouched.
+  bool AllocationGuardIntact() const {
+    if (m_allocatedMemory == nullptr) return true;
+    const auto* guard = static_cast<const unsigned char*>(m_allocatedMemory) + m_allocatedSize;
+    for (size_t i = 0; i < k_allocationGuardSize; i++) {
+      if (guard[i] != k_allocationGuardByte) return false;
+    }
+    return true;
+  }
 
   MOCK_METHOD(IHttpSite*, GetSite, (), (override));
   MOCK_METHOD(IHttpApplication*, GetApplication, (), (override));
@@ -183,7 +202,10 @@ class MockHttpContext : public IHttpContext {
     if (m_allocatedMemory != nullptr) {
       free(m_allocatedMemory);
     };
-    m_allocatedMemory = static_cast<VOID*>(malloc(size));
+    m_allocatedMemory = static_cast<VOID*>(malloc(size + k_allocationGuardSize));
+    m_allocatedSize = size;
+    memset(static_cast<unsigned char*>(m_allocatedMemory) + size, k_allocationGuardByte,
+           k_allocationGuardSize);
     return m_allocatedMemory;
   };
 };

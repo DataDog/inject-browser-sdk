@@ -89,6 +89,9 @@ enum TagName {
     /// `template`), holding its lower case name. A script injected within one would never run,
     /// while the encoding prescan still honours a declaration written there.
     Inert(&'static [u8]),
+    /// `plaintext`, which switches the tokenizer to a state it never leaves: everything that follows
+    /// the tag is text, and no closing tag can end it.
+    Plaintext,
 }
 
 fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)> {
@@ -122,6 +125,9 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)>
             // within a script, a stylesheet or a title is not an encoding declaration, and
             // injecting right after it would insert the snippet in the middle of that text.
             Some(TagName::RawText(name)) => i = find_raw_text_end(input, tag_end, name)?,
+            // A `plaintext` tag turns the rest of the document into text: there is no tag left to
+            // find, and no point past it the snippet could run at.
+            Some(TagName::Plaintext) => return None,
             Some(relevant_tag_name) => return Some((relevant_tag_name, tag_start, tag_end)),
             None => i = tag_end,
         }
@@ -200,12 +206,19 @@ fn find_inert_element_end(input: &[u8], content_start: usize, name: &[u8]) -> Op
             depth += 1;
             i = tag_end;
         } else {
-            // The content of a raw text element is not markup either.
+            // The content of a raw text element is not markup either. `noscript`, `noframes` and
+            // `noembed` hold raw text as well, so a `</template>` written in one of them closes
+            // nothing and must not end the scan.
             let name_end = find_tag_name_end(rest)?;
             i = match parse_tag_name(&rest[..name_end]) {
                 Some(TagName::RawText(raw_text_name)) => {
                     find_raw_text_end(input, tag_end, raw_text_name)?
                 }
+                Some(TagName::Inert(inert_name)) if inert_name != b"template" => {
+                    find_raw_text_end(input, tag_end, inert_name)?
+                }
+                // Everything past a `plaintext` tag is text, so the closing tag never comes.
+                Some(TagName::Plaintext) => return None,
                 _ => tag_end,
             };
         }
@@ -217,17 +230,23 @@ fn find_inert_element_end(input: &[u8], content_start: usize, name: &[u8]) -> Op
 /// Returns the index just past the `-->` or `--!>` closing the comment whose `<!--` starts at
 /// `start`, or `None` if the comment is never closed within `input`.
 ///
-/// The tokenizer ends a comment on `--!>` as well as on `-->`, so the markup that follows one is
-/// real markup. The encoding prescan only knows `-->`, but ending the comment at the earlier of the
-/// two terminators only ever keeps the snippet behind more of the document, never less.
+/// The `-->` may reuse the dashes of the opening `<!--`, which is what ends the empty comments
+/// `<!-->` and `<!--->`; the encoding prescan reads it the same way, as the `>` it looks for only has
+/// to be preceded by two dashes.
+///
+/// The `--!>` form cannot reuse them: `<!--!>` and `<!---!>` are unterminated comments, so its dashes
+/// have to fall within the comment content. The prescan does not know that form at all, but ending
+/// the comment at the earlier of the two terminators only ever keeps the snippet behind more of the
+/// document, never less.
 fn find_comment_end(input: &[u8], start: usize) -> Option<usize> {
-    let mut i = start + b"<!--".len();
+    let content_start = start + b"<!--".len();
+    let mut i = start + b"<!".len();
 
     while i < input.len() {
         if input[i..].starts_with(b"-->") {
             return Some(i + b"-->".len());
         }
-        if input[i..].starts_with(b"--!>") {
+        if i >= content_start && input[i..].starts_with(b"--!>") {
             return Some(i + b"--!>".len());
         }
         i += 1;
@@ -340,6 +359,8 @@ fn parse_tag_name(input: &[u8]) -> Option<TagName> {
         return Some(TagName::RawText(b"iframe"));
     } else if compare_case_insensitive(input, b"xmp") {
         return Some(TagName::RawText(b"xmp"));
+    } else if compare_case_insensitive(input, b"plaintext") {
+        return Some(TagName::Plaintext);
     } else if compare_case_insensitive(input, b"noscript") {
         return Some(TagName::Inert(b"noscript"));
     } else if compare_case_insensitive(input, b"noframes") {
@@ -953,6 +974,21 @@ mod tests {
             "<html><head><template><meta charset='utf-8'><script>var x = \"</template>\";</script></template></head></html>",
             "<html><head><template><meta charset='utf-8'><script>var x = \"</template>\";</script></template>{{SNIPPET}}</head></html>",
         );
+        // `noscript`, `noframes` and `noembed` hold raw text within a template as well, so a
+        // `</template>` written in one of them is text too.
+        test_injector(
+            "<html><head><template><meta charset='utf-8'><noscript></template></noscript></template></head></html>",
+            "<html><head><template><meta charset='utf-8'><noscript></template></noscript></template>{{SNIPPET}}</head></html>",
+        );
+        test_injector(
+            "<html><head><template><meta charset='utf-8'><noembed></template></noembed></template></head></html>",
+            "<html><head><template><meta charset='utf-8'><noembed></template></noembed></template>{{SNIPPET}}</head></html>",
+        );
+        // A nested template does pair up: its closing tag is markup, not text.
+        test_injector(
+            "<html><head><template><meta charset='utf-8'><template></template></template></head></html>",
+            "<html><head><template><meta charset='utf-8'><template></template></template>{{SNIPPET}}</head></html>",
+        );
         // A stray `<` within the template is text, and must not swallow the real closing tag.
         test_injector(
             "<html><head><template><meta charset='utf-8'>a < b</template></head></html>",
@@ -1119,6 +1155,60 @@ mod tests {
         test_injector(
             "<html><head><!-- --!- <meta charset=utf-8> --><meta charset='utf-8'></head></html>",
             "<html><head><!-- --!- <meta charset=utf-8> --><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+        // The dashes of a `--!>` cannot be the ones of the opening `<!--`, so these are unterminated
+        // comments and everything that follows them is comment text.
+        test_injector(
+            "<html><head><!--!><meta charset=utf-8>",
+            "<html><head>{{SNIPPET}}<!--!><meta charset=utf-8>",
+        );
+        test_injector(
+            "<html><head><!---!><meta charset=utf-8>",
+            "<html><head>{{SNIPPET}}<!---!><meta charset=utf-8>",
+        );
+    }
+
+    #[test]
+    fn abruptly_closed_empty_comment() {
+        // `<!-->` and `<!--->` are complete, empty comments: the `-->` may reuse the dashes of the
+        // opening `<!--`, for the prescan as much as for the tokenizer, so what follows is markup.
+        test_injector(
+            "<html><head><!--><meta charset=utf-8></head></html>",
+            "<html><head><!--><meta charset=utf-8>{{SNIPPET}}</head></html>",
+        );
+        test_injector(
+            "<html><head><!---><meta charset=utf-8></head></html>",
+            "<html><head><!---><meta charset=utf-8>{{SNIPPET}}</head></html>",
+        );
+        // One dash more is a comment that closes on its own dashes rather than an empty one.
+        test_injector(
+            "<html><head><!----><meta charset=utf-8></head></html>",
+            "<html><head><!----><meta charset=utf-8>{{SNIPPET}}</head></html>",
+        );
+        test_injector(
+            "<html><head><!--> <meta charset=utf-8> --></head></html>",
+            "<html><head><!--> <meta charset=utf-8>{{SNIPPET}} --></head></html>",
+        );
+    }
+
+    #[test]
+    fn a_plaintext_tag_ends_the_markup() {
+        // `plaintext` switches the tokenizer to a state it never leaves: everything that follows is
+        // text, so the only valid injection point left is the one found before it.
+        test_injector(
+            "<html><head><plaintext><meta charset=utf-8>",
+            "<html><head>{{SNIPPET}}<plaintext><meta charset=utf-8>",
+        );
+        // Not even a closing tag brings the markup back.
+        test_injector(
+            "<html><head><plaintext></plaintext><meta charset=utf-8></head></html>",
+            "<html><head>{{SNIPPET}}<plaintext></plaintext><meta charset=utf-8></head></html>",
+        );
+        test_injector("<html><plaintext><head>", "<html><plaintext><head>");
+        // A declaration written before the tag is still the one to stay behind.
+        test_injector(
+            "<html><head><meta charset='utf-8'><plaintext>",
+            "<html><head><meta charset='utf-8'>{{SNIPPET}}<plaintext>",
         );
     }
 

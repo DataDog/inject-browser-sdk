@@ -180,7 +180,6 @@ class MockRumConfigElement : public IAppHostElement {
   // Unset by default, so the case every other test exercises really does go through the
   // "attribute missing" path.
   std::optional<MockAppHostProperty> injection_strategy_prop_;
-  std::optional<MockAppHostProperty> meta_csp_placement_prop_;
   std::vector<MockOptionElement> options_;
   MockElementCollection collection_;
   HRESULT collection_result_ = S_OK;
@@ -211,9 +210,8 @@ class MockRumConfigElement : public IAppHostElement {
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
   void SetCollectionResult(HRESULT hr) { collection_result_ = hr; }
   void SetEnabledPropertyMissing(bool missing) { enabled_lookup_fails_ = missing; }
-  void SetInjectionSettings(InjectionStrategy strategy, MetaCspPlacement placement) {
+  void SetInjectionStrategy(InjectionStrategy strategy) {
     injection_strategy_prop_.emplace(L"injectionStrategy", int_variant(static_cast<int>(strategy)));
-    meta_csp_placement_prop_.emplace(L"metaCspPlacement", int_variant(static_cast<int>(placement)));
   }
 
   HRESULT STDMETHODCALLTYPE get_Name(BSTR*) override { return E_NOTIMPL; }
@@ -248,10 +246,6 @@ class MockRumConfigElement : public IAppHostElement {
     }
     if (injection_strategy_prop_ && _wcsicmp(bstrName, L"injectionStrategy") == 0) {
       *ppProperty = &*injection_strategy_prop_;
-      return S_OK;
-    }
-    if (meta_csp_placement_prop_ && _wcsicmp(bstrName, L"metaCspPlacement") == 0) {
-      *ppProperty = &*meta_csp_placement_prop_;
       return S_OK;
     }
     *ppProperty = nullptr;
@@ -540,39 +534,32 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
   mod.global->Terminate();
 }
 
-// The `injectionStrategy` and `metaCspPlacement` attributes reach the injector. Without them the
-// module would be stuck on the `</head>` strategy, which makes the CSP knob unreachable.
-TEST(InjectionPipeline, InjectionSettingsFromConfig) {
+// The `injectionStrategy` attribute reaches the injector. Without it the module would be stuck on
+// the `</head>` strategy and the head-open strategies would be unreachable from IIS.
+TEST(InjectionPipeline, InjectionStrategyFromConfig) {
   struct TestCase {
     std::string name;
     InjectionStrategy strategy;
-    MetaCspPlacement placement;
-    std::string html;
     std::string expected_before_snippet;
   };
 
-  const std::string csp = "<meta http-equiv='content-security-policy' content='script-src x'>";
-  const std::string policy_first =
-      "<html><head>" + csp + "<meta charset='utf-8'></head><body>hi</body></html>";
+  const std::string html = "<html><head><meta charset='utf-8'></head><body>hi</body></html>";
 
   const std::vector<TestCase> cases = {
       // The default: the snippet lands right before `</head>`.
-      {"head close tag", InjectionStrategy::HeadCloseTag, MetaCspPlacement::After,
-       "<html><head><meta charset='utf-8'></head><body>hi</body></html>",
+      {"head close tag", InjectionStrategy::HeadCloseTag, "<html><head><meta charset='utf-8'>"},
+      // Injects right after the encoding declaration instead. Reaching this at all needs the
+      // buffering path in PerformInjection, since a short response emits nothing until
+      // `injector_end`.
+      {"head open tag", InjectionStrategy::HeadOpenTagWithCloseTagFallback,
        "<html><head><meta charset='utf-8'>"},
-      // Injects right after the encoding declaration instead.
-      {"head open tag", InjectionStrategy::HeadOpenTagWithCloseTagFallback, MetaCspPlacement::After,
-       policy_first, "<html><head>" + csp + "<meta charset='utf-8'>"},
-      // Hoists the declaration above the policy, so the snippet precedes the policy.
-      {"hoisted", InjectionStrategy::HeadOpenTagWithCloseTagFallback, MetaCspPlacement::Before,
-       policy_first, "<html><head><meta charset='utf-8'>"},
   };
 
   for (const auto& test_case : cases) {
     SCOPED_TRACE(test_case.name);
 
     MockRumConfigElement rumConfig;
-    rumConfig.SetInjectionSettings(test_case.strategy, test_case.placement);
+    rumConfig.SetInjectionStrategy(test_case.strategy);
     MockAdminManager adminManager(&rumConfig);
     MockServer mockServer;
     EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
@@ -589,7 +576,6 @@ TEST(InjectionPipeline, InjectionSettingsFromConfig) {
     ASSERT_NE(ctx, nullptr);
     ASSERT_NE(ctx->snippet, nullptr);
     EXPECT_EQ(ctx->injection_strategy, test_case.strategy);
-    EXPECT_EQ(ctx->meta_csp_placement, test_case.placement);
 
     CHttpModule* httpMod = nullptr;
     ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
@@ -598,7 +584,7 @@ TEST(InjectionPipeline, InjectionSettingsFromConfig) {
     MockHttpResponse httpResp;
     MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
     PreparedResponse pr;
-    setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, test_case.html.c_str());
+    setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html.c_str());
 
     EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
         .WillOnce(Return(S_OK));
@@ -608,13 +594,11 @@ TEST(InjectionPipeline, InjectionSettingsFromConfig) {
 
     const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
                              pr.chunk.FromMemory.BufferLength);
-    const auto snippet_position = output.find("DD_RUM");
-    ASSERT_NE(snippet_position, std::string::npos) << "no snippet in output:\n" << output;
+    ASSERT_NE(output.find("DD_RUM"), std::string::npos) << "no snippet in output:\n" << output;
     EXPECT_EQ(output.substr(0, test_case.expected_before_snippet.size()),
               test_case.expected_before_snippet)
         << "full output:\n"
         << output;
-    // Reordering is length preserving, so the whole document is still there.
     EXPECT_NE(output.find("<body>hi</body></html>"), std::string::npos) << output;
 
     mod.factory->Terminate();

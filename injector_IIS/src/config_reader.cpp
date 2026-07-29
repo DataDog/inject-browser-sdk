@@ -254,9 +254,6 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   auto const injection_strategy = read_enum_property(
       *cfg_root_elem, L"injectionStrategy", InjectionStrategy::HeadCloseTag,
       static_cast<int>(InjectionStrategy::HeadOpenTagWithCloseTagFallback), logger);
-  auto const meta_csp_placement =
-      read_enum_property(*cfg_root_elem, L"metaCspPlacement", MetaCspPlacement::After,
-                         static_cast<int>(MetaCspPlacement::Before), logger);
 
   // Iterate on the SDK configuration
   std::unordered_map<std::string, std::string> rum_sdk_opts;
@@ -341,8 +338,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     }
   }
 
-  return ReadConfResult::ok(
-      RumConfig{cfg_version, std::move(rum_sdk_opts), injection_strategy, meta_csp_placement});
+  return ReadConfResult::ok(RumConfig{cfg_version, std::move(rum_sdk_opts), injection_strategy});
 }
 
 void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR config_path,
@@ -360,7 +356,6 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
     ctx.application_id_tag.clear();
     ctx.remote_config_tag.clear();
     ctx.injection_strategy = InjectionStrategy::HeadCloseTag;
-    ctx.meta_csp_placement = MetaCspPlacement::After;
     return;
   }
 
@@ -394,10 +389,9 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
   }
   ctx.snippet = snippet;
 
-  // Only updated alongside the snippet: on a failed read the previous settings stay in force, for
+  // Only updated alongside the snippet: on a failed read the previous setting stays in force, for
   // the same reason the previous snippet does.
   ctx.injection_strategy = config.injection_strategy;
-  ctx.meta_csp_placement = config.meta_csp_placement;
 
   ctx.application_id_tag.clear();
   if (auto appIdIt = config.sdk_options.find("applicationId");

@@ -4,8 +4,6 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-use crate::injector::MetaCspPlacement;
-
 /// Stateless helper used to locate the "injection point", in other words where we should inject the
 /// snippet in an HTML document.
 ///
@@ -22,78 +20,32 @@ use crate::injector::MetaCspPlacement;
 /// element that follows the encoding declaration: injecting as early as possible is the point of
 /// this locator, and a meta-delivered policy only governs what the parser sees after it.
 ///
-/// A meta-delivered policy written *before* the encoding declaration does govern the snippet, and
-/// blocks it outright under a strict `script-src`. [`MetaCspPlacement::Before`] opts into hoisting
-/// the declaration above the policy so the snippet can precede it; see [`InjectionPoint`].
+/// A meta-delivered policy written *before* the encoding declaration does govern the snippet, and a
+/// strict `script-src` blocks it outright. Nothing here works around that: a policy delivered by
+/// response header applies regardless of position and is the common case, so the fix belongs in
+/// nonce or hash support rather than in where the snippet is placed.
 pub struct InjectionPointLocator;
 
-/// Where and how the snippet should be placed within the head window.
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-pub enum InjectionPoint {
-    /// Insert the snippet at this index, leaving every other byte where it is.
-    Insert(usize),
-
-    /// Move the character encoding declaration `buffer[decl_start..decl_end]` up to `head_end`,
-    /// just after the open `<head>` tag, and insert the snippet right behind it. Everything that
-    /// used to sit between them, the meta-delivered policy included, follows the snippet.
-    ///
-    /// Guaranteed to satisfy `head_end <= decl_start < decl_end <= buffer.len()`.
-    HoistDeclaration {
-        head_end: usize,
-        decl_start: usize,
-        decl_end: usize,
-    },
-}
-
 impl InjectionPointLocator {
-    /// Returns where the snippet should be placed, or `None` if no valid injection point was found
-    /// within `buffer`.
-    ///
-    /// [`InjectionPoint::HoistDeclaration`] is only ever returned for
-    /// [`MetaCspPlacement::Before`]; with the default placement the result is always an
-    /// [`InjectionPoint::Insert`], byte-for-byte where it has always been.
-    pub fn find(buffer: &[u8], csp_placement: MetaCspPlacement) -> Option<InjectionPoint> {
+    /// Returns the index at which the snippet should be inserted, or `None` if no valid injection
+    /// point was found within `buffer`.
+    pub fn find(buffer: &[u8]) -> Option<usize> {
         let mut head_tag_point: Option<usize> = None;
-        // Whether the encoding declaration could still be hoisted to just after the open `<head>`
-        // tag. Starts `false`: `<!DOCTYPE html>` and `<html>` precede the head, and hoisting over
-        // them would be wrong. Cleared by anything that closes the head, explicitly or implicitly.
-        let mut hoist_allowed = false;
-        // Whether a meta-delivered policy was seen at the top level of the head. One written inside
-        // an inert element enforces nothing, so it does not count.
-        let mut policy_seen = false;
         let mut offset = 0;
 
-        while let Some(tag) = find_open_tag(buffer, offset) {
-            if tag.preceded_by_text {
-                // Text within the head implicitly closes it, as in `<head><meta csp>hello`.
-                hoist_allowed = false;
-            }
-
-            match tag.name {
-                TagName::Head => {
-                    if head_tag_point.is_none() {
-                        head_tag_point = Some(tag.end);
-                        hoist_allowed = true;
-                    }
+        while let Some((tag_name, tag_start, tag_end)) = find_open_tag(buffer, offset) {
+            match tag_name {
+                TagName::Head if head_tag_point.is_none() => {
+                    head_tag_point = Some(tag_end);
                 }
-                TagName::Meta => {
-                    let attributes = MetaAttributes::parse(&buffer[tag.start..tag.end]);
-                    if attributes.declares_encoding() {
-                        return Some(injection_point_at_declaration(
-                            buffer,
-                            csp_placement,
-                            head_tag_point.filter(|_| return hoist_allowed && policy_seen),
-                            tag.start,
-                            tag.end,
-                        ));
-                    }
-                    policy_seen |= attributes.declares_content_security_policy();
+                TagName::Meta if has_encoding_attributes(&buffer[tag_start..tag_end]) => {
+                    return Some(tag_end);
                 }
                 TagName::Inert(name) => {
                     // The snippet cannot go within an inert element, but the encoding prescan runs
                     // over the raw bytes and honours a declaration written there, so a declaration
                     // inside keeps the snippet behind the element as a whole.
-                    let element_end = match find_inert_element_end(buffer, tag.end, name) {
+                    let element_end = match find_inert_element_end(buffer, tag_end, name) {
                         Some(element_end) => element_end,
                         None => {
                             // The closing tag is not in `buffer`: either the element is never
@@ -102,77 +54,27 @@ impl InjectionPointLocator {
                             // it to inject at, so fall back to the `<head>` point — unless the part
                             // we can see already holds an encoding declaration, which that fallback
                             // would push further into the document.
-                            if contains_encoding_declaration(&buffer[tag.end..]) {
+                            if contains_encoding_declaration(&buffer[tag_end..]) {
                                 return None;
                             }
                             break;
                         }
                     };
-                    if contains_encoding_declaration(&buffer[tag.end..element_end]) {
-                        // Never hoisted: pulling a `<meta charset>` out of a `<template>` would turn
-                        // a prescan-only declaration into a parsed one.
-                        return Some(InjectionPoint::Insert(element_end));
+                    if contains_encoding_declaration(&buffer[tag_end..element_end]) {
+                        return Some(element_end);
                     }
                     offset = element_end;
                     continue;
                 }
-                // Still within the head, so hoisting stays on the table.
-                TagName::MetadataContent | TagName::RawText(_) => {}
-                // Anything else closes the head, implicitly or explicitly (`</head>` is not an open
-                // tag, so it lands here too). Keep scanning rather than giving up: a `<meta charset>`
-                // written past the head is still honoured by the prescan, and injecting before it
-                // would push it further into the document.
-                TagName::Other => hoist_allowed = false,
+                _ => {
+                    // Skip unknown tags, continue scanning
+                }
             }
-            offset = tag.end;
+            offset = tag_end;
         }
 
-        return head_tag_point.map(InjectionPoint::Insert);
+        return head_tag_point;
     }
-}
-
-/// Builds the injection point for the encoding declaration found at `decl_start..decl_end`.
-///
-/// `hoist_head_end` carries the end of the open `<head>` tag when hoisting the declaration above a
-/// meta-delivered policy is otherwise warranted, and `None` when it is not.
-fn injection_point_at_declaration(
-    buffer: &[u8],
-    csp_placement: MetaCspPlacement,
-    hoist_head_end: Option<usize>,
-    decl_start: usize,
-    decl_end: usize,
-) -> InjectionPoint {
-    let Some(head_end) =
-        hoist_head_end.filter(|_| return csp_placement == MetaCspPlacement::Before)
-    else {
-        return InjectionPoint::Insert(decl_end);
-    };
-
-    // `hoist_allowed` implies an open `<head>` was seen before the declaration, but an inverted
-    // range would panic on the slicing the injector does, so it is checked rather than assumed.
-    debug_assert!(head_end <= decl_start && decl_start < decl_end && decl_end <= buffer.len());
-    if head_end > decl_start || decl_start >= decl_end || decl_end > buffer.len() {
-        return InjectionPoint::Insert(decl_end);
-    }
-
-    // `find_open_tag` is comment-blind, which is harmless as long as we only ever insert: the worst
-    // it can do is put the snippet inside a comment. Reordering could instead move a `-->` past live
-    // content, burying the declaration and the snippet in the comment. Refuse rather than teach the
-    // locator comment handling, which would change where we inject by default.
-    if contains_comment_delimiter(&buffer[head_end..decl_end]) {
-        return InjectionPoint::Insert(decl_end);
-    }
-
-    return InjectionPoint::HoistDeclaration {
-        head_end,
-        decl_start,
-        decl_end,
-    };
-}
-
-fn contains_comment_delimiter(content: &[u8]) -> bool {
-    return content.windows(4).any(|window| return window == b"<!--")
-        || content.windows(3).any(|window| return window == b"-->");
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -186,34 +88,14 @@ enum TagName {
     /// `template`), holding its lower case name. A script injected within one would never run,
     /// while the encoding prescan still honours a declaration written there.
     Inert(&'static [u8]),
-    /// An "in head" element the locator has no other use for (`base`, `basefont`, `bgsound`,
-    /// `link`). Recognised only so that it does not read as the end of the head.
-    MetadataContent,
-    /// Any other tag. Its presence means the parser has left the head.
-    Other,
 }
 
-/// An open tag found by [`find_open_tag`].
-struct OpenTag {
-    name: TagName,
-    /// Index of the `<` character.
-    start: usize,
-    /// Index just past the `>` character.
-    end: usize,
-    /// Whether non-whitespace text was found between the offset the search started at and this tag.
-    /// The content of raw text elements skipped along the way does not count: it belongs to an
-    /// element, not to the head.
-    preceded_by_text: bool,
-}
-
-fn find_open_tag(input: &[u8], offset: usize) -> Option<OpenTag> {
+fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)> {
     let mut i = offset;
-    let mut preceded_by_text = false;
 
     while i < input.len() {
         // find open tag
         if input[i] != b'<' {
-            preceded_by_text |= !input[i].is_ascii_whitespace();
             i += 1;
             continue;
         }
@@ -230,22 +112,14 @@ fn find_open_tag(input: &[u8], offset: usize) -> Option<OpenTag> {
             .iter()
             .position(|&b| return b.is_ascii_whitespace() || b == b'>')?;
 
-        let name = parse_tag_name(&rest[..name_end]).unwrap_or(TagName::Other);
-
-        // The content of a raw text element is text, not markup: a `<meta charset>` written within a
-        // script, a stylesheet or a title is not an encoding declaration, and injecting right after
-        // it would insert the snippet in the middle of that text.
-        if let TagName::RawText(raw_text_name) = name {
-            i = find_raw_text_end(input, tag_end, raw_text_name)?;
-            continue;
+        match parse_tag_name(&rest[..name_end]) {
+            // The content of a raw text element is text, not markup: a `<meta charset>` written
+            // within a script, a stylesheet or a title is not an encoding declaration, and
+            // injecting right after it would insert the snippet in the middle of that text.
+            Some(TagName::RawText(name)) => i = find_raw_text_end(input, tag_end, name)?,
+            Some(relevant_tag_name) => return Some((relevant_tag_name, tag_start, tag_end)),
+            None => i = tag_end,
         }
-
-        return Some(OpenTag {
-            name,
-            start: tag_start,
-            end: tag_end,
-            preceded_by_text,
-        });
     }
 
     return None;
@@ -370,13 +244,11 @@ fn is_tag_named(rest: &[u8], closing: bool, name: &[u8]) -> bool {
 fn contains_encoding_declaration(content: &[u8]) -> bool {
     let mut offset = 0;
 
-    while let Some(tag) = find_open_tag(content, offset) {
-        if tag.name == TagName::Meta
-            && MetaAttributes::parse(&content[tag.start..tag.end]).declares_encoding()
-        {
+    while let Some((tag_name, tag_start, tag_end)) = find_open_tag(content, offset) {
+        if tag_name == TagName::Meta && has_encoding_attributes(&content[tag_start..tag_end]) {
             return true;
         }
-        offset = tag.end;
+        offset = tag_end;
     }
 
     return false;
@@ -427,12 +299,6 @@ fn parse_tag_name(input: &[u8]) -> Option<TagName> {
         return Some(TagName::Inert(b"noframes"));
     } else if compare_case_insensitive(input, b"template") {
         return Some(TagName::Inert(b"template"));
-    } else if compare_case_insensitive(input, b"base")
-        || compare_case_insensitive(input, b"basefont")
-        || compare_case_insensitive(input, b"bgsound")
-        || compare_case_insensitive(input, b"link")
-    {
-        return Some(TagName::MetadataContent);
     } else {
         return None;
     }
@@ -553,87 +419,60 @@ fn is_known_encoding_label(value: &[u8]) -> bool {
         .any(|label| return compare_case_insensitive(value, label));
 }
 
-/// The attributes of a `<meta>` open tag the locator cares about.
+/// Returns whether the given open tag, from `<` to `>` included, declares the character encoding of
+/// the document, in other words whether it carries a `charset` attribute or is a
+/// `http-equiv="content-type"` declaration.
 ///
 /// Attributes are parsed rather than matched as substrings, so that attributes merely containing
 /// `charset` (`data-charset`) and unrelated `http-equiv` values (`refresh`) are not mistaken for an
 /// encoding declaration: injecting right after those would place the snippet *before* the actual
 /// declaration.
-struct MetaAttributes<'a> {
-    charset: Option<&'a [u8]>,
-    http_equiv: Option<&'a [u8]>,
-    content: Option<&'a [u8]>,
-}
+///
+/// The values are checked, not just their presence: a `<meta charset="">`, a
+/// `<meta charset="bogus">` naming no known encoding, or a
+/// `<meta http-equiv="content-type" content="text/html">` gives the browser no encoding, so it goes
+/// on looking for the real declaration and the snippet has to do the same.
+fn has_encoding_attributes(tag: &[u8]) -> bool {
+    // Attributes start after the tag name, at the first whitespace character.
+    let Some(mut index) = tag.iter().position(|&b| return b.is_ascii_whitespace()) else {
+        return false;
+    };
 
-impl<'a> MetaAttributes<'a> {
-    /// Parses the given open tag, from `<` to `>` included.
-    fn parse(tag: &'a [u8]) -> Self {
-        let mut attributes = Self {
-            charset: None,
-            http_equiv: None,
-            content: None,
-        };
+    let mut charset: Option<&[u8]> = None;
+    let mut http_equiv: Option<&[u8]> = None;
+    let mut content: Option<&[u8]> = None;
 
-        // Attributes start after the tag name, at the first whitespace character.
-        let Some(mut index) = tag.iter().position(|&b| return b.is_ascii_whitespace()) else {
-            return attributes;
-        };
-
-        loop {
-            index = skip_whitespace(tag, index);
-            if index >= tag.len() || tag[index] == b'>' {
-                break;
-            }
-
-            let (name, value, next_index) = parse_attribute(tag, index);
-            for (attribute_name, slot) in [
-                (&b"charset"[..], &mut attributes.charset),
-                (&b"http-equiv"[..], &mut attributes.http_equiv),
-                (&b"content"[..], &mut attributes.content),
-            ] {
-                // Duplicate attributes are dropped by the parser, so only the first one counts. The
-                // attributes are collected rather than matched in place because `content` may be
-                // written before `http-equiv`.
-                if slot.is_none() && compare_case_insensitive(name, attribute_name) {
-                    *slot = Some(value);
-                }
-            }
-            index = next_index;
+    loop {
+        index = skip_whitespace(tag, index);
+        if index >= tag.len() || tag[index] == b'>' {
+            break;
         }
 
-        return attributes;
-    }
-
-    /// Returns whether the tag declares the character encoding of the document, in other words
-    /// whether it carries a `charset` attribute or is a `http-equiv="content-type"` declaration.
-    ///
-    /// The values are checked, not just their presence: a `<meta charset="">`, a
-    /// `<meta charset="bogus">` naming no known encoding, or a
-    /// `<meta http-equiv="content-type" content="text/html">` gives the browser no encoding, so it
-    /// goes on looking for the real declaration and the snippet has to do the same.
-    fn declares_encoding(&self) -> bool {
-        if self.charset.is_some_and(is_known_encoding_label) {
-            return true;
+        let (name, value, next_index) = parse_attribute(tag, index);
+        for (attribute_name, slot) in [
+            (&b"charset"[..], &mut charset),
+            (&b"http-equiv"[..], &mut http_equiv),
+            (&b"content"[..], &mut content),
+        ] {
+            // Duplicate attributes are dropped by the parser, so only the first one counts. The
+            // attributes are collected rather than matched in place because `content` may be
+            // written before `http-equiv`.
+            if slot.is_none() && compare_case_insensitive(name, attribute_name) {
+                *slot = Some(value);
+            }
         }
-
-        // A `http-equiv="content-type"` only declares the encoding through the `charset` parameter
-        // of its `content` value.
-        return self.http_equiv.is_some_and(|value| {
-            return compare_case_insensitive(value.trim_ascii(), b"content-type");
-        }) && self.content.is_some_and(has_charset_parameter);
+        index = next_index;
     }
 
-    /// Returns whether the tag delivers a Content Security Policy.
-    ///
-    /// `compare_case_insensitive` is length checked, so `content-security-policy-report-only`, which
-    /// enforces nothing, correctly does not match.
-    fn declares_content_security_policy(&self) -> bool {
-        return self.http_equiv.is_some_and(|value| {
-            return compare_case_insensitive(value.trim_ascii(), b"content-security-policy");
-        }) && self
-            .content
-            .is_some_and(|value| return !value.trim_ascii().is_empty());
+    if charset.is_some_and(is_known_encoding_label) {
+        return true;
     }
+
+    // A `http-equiv="content-type"` only declares the encoding through the `charset` parameter of
+    // its `content` value.
+    return http_equiv
+        .is_some_and(|value| return compare_case_insensitive(value.trim_ascii(), b"content-type"))
+        && content.is_some_and(has_charset_parameter);
 }
 
 /// Returns whether the given `content` attribute value carries a `charset` parameter naming a known
@@ -1223,191 +1062,12 @@ mod tests {
         }
     }
 
-    /// [`MetaCspPlacement::Before`]: the encoding declaration is hoisted above a meta-delivered
-    /// policy, so the snippet precedes the policy rather than being governed by it.
-    mod hoist_declaration {
-        use super::*;
-
-        /// Hoisting must never change what the default placement emits.
-        fn test_both_placements(input: &str, expected_before: &str, expected_after: &str) {
-            test_injector_with_placement(MetaCspPlacement::Before, input, expected_before);
-            test_injector_with_placement(MetaCspPlacement::After, input, expected_after);
-        }
-
-        /// The only shape that hoists: a policy at the top level of the head, ahead of the
-        /// declaration.
-        #[test]
-        fn policy_before_the_declaration() {
-            test_both_placements(
-                "<html><head><meta http-equiv='content-security-policy' content='x'><meta charset='utf-8'></head></html>",
-                "<html><head><meta charset='utf-8'>{{SNIPPET}}<meta http-equiv='content-security-policy' content='x'></head></html>",
-                "<html><head><meta http-equiv='content-security-policy' content='x'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-            );
-        }
-
-        /// Other "in head" elements may sit in the hoisted span. A raw text element is skipped
-        /// wholesale, so its content is not the text that would implicitly close the head.
-        #[test]
-        fn other_in_head_elements_in_the_hoisted_span() {
-            test_both_placements(
-                "<html><head><meta http-equiv='content-security-policy' content='x'><link rel='stylesheet' href='x.css'><script>var x = 1;</script><meta charset='utf-8'></head></html>",
-                "<html><head><meta charset='utf-8'>{{SNIPPET}}<meta http-equiv='content-security-policy' content='x'><link rel='stylesheet' href='x.css'><script>var x = 1;</script></head></html>",
-                "<html><head><meta http-equiv='content-security-policy' content='x'><link rel='stylesheet' href='x.css'><script>var x = 1;</script><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-            );
-        }
-
-        /// A policy that follows the declaration is already behind the snippet: nothing to reorder.
-        #[test]
-        fn declaration_before_the_policy() {
-            test_both_placements(
-                "<html><head><meta charset='utf-8'><meta http-equiv='content-security-policy' content='x'></head></html>",
-                "<html><head><meta charset='utf-8'>{{SNIPPET}}<meta http-equiv='content-security-policy' content='x'></head></html>",
-                "<html><head><meta charset='utf-8'>{{SNIPPET}}<meta http-equiv='content-security-policy' content='x'></head></html>",
-            );
-        }
-
-        /// A report-only policy enforces nothing, so there is nothing to escape. The name is longer
-        /// than the enforcing one, and the comparison is length checked, so it does not match.
-        #[test]
-        fn report_only_policy() {
-            test_both_placements(
-                "<html><head><meta http-equiv='content-security-policy-report-only' content='x'><meta charset='utf-8'></head></html>",
-                "<html><head><meta http-equiv='content-security-policy-report-only' content='x'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-                "<html><head><meta http-equiv='content-security-policy-report-only' content='x'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-            );
-        }
-
-        /// A policy with no `content` delivers nothing.
-        #[test]
-        fn policy_without_content() {
-            test_both_placements(
-                "<html><head><meta http-equiv='content-security-policy'><meta charset='utf-8'></head></html>",
-                "<html><head><meta http-equiv='content-security-policy'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-                "<html><head><meta http-equiv='content-security-policy'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-            );
-        }
-
-        /// A policy written inside a `<template>` is inert and enforces nothing.
-        #[test]
-        fn policy_inside_a_template() {
-            test_both_placements(
-                "<html><head><template><meta http-equiv='content-security-policy' content='x'></template><meta charset='utf-8'></head></html>",
-                "<html><head><template><meta http-equiv='content-security-policy' content='x'></template><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-                "<html><head><template><meta http-equiv='content-security-policy' content='x'></template><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-            );
-        }
-
-        /// Pulling a declaration out of a `<template>` would turn a prescan-only declaration into a
-        /// parsed one, so the inert-element exit never hoists.
-        #[test]
-        fn declaration_inside_a_template() {
-            test_both_placements(
-                "<html><head><meta http-equiv='content-security-policy' content='x'><template><meta charset='utf-8'></template></head></html>",
-                "<html><head><meta http-equiv='content-security-policy' content='x'><template><meta charset='utf-8'></template>{{SNIPPET}}</head></html>",
-                "<html><head><meta http-equiv='content-security-policy' content='x'><template><meta charset='utf-8'></template>{{SNIPPET}}</head></html>",
-            );
-        }
-
-        /// Anything that closes the head, explicitly or implicitly, ends the span we may hoist over.
-        #[test]
-        fn head_closed_before_the_declaration() {
-            for closer in ["</head>", "<body>", "<p>", "hello"] {
-                let input = alloc::format!(
-                    "<html><head><meta http-equiv='content-security-policy' content='x'>{closer}<meta charset='utf-8'></html>"
-                );
-                let expected = alloc::format!(
-                    "<html><head><meta http-equiv='content-security-policy' content='x'>{closer}<meta charset='utf-8'>{{{{SNIPPET}}}}</html>"
-                );
-                test_both_placements(&input, &expected, &expected);
-            }
-        }
-
-        /// Without an open `<head>` there is nowhere to hoist to: `<!DOCTYPE html>` and `<html>`
-        /// precede the head, and hoisting over them would be wrong.
-        #[test]
-        fn no_head_in_the_window() {
-            test_both_placements(
-                "<html><meta http-equiv='content-security-policy' content='x'><meta charset='utf-8'></html>",
-                "<html><meta http-equiv='content-security-policy' content='x'><meta charset='utf-8'>{{SNIPPET}}</html>",
-                "<html><meta http-equiv='content-security-policy' content='x'><meta charset='utf-8'>{{SNIPPET}}</html>",
-            );
-        }
-
-        /// The locator is comment-blind, so reordering could move a `-->` past live content and bury
-        /// both the declaration and the snippet in a comment. Refuse instead.
-        #[test]
-        fn comment_delimiter_in_the_hoisted_span() {
-            test_both_placements(
-                "<html><head><meta http-equiv='content-security-policy' content='x'><meta name='a' content='--><b'><meta charset='utf-8'></head></html>",
-                "<html><head><meta http-equiv='content-security-policy' content='x'><meta name='a' content='--><b'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-                "<html><head><meta http-equiv='content-security-policy' content='x'><meta name='a' content='--><b'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-            );
-            test_both_placements(
-                "<html><head><meta http-equiv='content-security-policy' content='x'><meta name='a' content='<!--'><meta charset='utf-8'></head></html>",
-                "<html><head><meta http-equiv='content-security-policy' content='x'><meta name='a' content='<!--'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-                "<html><head><meta http-equiv='content-security-policy' content='x'><meta name='a' content='<!--'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
-            );
-        }
-
-        /// A `http-equiv="content-type"` declaration is hoisted just like a `charset` one.
-        #[test]
-        fn content_type_declaration_is_hoisted() {
-            test_both_placements(
-                "<html><head><meta http-equiv='content-security-policy' content='x'><meta http-equiv='content-type' content='text/html; charset=utf-8'></head></html>",
-                "<html><head><meta http-equiv='content-type' content='text/html; charset=utf-8'>{{SNIPPET}}<meta http-equiv='content-security-policy' content='x'></head></html>",
-                "<html><head><meta http-equiv='content-security-policy' content='x'><meta http-equiv='content-type' content='text/html; charset=utf-8'>{{SNIPPET}}</head></html>",
-            );
-        }
-
-        /// With no declaration at all there is nothing to hoist, whatever the placement.
-        #[test]
-        fn no_declaration() {
-            test_both_placements(
-                "<html><head><meta http-equiv='content-security-policy' content='x'></head></html>",
-                "<html><head>{{SNIPPET}}<meta http-equiv='content-security-policy' content='x'></head></html>",
-                "<html><head>{{SNIPPET}}<meta http-equiv='content-security-policy' content='x'></head></html>",
-            );
-        }
-    }
-
-    /// Runs the locator with the default placement, which never reorders.
     fn test_injector(input: &str, expected: &str) {
-        test_injector_with_placement(MetaCspPlacement::After, input, expected);
-    }
-
-    fn test_injector_with_placement(csp_placement: MetaCspPlacement, input: &str, expected: &str) {
-        const SNIPPET: &[u8] = b"{{SNIPPET}}";
-
-        let input_bytes: Vec<u8> = input.as_bytes().to_vec();
-        let output = match InjectionPointLocator::find(&input_bytes, csp_placement) {
-            Some(InjectionPoint::Insert(index)) => {
-                let mut output = input_bytes.clone();
-                output.splice(index..index, SNIPPET.iter().copied());
-                output
-            }
-            Some(InjectionPoint::HoistDeclaration {
-                head_end,
-                decl_start,
-                decl_end,
-            }) => {
-                let mut output = Vec::new();
-                output.extend_from_slice(&input_bytes[..head_end]);
-                output.extend_from_slice(&input_bytes[decl_start..decl_end]);
-                output.extend_from_slice(SNIPPET);
-                output.extend_from_slice(&input_bytes[head_end..decl_start]);
-                output.extend_from_slice(&input_bytes[decl_end..]);
-                output
-            }
-            None => input_bytes.clone(),
-        };
-
-        // The reorder must be length preserving, just like the plain insertion: that is what keeps
-        // the padding path able to stand in for a missing snippet.
-        if output.len() != input_bytes.len() {
-            assert_eq!(output.len(), input_bytes.len() + SNIPPET.len());
+        let mut input_bytes: Vec<u8> = input.as_bytes().to_vec();
+        if let Some(index) = InjectionPointLocator::find(&input_bytes) {
+            input_bytes.splice(index..index, b"{{SNIPPET}}".iter().copied());
         }
-
-        let result = String::from_utf8(output).expect("Valid UTF-8");
+        let result = String::from_utf8(input_bytes).expect("Valid UTF-8");
         assert_eq!(result, expected);
     }
 

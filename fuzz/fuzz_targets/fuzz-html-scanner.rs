@@ -10,7 +10,7 @@ extern crate libfuzzer_sys;
 
 use inject_browser_sdk::{
     generate_snippet,
-    injector::{InjectionStrategy, Injector, MetaCspPlacement},
+    injector::{InjectionStrategy, Injector},
     Configuration, RumConfiguration,
 };
 use libfuzzer_sys::fuzz_target;
@@ -39,21 +39,8 @@ fuzz_target!(|data: &[u8]| {
         None => (InjectionStrategy::default(), data),
     };
 
-    // And the second one on the meta CSP placement, so the reordering path is fuzzed too. It is the
-    // only path that moves bytes rather than inserting them.
-    let (csp_placement, data) = match data.split_first() {
-        Some((selector, rest)) => {
-            let placement = match selector % 2 {
-                0 => MetaCspPlacement::After,
-                _ => MetaCspPlacement::Before,
-            };
-            (placement, rest)
-        }
-        None => (MetaCspPlacement::default(), data),
-    };
-
     let snippet = generate_snippet(&conf).unwrap();
-    let mut injector = Injector::with_options(snippet.as_slice(), strategy, csp_placement);
+    let mut injector = Injector::with_strategy(snippet.as_slice(), strategy);
 
     let mut emitted = 0usize;
     let result = injector.write(data);

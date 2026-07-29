@@ -22,13 +22,6 @@
       <enum name="headOpenTagWithCloseTagFallback" value="2" />
     </attribute>
 
-    <!-- Whether the encoding declaration may be hoisted above a meta-delivered Content Security
-         Policy so the snippet precedes it. Values mirror the MetaCspPlacement enumerators. -->
-    <attribute name="metaCspPlacement" type="enum" defaultValue="after">
-      <enum name="after"  value="0" />
-      <enum name="before" value="1" />
-    </attribute>
-
     <collection addElement="option" removeElement="remove" clearElement="clear" allowDuplicates="false">
       <attribute name="name" type="string" isUniqueKey="true" required="true" validationType="nonEmptyString" />
       <attribute name="value" type="string" required="true" validationType="nonEmptyString" />

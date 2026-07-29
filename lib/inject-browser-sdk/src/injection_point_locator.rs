@@ -1292,6 +1292,13 @@ mod tests {
             "<!DOCTYPE html SYSTEM \"x>\"><html><head></head></html>",
             "<!DOCTYPE html SYSTEM \"x>\"><html><head>{{SNIPPET}}</head></html>",
         );
+        // A `>` written within a quoted identifier ends the doctype where it stands: the tokenizer
+        // emits the token there, so what follows is markup rather than the rest of the identifier,
+        // and the meta tag is a real encoding declaration.
+        test_injector(
+            "<!DOCTYPE html SYSTEM \"x><meta charset=utf-8>\"><head></head>",
+            "<!DOCTYPE html SYSTEM \"x><meta charset=utf-8>{{SNIPPET}}\"><head></head>",
+        );
     }
 
     #[test]

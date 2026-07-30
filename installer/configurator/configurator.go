@@ -240,7 +240,13 @@ func main() {
 	}
 
 	if *uninstall {
-		configurator.Uninstall(*dryRun)
+		if err := configurator.Uninstall(*dryRun); err != nil {
+			handleError(err, sender, *appID, *remoteConfigId, *dryRun, *uninstall)
+		}
+
+		if !*dryRun {
+			log.Info("Datadog " + *proxyKind + " module has been successfully uninstalled. " + configurator.GetFinalConfigMessage())
+		}
 	} else {
 		runInstall(
 			configurator,

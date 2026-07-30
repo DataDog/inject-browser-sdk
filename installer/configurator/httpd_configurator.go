@@ -102,7 +102,9 @@ func (h *HttpdConfigurator) ModifyConfig(remoteConfigID, appID, site, clientToke
 	customConfPath := fmt.Sprintf("%s/datadog.conf", InstallPath)
 	log.Info("Creating .conf file with RUM configuration in ", customConfPath)
 	content := datadogConfigFile(remoteConfigID, agentUri, appID, clientToken, site, sessionSampleRate, sessionReplaySampleRate)
-	os.WriteFile(customConfPath, []byte(content), 0644)
+	if err := os.WriteFile(customConfPath, []byte(content), 0644); err != nil {
+		return NewInstallerError(HttpdError, fmt.Errorf("failed to write RUM configuration to '%s': %v", customConfPath, err))
+	}
 
 	if err := h.transformConfigHttpd(configPath, dryRun); err != nil {
 		return err
@@ -202,8 +204,139 @@ func (n *HttpdConfigurator) GetFinalConfigMessage() string {
 	return "Please gracefully restart httpd (or hard restart) for the changes to take effect"
 }
 
-func (n *HttpdConfigurator) Uninstall(dryRun bool) error {
+// Drops the Include of the generated datadog.conf from the main config and
+// removes the installation directory holding the module and that config.
+func (h *HttpdConfigurator) Uninstall(dryRun bool) error {
+	log.Debug("Uninstalling httpd module")
+
+	configPath, err := h.getDefaultConfigLocation()
+	if err != nil {
+		return NewInstallerError(HttpdError, fmt.Errorf("failed to get config location: %v", err))
+	}
+
+	h.ConfigPath = configPath
+	log.Debug("Found config file at: ", configPath)
+
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		return NewInstallerError(HttpdError, fmt.Errorf("failed to read config file: %v", err))
+	}
+
+	newContent, err := removeDatadogFromHttpdConfig(content)
+	if err != nil {
+		return err
+	}
+
+	candidatePath, err := writeConfigCandidate(configPath, newContent)
+	if err != nil {
+		return NewInstallerError(HttpdError, fmt.Errorf("failed to create intermediate config file: %v", err))
+	}
+
+	log.Info(fmt.Sprintf("Modified httpd configuration based on '%s', into intermediate config file '%s'", configPath, candidatePath))
+
+	// Kept only for a dry run, where the whole point is to leave it for inspection.
+	if !dryRun {
+		defer os.Remove(candidatePath)
+	}
+
+	// Everything that can fail is done against the candidate first, so the common
+	// failure leaves the live config exactly as it was.
+	if err := h.runConfigTest(candidatePath); err != nil {
+		return NewInstallerError(HttpdError, fmt.Errorf("intermediate config '%s' is invalid: %v", candidatePath, err))
+	}
+
+	if dryRun {
+		log.Info("Dry run enabled, skipping config file modifications. Also skipping the check that nothing else references '" +
+			InstallPath + "', since it briefly moves that directory away from a config still pointing at it. " +
+			"The config to be used in a non dry run is: " + candidatePath)
+		return nil
+	}
+
+	// httpd has no way to dump its expanded configuration on every version we
+	// support ('-D DUMP_INCLUDES' needs 2.4.34, we support 2.4.0), so the check is
+	// to make the directory unavailable and see whether the config still passes.
+	// A surviving reference — a duplicate Include, or one in a file we never parse
+	// — turns the test into a failure, instead of passing against a file that is
+	// about to be deleted. The directory stays aside until the end, so the live
+	// config is validated in the state it will actually run in.
+	restoreInstallDir, removeInstallDir, err := moveDirAside(InstallPath)
+	if err != nil {
+		return NewInstallerError(HttpdError, fmt.Errorf("failed to check whether '%s' is still referenced: %v", InstallPath, err))
+	}
+
+	defer func() {
+		if err := restoreInstallDir(); err != nil {
+			log.Error("Failed to put the httpd installation directory back: ", err)
+		}
+	}()
+
+	if err := h.runConfigTest(candidatePath); err != nil {
+		return NewInstallerError(HttpdError, fmt.Errorf("with '%s' unavailable the config '%s' no longer validates, so something still references it and removing it "+
+			"would leave httpd unable to start. Please remove the remaining references and run the uninstall again: %v", InstallPath, candidatePath, err))
+	}
+
+	log.Debug("Nothing else references ", InstallPath)
+
+	backupFile, err := replaceConfigFile(configPath, ".uninstall.backup", newContent)
+	if err != nil {
+		return NewInstallerError(HttpdError, fmt.Errorf("failed to update config '%s': %v", configPath, err))
+	}
+
+	log.Info(fmt.Sprintf("Updated config '%s', with the original backed up as '%s'", configPath, backupFile))
+
+	if err := h.runConfigTest(configPath); err != nil {
+		if restoreErr := restoreConfigFile(configPath, backupFile); restoreErr != nil {
+			return NewInstallerError(HttpdError, fmt.Errorf("config '%s' is invalid after removing the datadog Include (%v), and restoring it from '%s' failed too: %v",
+				configPath, err, backupFile, restoreErr))
+		}
+
+		return NewInstallerError(HttpdError, fmt.Errorf("config '%s' is invalid after removing the datadog Include, so the original was restored: %v", configPath, err))
+	}
+
+	log.Info("Removing httpd installation directory: ", InstallPath)
+
+	if err := removeInstallDir(); err != nil {
+		return NewInstallerError(HttpdError, fmt.Errorf("failed to remove httpd installation directory '%s': %v", InstallPath, err))
+	}
+
+	log.Info("Successfully removed httpd installation directory: ", InstallPath)
+
 	return nil
+}
+
+// Inverse of the Include line appended by transformConfigHttpd. The blank line
+// separating it from the original content goes too, so the config round-trips.
+//
+// Every occurrence goes, not just the first. A duplicate Include left behind
+// still names a file that is about to be deleted along with the installation
+// directory, and it passes the config test while the file is still there — so
+// Apache only refuses to start later, once the directory is gone.
+func removeDatadogFromHttpdConfig(content []byte) ([]byte, error) {
+	contentStr := string(content)
+
+	// [ \t] rather than [\s], so the match cannot reach back across a newline and
+	// take a line that belongs to the original config with it.
+	includeRegex := regexp.MustCompile(`(?m)^[ \t]*Include[ \t]+` + regexp.QuoteMeta(InstallPath) + `/datadog\.conf[ \t]*(\n|$)`)
+	matches := includeRegex.FindAllStringIndex(contentStr, -1)
+	if len(matches) == 0 {
+		return nil, NewInstallerError(HttpdError, fmt.Errorf("the datadog module does not appear to be installed: no 'Include %s/datadog.conf' line found in the httpd config", InstallPath))
+	}
+
+	log.Debug("Removing ", len(matches), " datadog Include line(s) from the httpd config")
+
+	// Spliced back to front so the offsets of the earlier matches stay valid.
+	for i := len(matches) - 1; i >= 0; i-- {
+		// transformConfigHttpd writes the Include after a blank line, so that
+		// separator goes too whenever it is there.
+		start := matches[i][0]
+		if start >= 2 && contentStr[start-1] == '\n' && contentStr[start-2] == '\n' {
+			start--
+		}
+
+		contentStr = contentStr[:start] + contentStr[matches[i][1]:]
+	}
+
+	return []byte(contentStr), nil
 }
 
 func (h *HttpdConfigurator) getDefaultConfigLocation() (string, error) {
@@ -270,42 +403,35 @@ func (h *HttpdConfigurator) transformConfigHttpd(src string, dryRun bool) error 
 		return NewInstallerError(HttpdError, fmt.Errorf("datadog module is already installed, can't perform installation"))
 	}
 
-	ddogFile := src + ".datadog"
-	log.Debug("Writing the modified config file in ", ddogFile)
-	newContent := fmt.Sprintf("%s\n%s\n", string(content), configLine)
+	newContent := []byte(fmt.Sprintf("%s\n%s\n", string(content), configLine))
 
-	err = os.WriteFile(ddogFile, []byte(newContent), 0644)
+	candidatePath, err := writeConfigCandidate(src, newContent)
 	if err != nil {
-		return fmt.Errorf("error writing new configuration file: %w", err)
+		return NewInstallerError(HttpdError, fmt.Errorf("error writing new configuration file: %w", err))
 	}
 
-	defer os.Remove(ddogFile)
+	log.Debug("Wrote the modified config file in ", candidatePath)
 
-	if err := h.runConfigTest(ddogFile); err != nil {
+	// Kept only for a dry run, where the whole point is to leave it for inspection.
+	if !dryRun {
+		defer os.Remove(candidatePath)
+	}
+
+	if err := h.runConfigTest(candidatePath); err != nil {
 		return NewInstallerError(HttpdError, fmt.Errorf("error running config test after modifications to the system: %w", err))
 	}
 
 	if dryRun {
-		log.Info("Dry run enabled, skipping config file modifications.")
+		log.Info("Dry run enabled, skipping config file modifications. The config to be used in a non dry run is: ", candidatePath)
 		return nil
 	}
 
-	backupFile := src + ".bak"
-	log.Debug("Backing up original configuration to ", backupFile)
-
-	err = os.Rename(src, backupFile)
+	backupFile, err := replaceConfigFile(src, ".bak", newContent)
 	if err != nil {
-		return fmt.Errorf("error moving to backup file: %w", err)
+		return NewInstallerError(HttpdError, fmt.Errorf("error updating configuration file '%s': %w", src, err))
 	}
 
-	log.Info("Backed up original configuration to ", backupFile)
-
-	err = os.Rename(ddogFile, src)
-	if err != nil {
-		return fmt.Errorf("error moving datadog modified file '%s' to original configuration path '%s': %w", ddogFile, src, err)
-	}
-
-	log.Info("Configuration updated successfully")
+	log.Info("Configuration updated successfully, with the original backed up as ", backupFile)
 
 	return nil
 }

@@ -207,6 +207,22 @@ func TestValidateInput(t *testing.T) {
 			uninstall:               false,
 			expectedError:           "ArgumentError: unable to set both remote configuration and local configuration",
 		},
+		{
+			name:                    "Uninstall needs nothing beyond the proxy kind",
+			proxyKind:               "nginx",
+			sessionSampleRate:       -1,
+			sessionReplaySampleRate: -1,
+			uninstall:               true,
+			expectedError:           "",
+		},
+		{
+			name:                    "Uninstall still validates the proxy kind",
+			proxyKind:               "iis",
+			sessionSampleRate:       -1,
+			sessionReplaySampleRate: -1,
+			uninstall:               true,
+			expectedError:           "proxyKind must be either 'nginx' or 'httpd', found 'iis'",
+		},
 	}
 
 	for _, tt := range tests {

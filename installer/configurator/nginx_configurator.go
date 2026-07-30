@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -82,43 +83,40 @@ func (n *NginxConfigurator) ModifyConfig(remoteConfigID, appID, site, clientToke
 		return NewInstallerError(NginxError, fmt.Errorf("datadog module could not be loaded, likely because the module is already in use: %v", err))
 	}
 
-	newConfigPath := configPath + ".datadog"
-	log.Info(fmt.Sprintf("Modifying NGINX configuration file based on '%s', into intermediate config file '%s'", configPath, newConfigPath))
-	newContent, err := addDatadogToConfig(n, content, remoteConfigID, agentUri, appID, clientToken, site, sessionSampleRate, sessionReplaySampleRate, newConfigPath)
-
+	newContent, err := addDatadogToConfig(n, content, remoteConfigID, agentUri, appID, clientToken, site, sessionSampleRate, sessionReplaySampleRate)
 	if err != nil {
 		return NewInstallerError(NginxError, fmt.Errorf("failed modifying config config: %v", err))
 	}
 
-	if err := os.WriteFile(newConfigPath, newContent, 0644); err != nil {
-		return NewInstallerError(NginxError, fmt.Errorf("failed to create intermediate config file file: %v", err))
+	candidatePath, err := writeConfigCandidate(configPath, newContent)
+	if err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("failed to create intermediate config file: %v", err))
 	}
 
-	log.Debug("Created intermediate config file: ", newConfigPath)
+	log.Info(fmt.Sprintf("Modified NGINX configuration based on '%s', into intermediate config file '%s'", configPath, candidatePath))
 
-	if err := n.validateConfig(newConfigPath); err != nil {
-		return NewInstallerError(NginxError, fmt.Errorf("intermediate config '%s' is invalid: %v", newConfigPath, err))
+	// Kept only for a dry run, where the whole point is to leave it for inspection.
+	if !dryRun {
+		defer os.Remove(candidatePath)
 	}
 
-	log.Debug("Intermediate config is valid: ", newConfigPath)
+	if err := n.validateConfig(candidatePath); err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("intermediate config '%s' is invalid: %v", candidatePath, err))
+	}
+
+	log.Debug("Intermediate config is valid: ", candidatePath)
 
 	if dryRun {
-		log.Info("Dry run enabled, skipping config file modifications. The config to be used in a non dry run is: ", newConfigPath)
+		log.Info("Dry run enabled, skipping config file modifications. The config to be used in a non dry run is: ", candidatePath)
 		return nil
 	}
 
-	backupPath := configPath + ".backup"
-	if err := os.Rename(configPath, backupPath); err != nil {
-		return NewInstallerError(NginxError, fmt.Errorf("failed to move file '%s' to '%s': %v", configPath, backupPath, err))
+	backupPath, err := replaceConfigFile(configPath, ".backup", newContent)
+	if err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("failed to update config '%s': %v", configPath, err))
 	}
 
-	log.Info(fmt.Sprintf("Moved config '%s' into backup file '%s'", configPath, backupPath))
-
-	if err := os.Rename(newConfigPath, configPath); err != nil {
-		return NewInstallerError(NginxError, fmt.Errorf("failed to move '%s' into final config file '%s': %v", newConfigPath, configPath, err))
-	}
-
-	log.Debug("Created final config file: ", configPath)
+	log.Info(fmt.Sprintf("Updated config '%s', with the original backed up as '%s'", configPath, backupPath))
 
 	return nil
 }
@@ -231,6 +229,61 @@ func (n *NginxConfigurator) validateConfig(configPath string) error {
 	return nil
 }
 
+// Runs 'nginx -T' to get the fully expanded configuration: every include
+// resolved, each source file introduced by a '# configuration file <path>:' line.
+// This is the only way to see directives living in includes we never parse
+// ourselves, such as conf.d/*.conf.
+func (n *NginxConfigurator) dumpConfig(configPath string) (string, error) {
+	cmd := exec.Command("nginx", "-T", "-c", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", NewInstallerError(NginxError, fmt.Errorf("failed to dump the expanded nginx configuration for '%s': %v. Output:\n%s", configPath, err, output))
+	}
+
+	return string(output), nil
+}
+
+// Refuses to delete the modules directory while the configuration still points
+// at it. Deleting it anyway would pass every config test we run — the module file
+// is still there while we test — and leave NGINX unable to start afterwards.
+func (n *NginxConfigurator) verifyModulesPathUnreferenced(configPath string) error {
+	dump, err := n.dumpConfig(configPath)
+	if err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("could not check whether '%s' is still referenced: %v", NginxModulesPath, err))
+	}
+
+	if source := findReferenceInNginxDump(dump, NginxModulesPath); source != "" {
+		return NewInstallerError(NginxError, fmt.Errorf("'%s' is still referenced by '%s', so removing it would leave NGINX unable to start. "+
+			"Please remove the remaining references and run the uninstall again", NginxModulesPath, source))
+	}
+
+	log.Debug("Nothing in the expanded configuration references ", NginxModulesPath)
+
+	return nil
+}
+
+// Scans an 'nginx -T' dump for a reference to needle and returns the config file
+// it was found in, or "" when there is none. The '# configuration file <path>:'
+// annotations are what make the file attributable; they are skipped as content,
+// since one of them naming a file under needle is not itself a reference.
+func findReferenceInNginxDump(dump, needle string) string {
+	const marker = "# configuration file "
+
+	source := "the expanded configuration"
+	for _, line := range strings.Split(dump, "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, marker) {
+			source = strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(trimmed, marker)), ":")
+			continue
+		}
+
+		if strings.Contains(line, needle) {
+			return source
+		}
+	}
+
+	return ""
+}
+
 func (n *NginxConfigurator) GetFinalConfigMessage() string {
 	return "Please reload NGINX or restart the service for the changes to take effect"
 }
@@ -254,50 +307,62 @@ func (n *NginxConfigurator) Uninstall(dryRun bool) error {
 
 	log.Debug("Successfully read config file")
 
-	newConfigPath := configPath + ".datadog"
-	log.Info(fmt.Sprintf("Modifying NGINX configuration file based on '%s', into intermediate config file '%s'", configPath, newConfigPath))
-	newContent, err := removeDatadogFromConfig(n, content, newConfigPath)
-
+	newContent, err := removeDatadogFromConfig(content)
 	if err != nil {
 		return NewInstallerError(NginxError, fmt.Errorf("failed modifying config: %v", err))
 	}
 
-	if err := os.WriteFile(newConfigPath, newContent, 0644); err != nil {
-		return NewInstallerError(NginxError, fmt.Errorf("failed to create intermediate config file file: %v", err))
+	candidatePath, err := writeConfigCandidate(configPath, newContent)
+	if err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("failed to create intermediate config file: %v", err))
 	}
 
-	log.Debug("Created intermediate config file: ", newConfigPath)
+	log.Info(fmt.Sprintf("Modified NGINX configuration based on '%s', into intermediate config file '%s'", configPath, candidatePath))
 
-	if err := n.validateConfig(newConfigPath); err != nil {
-		return NewInstallerError(NginxError, fmt.Errorf("intermediate config '%s' is invalid: %v", newConfigPath, err))
+	if !dryRun {
+		defer os.Remove(candidatePath)
 	}
 
-	log.Debug("Intermediate config is valid: ", newConfigPath)
+	// Everything that can fail is done against the candidate first, so the common
+	// failure leaves the live config exactly as it was.
+	if err := n.validateConfig(candidatePath); err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("intermediate config '%s' is invalid: %v", candidatePath, err))
+	}
+
+	log.Debug("Intermediate config is valid: ", candidatePath)
+
+	if err := n.verifyModulesPathUnreferenced(candidatePath); err != nil {
+		return err
+	}
 
 	if dryRun {
-		log.Info("Dry run enabled, exitting before modifying the installation. The config to be used in a non dry run is: ", newConfigPath)
+		log.Info("Dry run enabled, exiting before modifying the installation. The config to be used in a non dry run is: ", candidatePath)
 		return nil
 	}
 
-	backupPath := configPath + ".uninstall.backup"
-	if err := os.Rename(configPath, backupPath); err != nil {
-		return NewInstallerError(NginxError, fmt.Errorf("failed to move file '%s' to '%s': %v", configPath, backupPath, err))
+	backupPath, err := replaceConfigFile(configPath, ".uninstall.backup", newContent)
+	if err != nil {
+		return NewInstallerError(NginxError, fmt.Errorf("failed to update config '%s': %v", configPath, err))
 	}
 
-	log.Info(fmt.Sprintf("Moved config '%s' into backup file '%s'", configPath, backupPath))
+	log.Info(fmt.Sprintf("Updated config '%s', with the original backed up as '%s'", configPath, backupPath))
 
-	if err := os.Rename(newConfigPath, configPath); err != nil {
-		return NewInstallerError(NginxError, fmt.Errorf("failed to move '%s' into final config file '%s': %v", newConfigPath, configPath, err))
+	if err := n.ValidateConfig(); err != nil {
+		if restoreErr := restoreConfigFile(configPath, backupPath); restoreErr != nil {
+			return NewInstallerError(NginxError, fmt.Errorf("config '%s' is invalid after removing the datadog directives (%v), and restoring it from '%s' failed too: %v",
+				configPath, err, backupPath, restoreErr))
+		}
+
+		return NewInstallerError(NginxError, fmt.Errorf("config '%s' is invalid after removing the datadog directives, so the original was restored: %v", configPath, err))
 	}
 
-	log.Debug("Created final config file: ", configPath)
 	log.Info("Removing nginx modules directory: " + NginxModulesPath)
 
 	if err := os.RemoveAll(NginxModulesPath); err != nil {
 		return NewInstallerError(NginxError, fmt.Errorf("failed to remove nginx modules directory '%s': %v", NginxModulesPath, err))
 	}
 
-	log.Info("Successfully removed nginx modules directory: ", n.ModulesPath)
+	log.Info("Successfully removed nginx modules directory: ", NginxModulesPath)
 
 	return nil
 }
@@ -306,7 +371,7 @@ func (n *NginxConfigurator) Uninstall(dryRun bool) error {
 // Find http and bracket { on possibly multiple lines
 // Insert the datadog configuration after the http block
 // Return the modified content
-func addDatadogToConfig(n *NginxConfigurator, content []byte, remoteConfigID, agentUri string, appID string, clientToken string, site string, sessionSampleRate int, sessionReplaySampleRate int, destFile string) ([]byte, error) {
+func addDatadogToConfig(n *NginxConfigurator, content []byte, remoteConfigID, agentUri string, appID string, clientToken string, site string, sessionSampleRate int, sessionReplaySampleRate int) ([]byte, error) {
 	var newContent strings.Builder
 	newContent.WriteString(fmt.Sprintf("load_module %s/ngx_http_datadog_module.so;\n", n.ModulesPath))
 
@@ -324,9 +389,11 @@ func addDatadogToConfig(n *NginxConfigurator, content []byte, remoteConfigID, ag
 
 	datadogConfig := fmt.Sprintf(`    datadog_agent_url %s;
 
-    datadog_tracing off; # Disable APM Tracing. Remove this line to enable APM Tracing.
+    # Disable APM Tracing. Remove the next line to enable APM Tracing.
+    datadog_tracing off;
 
-    datadog_rum on; # Enable RUM Injection
+    # Enable RUM Injection
+    datadog_rum on;
 
     datadog_rum_config "v6" {
         "applicationId" "%s";
@@ -352,13 +419,48 @@ func addDatadogToConfig(n *NginxConfigurator, content []byte, remoteConfigID, ag
 	return []byte(newContent.String()), nil
 }
 
-func removeDatadogFromConfig(n *NginxConfigurator, content []byte, destFile string) ([]byte, error) {
+// Simple datadog_* directives written by addDatadogToConfig, keyed by directive
+// name. datadog_rum_config is handled separately: it opens a block.
+var nginxDatadogDirectives = []string{"datadog_agent_url", "datadog_tracing", "datadog_rum"}
 
+const nginxDatadogBlockDirective = "datadog_rum_config"
+
+// Distinctive fragments of the comments addDatadogToConfig writes. Matched as
+// substrings so both the current wording and the older "Remove this line" variant
+// are covered, and so a comment is recognised on its own text rather than only
+// through the directive underneath it — which may well have been deleted by hand,
+// since one of these comments invites exactly that.
+var nginxInstallerComments = []string{"Disable APM Tracing", "Enable RUM Injection"}
+
+// Inverse of addDatadogToConfig: drops every datadog load_module directive and
+// every datadog_* directive it wrote inside the http block, restoring the
+// original config byte for byte.
+//
+// The comment lines above datadog_tracing and datadog_rum are dropped along with
+// the directive they document, so a config written by any installer version
+// round-trips whether the comments sit on their own line or trail the directive.
+//
+// Only load_module has to be there. The directives inside the http block are all
+// optional on removal: the installer's own comment tells users to delete
+// datadog_tracing to enable APM tracing, and datadog_agent_url only restates the
+// module's default. Demanding them would turn following our own documentation
+// into an uninstall that refuses to run. The candidate config is handed to
+// 'nginx -t' before anything on disk is touched, and that is what catches a
+// directive left dangling in an include we never parse.
+func removeDatadogFromConfig(content []byte) ([]byte, error) {
 	contentStr := string(content)
 
-	moduleRegex := regexp.MustCompile(`(?m)^[\s]*load_module[\s]+.*/ngx_http_datadog_module\.so;[\s]*\n?`)
-	moduleMatches := moduleRegex.FindStringIndex(contentStr)
-	if moduleMatches == nil {
+	// Checked up front so a config we never wrote is refused before anything else
+	// is reported about it, but removed further down against the assembled string.
+	//
+	// [ \t] rather than [\s] around the directive, and a single optional newline at
+	// the end: [\s]* would reach across newlines and take blank lines belonging to
+	// the original config with it. The nginx docker images ship a config whose very
+	// first byte is a newline, and the load_module line is written directly above
+	// it, so that blank line is immediately after the match.
+	moduleRegex := regexp.MustCompile(`(?m)^[ \t]*load_module[ \t]+.*/ngx_http_datadog_module\.so;[ \t]*\r?\n?`)
+	modules := moduleRegex.FindAllStringIndex(contentStr, -1)
+	if len(modules) == 0 {
 		return nil, NewInstallerError(NginxError, fmt.Errorf("datadog load_module directive not found in nginx config"))
 	}
 
@@ -368,66 +470,152 @@ func removeDatadogFromConfig(n *NginxConfigurator, content []byte, destFile stri
 		return nil, NewInstallerError(NginxError, fmt.Errorf("could not find http block in nginx config"))
 	}
 
-	httpContentStart := httpBlockStart[1]
-	httpContent := contentStr[httpContentStart:]
+	httpContent := contentStr[httpBlockStart[1]:]
+	httpContentEnd := findBlockEnd(httpContent)
+	if httpContentEnd < 0 {
+		return nil, NewInstallerError(NginxError, fmt.Errorf("malformed http block in nginx config"))
+	}
 
-	// Count braces to find the end of the http block
-	braceCount := 1
-	httpContentEnd := 0
-	for i, r := range httpContent {
-		if r == '{' {
-			braceCount++
-		} else if r == '}' {
-			braceCount--
-			if braceCount == 0 {
-				httpContentEnd = i
-				break
+	httpBlock := httpContent[:httpContentEnd]
+	httpBlockWithoutDatadog, err := removeDatadogDirectives(httpBlock)
+	if err != nil {
+		return nil, err
+	}
+
+	if httpBlockWithoutDatadog == httpBlock {
+		log.Warn("No datadog_* directives were found in the http block of the nginx config; only the load_module directive will be removed")
+	}
+
+	// The load_module directives are matched on the assembled string rather than
+	// on the original, so their offsets can never be spliced against the
+	// separately computed http block offsets — a load_module sitting after
+	// 'http {' used to make those two index pairs cross.
+	assembled := contentStr[:httpBlockStart[1]] + httpBlockWithoutDatadog + httpContent[httpContentEnd:]
+
+	// Every occurrence goes, not just the first: leaving a duplicate behind would
+	// keep the config pointing at a module directory that is about to be deleted.
+	log.Debug("Removing ", len(modules), " datadog load_module directive(s)")
+
+	return []byte(moduleRegex.ReplaceAllString(assembled, "")), nil
+}
+
+// Walks the lines of an http block and drops the datadog_* directives, the
+// comments documenting them, and the blank line each one was written with.
+func removeDatadogDirectives(httpBlock string) (string, error) {
+	lines := strings.Split(httpBlock, "\n")
+
+	var kept []string
+	// addDatadogToConfig writes an empty line before each directive it adds, so
+	// dropping that separator alongside the directive is what makes the removal
+	// an exact inverse. Whitespace-only lines are left alone: they belong to the
+	// original config, not to the block the installer wrote.
+	dropSeparator := func() {
+		if len(kept) > 0 && kept[len(kept)-1] == "" {
+			kept = kept[:len(kept)-1]
+		}
+	}
+
+	for i := 0; i < len(lines); i++ {
+		directive := nginxDirectiveName(lines[i])
+
+		// A comment documents the directive below it, so it goes when that does —
+		// or when the comment is one we recognise as ours, since the directive it
+		// documented may have been deleted by hand. Without the second test the
+		// comment would survive and accrete on every install/uninstall cycle.
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "#") {
+			if nextDatadogDirective(lines[i+1:]) != "" || isNginxInstallerComment(lines[i]) {
+				dropSeparator()
+				continue
+			}
+		}
+
+		if directive == nginxDatadogBlockDirective {
+			block := strings.Join(lines[i:], "\n")
+			openingBrace := strings.IndexByte(block, '{')
+			if openingBrace < 0 {
+				return "", NewInstallerError(NginxError, fmt.Errorf("%s is not followed by a block in the nginx config", nginxDatadogBlockDirective))
+			}
+
+			blockEnd := findBlockEnd(block[openingBrace+1:])
+			if blockEnd < 0 {
+				return "", NewInstallerError(NginxError, fmt.Errorf("malformed %s block in nginx config", nginxDatadogBlockDirective))
+			}
+
+			dropSeparator()
+			// Skip past the line holding the closing brace.
+			i += strings.Count(block[:openingBrace+1+blockEnd], "\n")
+			continue
+		}
+
+		if slices.Contains(nginxDatadogDirectives, directive) {
+			dropSeparator()
+			continue
+		}
+
+		kept = append(kept, lines[i])
+	}
+
+	return strings.Join(kept, "\n"), nil
+}
+
+// Reports whether a comment line is one addDatadogToConfig wrote.
+func isNginxInstallerComment(line string) bool {
+	for _, comment := range nginxInstallerComments {
+		if strings.Contains(line, comment) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Returns the directive name a config line opens with, without its trailing
+// semicolon: "    datadog_rum on;" yields "datadog_rum".
+func nginxDirectiveName(line string) string {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+
+	return strings.TrimSuffix(fields[0], ";")
+}
+
+// Returns the datadog_* directive opening the next non-blank line, if any.
+func nextDatadogDirective(lines []string) string {
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		directive := nginxDirectiveName(line)
+		if directive == nginxDatadogBlockDirective || slices.Contains(nginxDatadogDirectives, directive) {
+			return directive
+		}
+
+		return ""
+	}
+
+	return ""
+}
+
+// Returns the index of the brace closing a block that has already been opened,
+// or -1 if the braces never balance. Counting braces rather than matching a
+// regex keeps nested blocks intact.
+func findBlockEnd(afterOpeningBrace string) int {
+	depth := 1
+	for i, r := range afterOpeningBrace {
+		switch r {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
 			}
 		}
 	}
 
-	if httpContentEnd == 0 {
-		return nil, NewInstallerError(NginxError, fmt.Errorf("malformed http block in nginx config"))
-	}
-
-	httpBlockContent := httpContent[:httpContentEnd]
-
-	datadogAgentUrlRegex := regexp.MustCompile(`(?m)^[\s]*datadog_agent_url[\s]+[^;]+;`)
-	datadogTracingRegex := regexp.MustCompile(`(?m)^[\s]*datadog_tracing[\s]+[^;]+;.*$`)
-	datadogRumRegex := regexp.MustCompile(`(?m)^[\s]*datadog_rum[\s]+[^;]+;.*$`)
-	datadogRumConfigRegex := regexp.MustCompile(`(?m)^[\s]*datadog_rum_config[\s]+.*[\s]*\{[^}]*\}\n`)
-
-	if !datadogAgentUrlRegex.MatchString(httpBlockContent) {
-		return nil, NewInstallerError(NginxError, fmt.Errorf("datadog_agent_url directive not found in http block in the same format it was added"))
-	}
-	if !datadogTracingRegex.MatchString(httpBlockContent) {
-		return nil, NewInstallerError(NginxError, fmt.Errorf("datadog_tracing directive not found in http block in the same format it was added"))
-	}
-	if !datadogRumRegex.MatchString(httpBlockContent) {
-		return nil, NewInstallerError(NginxError, fmt.Errorf("datadog_rum directive not found in http block in the same format it was added"))
-	}
-	if !datadogRumConfigRegex.MatchString(httpBlockContent) {
-		return nil, NewInstallerError(NginxError, fmt.Errorf("datadog_rum_config directive not found in http block in the same format it was added"))
-	}
-
-	var newContent strings.Builder
-
-	newContent.WriteString(contentStr[:moduleMatches[0]])
-
-	newContent.WriteString(contentStr[moduleMatches[1]:httpBlockStart[0]])
-
-	newContent.WriteString(contentStr[httpBlockStart[0]:httpBlockStart[1]])
-
-	httpContentWithoutDatadog := datadogAgentUrlRegex.ReplaceAllString(httpBlockContent, "")
-	httpContentWithoutDatadog = datadogTracingRegex.ReplaceAllString(httpContentWithoutDatadog, "")
-	httpContentWithoutDatadog = datadogRumRegex.ReplaceAllString(httpContentWithoutDatadog, "")
-	httpContentWithoutDatadog = datadogRumConfigRegex.ReplaceAllString(httpContentWithoutDatadog, "")
-
-	newContent.WriteString(httpContentWithoutDatadog)
-
-	newContent.WriteString(httpContent[httpContentEnd:])
-
-	return []byte(newContent.String()), nil
+	return -1
 }
 
 func (n *NginxConfigurator) testNginxLoadsModule(modulePath string) error {

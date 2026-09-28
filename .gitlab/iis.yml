@@ -1,6 +1,5 @@
 ---
 variables:
-  WINDOWS_BUILD_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64:v113129110-33018b2a
   # Generic Linux build image; the e2e job installs Pulumi + plugins itself
   # rather than relying on a bespoke test-infra-definitions runner image
   # (mirrors DataDog/datadog-agent#42832).
@@ -22,8 +21,8 @@ variables:
     GIT_DEPTH: 500 #Default is 20
   script:
     - |
-      $image = "${WINDOWS_BUILD_IMAGE}"
-      $cached = docker images -q $image
+      $image = "${WINDOWS_DEFAULT_IMAGE}"
+      $cached = docker image inspect --format '{{.Id}}' $image 2>$null
       if ($cached) {
         Write-Host "Image $image is already cached on this runner."
       } else {
@@ -47,7 +46,7 @@ variables:
       -e CI=true
       -e CI_JOB_ID=${CI_JOB_ID}
       -e CI_PROJECT_NAME=${CI_PROJECT_NAME}
-      ${WINDOWS_BUILD_IMAGE}
+      ${WINDOWS_DEFAULT_IMAGE}
       c:\mnt\injector_IIS\scripts\build_injector_IIS.bat
     # Copy output files to artifacts dir for use in later jobs
     - if (Test-Path $ARTIFACTS_DIR) { remove-item -recurse -force $ARTIFACTS_DIR }
@@ -72,6 +71,7 @@ variables:
           - Cargo.lock
           - .gitlab-ci.yml
           - .gitlab/iis.yml
+          - .gitlab/windows-default-image.yml
     - changes:
         - injector_IIS/**/*
         - lib/**/*
@@ -79,6 +79,7 @@ variables:
         - Cargo.lock
         - .gitlab-ci.yml
         - .gitlab/iis.yml
+        - .gitlab/windows-default-image.yml
 
 
 
@@ -101,7 +102,7 @@ injector_IIS_unit_test:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
-      ${WINDOWS_BUILD_IMAGE}
+      ${WINDOWS_DEFAULT_IMAGE}
       powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
     - If ($lastExitCode -ne 0) { exit $lastExitCode }
 
@@ -116,7 +117,7 @@ injector_IIS_unit_test_asan:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
-      ${WINDOWS_BUILD_IMAGE}
+      ${WINDOWS_DEFAULT_IMAGE}
       powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
       -Preset ci-native-asan -BuildDir build-asan -BuildType Debug
     - If ($lastExitCode -ne 0) { exit $lastExitCode }

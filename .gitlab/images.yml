@@ -14,9 +14,15 @@ check_windows_build_image_latest:
   extends: .check_image_latest
   script:
     - |
-      # Split WINDOWS_BUILD_IMAGE into repo and current tag
-      REPO="${WINDOWS_BUILD_IMAGE%:*}"
-      CURRENT="${WINDOWS_BUILD_IMAGE##*:}"
+      # The digest is pinned by Renovate; compare the tag of its source image.
+      IMAGE_WITHOUT_DIGEST="${WINDOWS_DEFAULT_IMAGE%@*}"
+      REPO="${IMAGE_WITHOUT_DIGEST%:*}"
+      CURRENT="${IMAGE_WITHOUT_DIGEST##*:}"
+      crane digest "$WINDOWS_DEFAULT_IMAGE" >/dev/null || exit 1
+      if [ "$CURRENT" = "prewarmed" ]; then
+        echo "✓ dd-repo-tools prewarmed image exists; Renovate tracks its digest."
+        exit 0
+      fi
       LATEST=$(crane ls "$REPO" | grep -E '^v[0-9]' | sort -V | tail -1)
       if [ -z "$LATEST" ]; then
         echo "ERROR: Could not retrieve tags from $REPO (crane ls failed or returned no results)"
@@ -29,7 +35,7 @@ check_windows_build_image_latest:
         echo "  Current : $CURRENT"
         echo "  Latest  : $LATEST"
         echo ""
-        echo "Bump WINDOWS_BUILD_IMAGE in .gitlab/iis.yml to use tag '$LATEST'."
+        echo "Bump WINDOWS_DEFAULT_IMAGE in .gitlab/windows-default-image.yml to use tag '$LATEST'."
         echo "The Windows runner AMI pre-pulls the latest tag of this image — staying current"
         echo "means the image is already cached on the runner, saving ~12 minutes per build job."
         exit 1

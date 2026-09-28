@@ -35,6 +35,8 @@ manual_installer_release:
   extends: .installer_release
   when: manual
   rules:
+    - if: '$CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH'
+      when: never
     - if: $RELEASE_TAG != null
   variables:
     S3_BUCKET: rum-auto-instrumentation

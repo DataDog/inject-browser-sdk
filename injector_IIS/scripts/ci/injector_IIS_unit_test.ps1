@@ -31,4 +31,9 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $testExe = Join-Path $BuildDir "test\unittests\iis_injector_tests.exe"
 & $testExe
-exit $LASTEXITCODE
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$selectorExe = Join-Path $BuildDir "bootstrap\ddiisrum-package-selector-test.exe"
+& $selectorExe
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& (Join-Path $PSScriptRoot "..\..\test\lifecycle\Test-IisRumBundleContract.ps1")
+if (-not $?) { exit 1 }

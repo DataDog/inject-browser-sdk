@@ -81,9 +81,10 @@ test-iis: dev-image-x86_64-cached
 	  export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link; \
 	  export RUSTFLAGS="-Lnative=/xwin/crt/lib/x86_64 -Lnative=/xwin/sdk/lib/ucrt/x86_64 -Lnative=/xwin/sdk/lib/um/x86_64"; \
 	  cmake --preset=ci-xcomp -B build -DTOOLCHAIN_ROOT=/usr/lib/llvm-20/bin/; \
-	  cmake --build build --target iis_injector_tests -j; \
+	  cmake --build build --target iis_injector_tests ddiisrum-package-selector-test -j; \
 	  export WINEDEBUG=-all WINEPREFIX=$$HOME/.wine; \
-	  /usr/lib/wine/wine64 build/test/unittests/iis_injector_tests.exe --gtest_filter="$(TEST_FILTER)"'
+	  /usr/lib/wine/wine64 build/test/unittests/iis_injector_tests.exe --gtest_filter="$(TEST_FILTER)"; \
+	  /usr/lib/wine/wine64 build/bootstrap/ddiisrum-package-selector-test.exe'
 
 .PHONY: artifacts
 artifacts:

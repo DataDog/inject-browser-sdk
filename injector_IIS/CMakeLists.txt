@@ -211,5 +211,10 @@ FetchContent_MakeAvailable(googletest)
 
 if (IIS_BUILD_TESTS)
   enable_testing()
+endif ()
+
+add_subdirectory(bootstrap)
+
+if (IIS_BUILD_TESTS)
   add_subdirectory(test/unittests)
 endif ()

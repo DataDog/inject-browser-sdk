@@ -8,7 +8,7 @@
 
 #include <httpserv.h>
 
-// Keep this shared header identical across repositories with different formatters.
+// This header is the single ABI definition for the bootstrap and optional runtime.
 // clang-format off
 // Shared by the durable IIS bootstrap and the optional RUM package. Keep this
 // layout and calling convention unchanged for ABI version 1.

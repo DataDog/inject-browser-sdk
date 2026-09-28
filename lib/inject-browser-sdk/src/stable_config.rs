@@ -124,7 +124,7 @@ impl StableConfig {
             if (suppress_rum_defaults && key != "DD_RUM_MAJOR_VERSION")
                 || overlay
                     .as_ref()
-                    .is_some_and(|value| value.overrides_stable_key(key))
+                    .is_some_and(|value| return value.overrides_stable_key(key))
             {
                 return None;
             }

@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -159,7 +160,10 @@ class RuntimeState {
       diagnostic(L"Datadog IIS RUM bootstrap: package lacks runtime ABI v1.\n");
       return false;
     }
-    auto create = reinterpret_cast<DatadogRumCreateRuntimeV1Fn>(proc);
+    // GetProcAddress returns FARPROC, whose generic signature differs from this export.
+    DatadogRumCreateRuntimeV1Fn create = nullptr;
+    static_assert(sizeof(create) == sizeof(proc));
+    std::memcpy(&create, &proc, sizeof(create));
     DatadogRumRuntimeV1 created{};
     created.size = sizeof(created);
     created.version = kDatadogRumRuntimeAbiVersion;

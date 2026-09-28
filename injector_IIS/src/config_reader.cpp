@@ -29,6 +29,8 @@ namespace {
 
 // The injector supplies a process-wide baseline. IIS may override it at each application and
 // location through the normal datadogRum section. Read at configuration time, outside DllMain.
+// clang-tidy cannot prove that the standard container's implicit destructor is non-throwing.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 struct BaselineConfig {
   std::optional<bool> enabled;
   std::optional<int> version;
@@ -37,7 +39,7 @@ struct BaselineConfig {
 
 std::optional<std::wstring> read_environment(LPCWSTR name) {
   SetLastError(ERROR_SUCCESS);
-  DWORD size = GetEnvironmentVariableW(name, nullptr, 0);
+  const DWORD size = GetEnvironmentVariableW(name, nullptr, 0);
   if (size == 0) {
     if (GetLastError() == ERROR_ENVVAR_NOT_FOUND) return std::nullopt;
     return std::wstring();  // An explicitly empty variable still overrides the registry.
@@ -45,7 +47,7 @@ std::optional<std::wstring> read_environment(LPCWSTR name) {
   if (size > 32768) return std::wstring();
 
   std::wstring value(size, L'\0');
-  DWORD written = GetEnvironmentVariableW(name, value.data(), size);
+  const DWORD written = GetEnvironmentVariableW(name, value.data(), size);
   if (written >= size) return std::wstring();
   value.resize(written);
   return value;
@@ -130,8 +132,8 @@ BaselineConfig read_baseline(Logger& logger) {
 bool is_schema_default(IAppHostProperty& property) {
   VARIANT value;
   VariantInit(&value);
-  HRESULT hr = property.GetMetadata((BSTR)L"isDefaultValue", &value);
-  bool result = SUCCEEDED(hr) && value.vt == VT_BOOL && value.boolVal == VARIANT_TRUE;
+  const HRESULT hr = property.GetMetadata((BSTR)L"isDefaultValue", &value);
+  const bool result = SUCCEEDED(hr) && value.vt == VT_BOOL && value.boolVal == VARIANT_TRUE;
   VariantClear(&value);
   return result;
 }
@@ -139,7 +141,7 @@ bool is_schema_default(IAppHostProperty& property) {
 std::optional<std::wstring> element_metadata_string(IAppHostElement& element, LPCWSTR name) {
   VARIANT value;
   VariantInit(&value);
-  HRESULT hr = element.GetMetadata((BSTR)name, &value);
+  const HRESULT hr = element.GetMetadata((BSTR)name, &value);
   if (SUCCEEDED(hr) && value.vt == VT_EMPTY) return std::wstring();
   if (FAILED(hr) || value.vt != VT_BSTR || value.bstrVal == nullptr) {
     VariantClear(&value);
@@ -182,8 +184,8 @@ DirectiveScan scan_option_directives(const std::wstring& file) {
 
   bool in_rum = false;
   UINT rum_depth = 0;
-  XmlNodeType node;
-  HRESULT hr;
+  XmlNodeType node{};
+  HRESULT hr = S_OK;
   while ((hr = reader->Read(&node)) == S_OK) {
     if (node != XmlNodeType_Element && node != XmlNodeType_EndElement) continue;
     const wchar_t* name = nullptr;
@@ -229,7 +231,7 @@ BaselineOptionMerge can_merge_baseline_options(IAppHostAdminManager& manager, PC
     if (bstr_path == nullptr) return BaselineOptionMerge::SourceUnavailable;
     const auto release_path = defer([&] { SysFreeString(bstr_path); });
     IAppHostElement* element = nullptr;
-    HRESULT hr = manager.GetAdminSection(section, bstr_path, &element);
+    const HRESULT hr = manager.GetAdminSection(section, bstr_path, &element);
     if (FAILED(hr) || element == nullptr) return BaselineOptionMerge::SourceUnavailable;
     const auto release_element = defer([&] { element->Release(); });
     auto config_source = element_metadata_string(*element, L"configSource");
@@ -314,7 +316,7 @@ std::string make_overlay_json(const int version, bool include_version, std::opti
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
   doc.Accept(writer);
 
-  return std::string(buffer.GetString(), buffer.GetSize());
+  return {buffer.GetString(), buffer.GetSize()};
 }
 
 Snippet* make_snippet(const int version, const std::unordered_map<std::string, std::string>& opts,
@@ -680,7 +682,7 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
   // On make_snippet failure, preserve the existing snippet/tags. Operators
   // prefer continued injection with the last-known-good config over going
   // dark on a broken deploy; the next valid reload replaces it.
-  auto report_invalid = [&](std::string error_tag, const std::string& message, bool clear) {
+  auto report_invalid = [&](std::string error_tag, bool clear, const std::string& message) {
     logger.error(message + (clear ? "; clearing previous config" : "; keeping previous config"));
     datadog::telemetry::counter::increment(
         telemetry::config_invalid,
@@ -689,7 +691,7 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
   };
 
   if (snippet == nullptr) {
-    report_invalid("error_code:alloc", "Failed to create RUM snippet", true);
+    report_invalid("error_code:alloc", true, "Failed to create RUM snippet");
     return;
   }
   if (snippet->error_code == 0 && snippet->rum_enabled == RUM_ENABLED_FALSE) {
@@ -713,8 +715,8 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
   if (snippet->error_code != 0) {
     const int error_code = snippet->error_code;
     const bool clear = config.suppress_stable_options || error_code == 6 || error_code == 10;
-    report_invalid(std::format("error_code:{}", error_code),
-                   std::format("Failed to create RUM snippet (code {})", error_code), clear);
+    report_invalid(std::format("error_code:{}", error_code), clear,
+                   std::format("Failed to create RUM snippet (code {})", error_code));
     snippet_cleanup(snippet);
     return;
   }

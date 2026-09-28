@@ -40,18 +40,25 @@ using ::testing::SaveArg;
 TEST(TestRegisterModule, TestRegistersForBeginRequestAndSendResponseNotifications) {
   MockModule module;
   MockServer server;
+  CGlobalModule* global = nullptr;
+  IHttpModuleFactory* factory = nullptr;
 
   EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(nullptr));
 
   EXPECT_CALL(module, SetGlobalNotifications(
                           _, GL_APPLICATION_START | GL_CONFIGURATION_CHANGE | GL_APPLICATION_STOP))
-      .Times(1);
-  EXPECT_CALL(module, SetRequestNotifications(_, RQ_SEND_RESPONSE | RQ_BEGIN_REQUEST, _)).Times(1);
+      .WillOnce(DoAll(SaveArg<0>(&global), Return(S_OK)));
+  EXPECT_CALL(module, SetRequestNotifications(_, RQ_SEND_RESPONSE | RQ_BEGIN_REQUEST, _))
+      .WillOnce(DoAll(SaveArg<0>(&factory), Return(S_OK)));
   EXPECT_CALL(module, GetId()).Times(1);
 
   auto result = RegisterModule(0, &module, &server);
 
   EXPECT_EQ(result, S_OK);
+  ASSERT_NE(global, nullptr);
+  ASSERT_NE(factory, nullptr);
+  factory->Terminate();
+  global->Terminate();
 }
 
 TEST(TestRegisterModule, TestRegistersValidHTTPModuleFactory) {
@@ -61,11 +68,12 @@ TEST(TestRegisterModule, TestRegistersValidHTTPModuleFactory) {
   EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(nullptr));
 
   IHttpModuleFactory* resultFactory = nullptr;
+  CGlobalModule* global = nullptr;
   ON_CALL(module, SetRequestNotifications)
       .WillByDefault(DoAll(SaveArg<0>(&resultFactory), Return(S_OK)));
 
   EXPECT_CALL(module, SetRequestNotifications).Times(1);
-  EXPECT_CALL(module, SetGlobalNotifications).Times(1);
+  EXPECT_CALL(module, SetGlobalNotifications).WillOnce(DoAll(SaveArg<0>(&global), Return(S_OK)));
   EXPECT_CALL(module, GetId).Times(1);
 
   auto result = RegisterModule(0, &module, &server);
@@ -80,6 +88,8 @@ TEST(TestRegisterModule, TestRegistersValidHTTPModuleFactory) {
   EXPECT_NE(resultFactoryOutput, nullptr);
 
   resultFactory->Terminate();
+  ASSERT_NE(global, nullptr);
+  global->Terminate();
 }
 
 TEST(TestRegisterModule, BootstrapRuntimeExportReturnsOwnedObjects) {

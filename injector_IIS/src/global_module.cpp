@@ -85,7 +85,7 @@ HRESULT GlobalModule::PrepareApp(IHttpApplication* app) {
     return E_POINTER;
   }
 
-  std::lock_guard lock(configurations_mutex_);
+  const std::lock_guard lock(configurations_mutex_);
   if (auto* existing = app_container->GetModuleContext(g_module_id); existing != nullptr) {
     configurations_.insert_or_assign(
         config_path, ConfigurationEntry{app, static_cast<ModuleContext*>(existing)});
@@ -101,7 +101,7 @@ HRESULT GlobalModule::PrepareApp(IHttpApplication* app) {
   ctx->server = server_;
   update_module_context(*ctx, *server_, config_path, *logger_);
 
-  HRESULT hr = app_container->SetModuleContext(ctx.get(), g_module_id);
+  const HRESULT hr = app_container->SetModuleContext(ctx.get(), g_module_id);
   if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
     auto* winner = app_container->GetModuleContext(g_module_id);
     if (winner == nullptr) {
@@ -137,7 +137,7 @@ GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider* provider) {
 
   // IIS owns the context. An older application can stop after a replacement
   // starts with the same config path, so retire only the matching app entry.
-  std::lock_guard lock(configurations_mutex_);
+  const std::lock_guard lock(configurations_mutex_);
   auto it = configurations_.find(cfg_path);
   if (it != configurations_.end() && it->second.application == app) {
     it->second.context = nullptr;
@@ -168,7 +168,7 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
   // skips unrelated leading entries.
   // TODO(@dmehala): Report a telemetry log when ctx is null (stopped app).
   std::wstring_view const change_path(cfg_path);
-  std::lock_guard lock(configurations_mutex_);
+  const std::lock_guard lock(configurations_mutex_);
   for (auto it = configurations_.lower_bound(std::wstring(change_path));
        it != configurations_.end() && std::wstring_view(it->first).starts_with(change_path); ++it) {
     if (it->second.context != nullptr) {

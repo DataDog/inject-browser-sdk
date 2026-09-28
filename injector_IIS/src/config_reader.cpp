@@ -13,22 +13,269 @@
 #include <cassert>
 #include <datadog/telemetry/telemetry.h>
 #include <format>
+#include <optional>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <set>
+#include <shlwapi.h>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <xmllite.h>
 
 namespace datadog::rum {
 namespace {
 
-Snippet* make_snippet(const int version, const std::unordered_map<std::string, std::string>& opts,
-                      Logger& logger) {
+// The injector supplies a process-wide baseline. IIS may override it at each application and
+// location through the normal datadogRum section. Read at configuration time, outside DllMain.
+struct BaselineConfig {
+  bool enabled = true;
+  int version = 6;
+  bool has_enabled = false;
+  bool has_version = false;
+  std::unordered_map<std::string, std::string> sdk_options;
+};
+
+std::optional<std::wstring> read_env_baseline() {
+  SetLastError(ERROR_SUCCESS);
+  DWORD size = GetEnvironmentVariableW(L"DD_IIS_RUM_CONFIG", nullptr, 0);
+  if (size == 0) {
+    if (GetLastError() == ERROR_ENVVAR_NOT_FOUND) return std::nullopt;
+    return std::wstring();  // An explicitly empty variable still overrides the registry.
+  }
+  if (size > 32768) return std::wstring();
+
+  std::wstring value(size, L'\0');
+  DWORD written = GetEnvironmentVariableW(L"DD_IIS_RUM_CONFIG", value.data(), size);
+  if (written >= size) return std::wstring();
+  value.resize(written);
+  return value;
+}
+
+std::optional<std::wstring> read_registry_baseline(Logger& logger) {
+  constexpr auto* key = L"SOFTWARE\\Datadog\\IIS RUM";
+  constexpr auto* name = L"DefaultConfig";
+  constexpr DWORD flags = RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY;
+  DWORD size = 0;
+  DWORD type = 0;
+  LONG result = RegGetValueW(HKEY_LOCAL_MACHINE, key, name, flags, &type, nullptr, &size);
+  if (result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND) return std::nullopt;
+  if (result != ERROR_SUCCESS || size == 0 || size > 65536 || size % sizeof(wchar_t) != 0) {
+    logger.error("Cannot read IIS RUM registry baseline");
+    return std::nullopt;
+  }
+
+  std::wstring value(size / sizeof(wchar_t), L'\0');
+  result = RegGetValueW(HKEY_LOCAL_MACHINE, key, name, flags, &type, value.data(), &size);
+  if (result != ERROR_SUCCESS) {
+    logger.error("Cannot read IIS RUM registry baseline value");
+    return std::nullopt;
+  }
+  const auto terminator = value.find(L'\0');
+  if (terminator == std::wstring::npos) {
+    logger.error("IIS RUM registry baseline is not terminated");
+    return std::nullopt;
+  }
+  value.resize(terminator);
+  return value;
+}
+
+std::optional<BaselineConfig> read_baseline(Logger& logger) {
+  auto raw = read_env_baseline();
+  if (!raw) raw = read_registry_baseline(logger);
+  if (!raw) return std::nullopt;
+
+  std::string json = wstring_to_utf8(*raw);
+  rapidjson::Document doc;
+  doc.Parse(json.data(), json.size());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    logger.error("Invalid IIS RUM baseline JSON");
+    return std::nullopt;
+  }
+
+  BaselineConfig baseline;
+  if (doc.HasMember("enabled")) {
+    if (!doc["enabled"].IsBool()) {
+      logger.error("Invalid IIS RUM baseline enabled value");
+      return std::nullopt;
+    }
+    baseline.enabled = doc["enabled"].GetBool();
+    baseline.has_enabled = true;
+  }
+  if (doc.HasMember("version")) {
+    if (!doc["version"].IsInt() || doc["version"].GetInt() < 5 || doc["version"].GetInt() > 1000) {
+      logger.error("Invalid IIS RUM baseline version value");
+      return std::nullopt;
+    }
+    baseline.version = doc["version"].GetInt();
+    baseline.has_version = true;
+  }
+  if (doc.HasMember("options")) {
+    if (!doc["options"].IsObject()) {
+      logger.error("Invalid IIS RUM baseline options value");
+      return std::nullopt;
+    }
+    for (auto item = doc["options"].MemberBegin(); item != doc["options"].MemberEnd(); ++item) {
+      if (!item->name.IsString() || item->name.GetStringLength() == 0 || !item->value.IsString() ||
+          item->value.GetStringLength() == 0) {
+        logger.error("Invalid IIS RUM baseline option");
+        return std::nullopt;
+      }
+      baseline.sdk_options.insert_or_assign(
+          std::string(item->name.GetString(), item->name.GetStringLength()),
+          std::string(item->value.GetString(), item->value.GetStringLength()));
+    }
+  }
+  return baseline;
+}
+
+// A missing metadata implementation cannot prove that an IIS value came from the schema.
+// In that case the effective IIS value retains precedence over the injector baseline.
+bool is_schema_default(IAppHostProperty& property) {
+  VARIANT value;
+  VariantInit(&value);
+  HRESULT hr = property.GetMetadata((BSTR)L"isDefaultValue", &value);
+  bool result = SUCCEEDED(hr) && value.vt == VT_BOOL && value.boolVal == VARIANT_TRUE;
+  VariantClear(&value);
+  return result;
+}
+
+std::optional<std::wstring> element_metadata_string(IAppHostElement& element, LPCWSTR name) {
+  VARIANT value;
+  VariantInit(&value);
+  HRESULT hr = element.GetMetadata((BSTR)name, &value);
+  if (SUCCEEDED(hr) && value.vt == VT_EMPTY) return std::wstring();
+  if (FAILED(hr) || value.vt != VT_BSTR || value.bstrVal == nullptr) {
+    VariantClear(&value);
+    return std::nullopt;
+  }
+  std::wstring result(value.bstrVal, SysStringLen(value.bstrVal));
+  VariantClear(&value);
+  return result;
+}
+
+enum class DirectiveScan { Clean, Present, Unknown };
+enum class BaselineOptionMerge { Merge, ManualDirective, ExternalSource, SourceUnavailable };
+
+// Read IIS-reported configuration source files only. This catches explicit <clear> and <remove>
+// directives that IIS has already consumed when it returns an effective option collection.
+// Their intent must not be undone by inserting fallback options afterward.
+DirectiveScan scan_option_directives(const std::wstring& file) {
+  WIN32_FILE_ATTRIBUTE_DATA attributes;
+  if (!GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &attributes) ||
+      attributes.nFileSizeHigh != 0 || attributes.nFileSizeLow > 8 * 1024 * 1024) {
+    return DirectiveScan::Unknown;
+  }
+
+  IStream* stream = nullptr;
+  if (FAILED(SHCreateStreamOnFileEx(file.c_str(), STGM_READ | STGM_SHARE_DENY_NONE,
+                                    FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &stream))) {
+    return DirectiveScan::Unknown;
+  }
+  const auto release_stream = defer([&] { stream->Release(); });
+
+  IXmlReader* reader = nullptr;
+  if (FAILED(CreateXmlReader(__uuidof(IXmlReader), reinterpret_cast<void**>(&reader), nullptr))) {
+    return DirectiveScan::Unknown;
+  }
+  const auto release_reader = defer([&] { reader->Release(); });
+  if (FAILED(reader->SetProperty(XmlReaderProperty_DtdProcessing, DtdProcessing_Prohibit)) ||
+      FAILED(reader->SetInput(stream))) {
+    return DirectiveScan::Unknown;
+  }
+
+  bool in_rum = false;
+  UINT rum_depth = 0;
+  XmlNodeType node;
+  HRESULT hr;
+  while ((hr = reader->Read(&node)) == S_OK) {
+    if (node != XmlNodeType_Element && node != XmlNodeType_EndElement) continue;
+    const wchar_t* name = nullptr;
+    UINT length = 0;
+    if (FAILED(reader->GetLocalName(&name, &length))) return DirectiveScan::Unknown;
+    const std::wstring_view local(name, length);
+    UINT depth = 0;
+    if (FAILED(reader->GetDepth(&depth))) return DirectiveScan::Unknown;
+
+    if (node == XmlNodeType_Element) {
+      if (in_rum && depth == rum_depth + 1 && (local == L"clear" || local == L"remove")) {
+        return DirectiveScan::Present;
+      }
+      if (local == L"datadogRum") {
+        in_rum = !reader->IsEmptyElement();
+        if (in_rum) rum_depth = depth;
+      }
+    } else if (in_rum && depth == rum_depth && local == L"datadogRum") {
+      in_rum = false;
+    }
+  }
+  return hr == S_FALSE ? DirectiveScan::Clean : DirectiveScan::Unknown;
+}
+
+// Walk each configuration level to capture source files inherited from above the current path.
+// Any uncertain source suppresses fallback options while leaving IIS's effective manual values
+// untouched. Normal manual <option> additions still merge by key with the baseline.
+BaselineOptionMerge can_merge_baseline_options(IAppHostAdminManager& manager, PCWSTR cfg_path) {
+  constexpr std::wstring_view root = L"MACHINE/WEBROOT/APPHOST";
+  if (cfg_path == nullptr) return BaselineOptionMerge::SourceUnavailable;
+  std::wstring path(cfg_path);
+  if (!std::wstring_view(path).starts_with(root) ||
+      (path.size() > root.size() && path[root.size()] != L'/')) {
+    return BaselineOptionMerge::SourceUnavailable;
+  }
+
+  BSTR section = SysAllocString(L"system.webServer/datadogRum");
+  if (section == nullptr) return BaselineOptionMerge::SourceUnavailable;
+  const auto release_section = defer([&] { SysFreeString(section); });
+  std::set<std::wstring> sources;
+  for (;;) {
+    BSTR bstr_path = SysAllocStringLen(path.data(), static_cast<UINT>(path.size()));
+    if (bstr_path == nullptr) return BaselineOptionMerge::SourceUnavailable;
+    const auto release_path = defer([&] { SysFreeString(bstr_path); });
+    IAppHostElement* element = nullptr;
+    HRESULT hr = manager.GetAdminSection(section, bstr_path, &element);
+    if (FAILED(hr)) {
+      return BaselineOptionMerge::SourceUnavailable;
+    } else {
+      if (element == nullptr) return BaselineOptionMerge::SourceUnavailable;
+      const auto release_element = defer([&] { element->Release(); });
+      auto config_source = element_metadata_string(*element, L"configSource");
+      auto child_source = element_metadata_string(*element, L"childSource");
+      auto source_file = element_metadata_string(*element, L"deepestFileNameSet");
+      if (!config_source || !child_source || !source_file) {
+        return BaselineOptionMerge::SourceUnavailable;
+      }
+      if (!config_source->empty() || !child_source->empty())
+        return BaselineOptionMerge::ExternalSource;
+      if (!source_file->empty()) sources.insert(std::move(*source_file));
+    }
+    if (path.size() == root.size()) break;
+    path.resize(path.find_last_of(L'/'));
+  }
+
+  for (const auto& file : sources) {
+    switch (scan_option_directives(file)) {
+      case DirectiveScan::Present:
+        return BaselineOptionMerge::ManualDirective;
+      case DirectiveScan::Unknown:
+        return BaselineOptionMerge::SourceUnavailable;
+      case DirectiveScan::Clean:
+        break;
+    }
+  }
+  return BaselineOptionMerge::Merge;
+}
+
+std::string make_overlay_json(const int version, bool include_version, std::optional<bool> enabled,
+                              const std::unordered_map<std::string, std::string>& opts,
+                              Logger& logger) {
   rapidjson::Document doc;
   doc.SetObject();
 
   rapidjson::Document::AllocatorType& allocator = doc.GetAllocator();
-  doc.AddMember("majorVersion", version, allocator);
+  if (include_version) doc.AddMember("majorVersion", version, allocator);
+  if (enabled) doc.AddMember("enabled", *enabled, allocator);
 
   rapidjson::Value rum(rapidjson::kObjectType);
   for (const auto& [key, value] : opts) {
@@ -72,14 +319,56 @@ Snippet* make_snippet(const int version, const std::unordered_map<std::string, s
     }
   }
 
-  doc.AddMember("rum", rum, allocator);
+  if (!opts.empty()) doc.AddMember("rum", rum, allocator);
 
   // Convert the document to a JSON string
   rapidjson::StringBuffer buffer;
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
   doc.Accept(writer);
 
-  return snippet_create_from_json(buffer.GetString());
+  return std::string(buffer.GetString(), buffer.GetSize());
+}
+
+Snippet* make_snippet(const int version, const std::unordered_map<std::string, std::string>& opts,
+                      Logger& logger) {
+  const auto json = make_overlay_json(version, true, std::nullopt, opts, logger);
+  return snippet_create_from_json(json.c_str());
+}
+
+std::optional<std::string> read_stable_path_override(LPCWSTR name) {
+  SetLastError(ERROR_SUCCESS);
+  DWORD size = GetEnvironmentVariableW(name, nullptr, 0);
+  if (size == 0) {
+    if (GetLastError() == ERROR_ENVVAR_NOT_FOUND) return std::nullopt;
+    return std::string();
+  }
+  if (size > 32768) return std::string();
+  std::wstring value(size, L'\0');
+  DWORD written = GetEnvironmentVariableW(name, value.data(), size);
+  if (written >= size) return std::string();
+  value.resize(written);
+  return wstring_to_utf8(value);
+}
+
+// Rust stable configuration is immutable after loading. The process keeps the
+// handle until worker exit, so all applications see one consistent snapshot.
+StableConfig* stable_config_for_worker() {
+  static StableConfig* config = [] {
+    const auto local = read_stable_path_override(L"DD_IIS_RUM_STABLE_CONFIG_LOCAL");
+    const auto fleet = read_stable_path_override(L"DD_IIS_RUM_STABLE_CONFIG_FLEET");
+    return stable_config_read_with_paths("browser-sdk", false, local ? local->c_str() : nullptr,
+                                         fleet ? fleet->c_str() : nullptr);
+  }();
+  return config;
+}
+
+void clear_module_snippet(ModuleContext& ctx) {
+  if (ctx.snippet != nullptr) {
+    snippet_cleanup(ctx.snippet);
+    ctx.snippet = nullptr;
+  }
+  ctx.application_id_tag.clear();
+  ctx.remote_config_tag.clear();
 }
 
 IAppHostProperty* get_property(IAppHostElement& xmlElement, std::wstring_view name) {
@@ -195,6 +484,7 @@ std::optional<ServerConfig> read_server_conf(const IHttpServer& server, Logger& 
 }
 
 ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& logger) {
+  auto baseline = read_baseline(logger);
   auto* admin_manager = server.GetAdminManager();
   if (admin_manager == nullptr) {
     logger.debug("Admin manager is null, cannot read RUM config");
@@ -228,15 +518,22 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     logger.debug("Failed to read 'enabled' property value");
     return ReadConfResult::error();
   }
-  if (!enabled_val.boolVal) {
+  const bool enabled_is_default = is_schema_default(*enabled_prop);
+  const bool enabled = baseline && baseline->has_enabled && enabled_is_default
+                           ? baseline->enabled
+                           : enabled_val.boolVal != VARIANT_FALSE;
+  if (!enabled) {
     logger.info("RUM injection disabled for this path");
     return ReadConfResult::absent();
   }
 
   int cfg_version = 6;
+  bool version_overrides_stable = baseline && baseline->has_version;
   auto* version_prop = get_property(*cfg_root_elem, L"version");
   if (version_prop != nullptr) {
     const auto defer_version_prop = defer([&] { version_prop->Release(); });
+    const bool version_is_default = is_schema_default(*version_prop);
+    version_overrides_stable = version_overrides_stable || !version_is_default;
     auto version_val = get_property_value(*version_prop);
     const auto defer_version_val = defer([&] { VariantClear(&version_val); });
     if (version_val.vt == VT_I4) {
@@ -249,6 +546,9 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
                       "using default version {}",
                       version_val.vt, cfg_version));
     }
+    if (baseline && baseline->has_version && version_is_default) cfg_version = baseline->version;
+  } else if (baseline && baseline->has_version) {
+    cfg_version = baseline->version;
   }
 
   auto const injection_strategy = read_enum_property(
@@ -257,6 +557,21 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
 
   // Iterate on the SDK configuration
   std::unordered_map<std::string, std::string> rum_sdk_opts;
+  const auto merge = can_merge_baseline_options(*admin_manager, cfg_path);
+  switch (merge) {
+    case BaselineOptionMerge::Merge:
+      if (baseline) rum_sdk_opts = std::move(baseline->sdk_options);
+      break;
+    case BaselineOptionMerge::ManualDirective:
+      logger.debug("IIS RUM clear/remove directive suppresses SDK option defaults");
+      break;
+    case BaselineOptionMerge::ExternalSource:
+      logger.debug("IIS RUM external config source suppresses SDK option defaults");
+      break;
+    case BaselineOptionMerge::SourceUnavailable:
+      logger.debug("IIS RUM config source cannot be verified; suppressing SDK option defaults");
+      break;
+  }
 
   IAppHostElementCollection* col = nullptr;
   HRESULT const hr_col = cfg_root_elem->get_Collection(&col);
@@ -334,11 +649,16 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
       }
       std::string opt_value = wstring_to_utf8(std::wstring(val_val.bstrVal));
 
-      rum_sdk_opts.emplace(std::move(opt_name), std::move(opt_value));
+      // The effective IIS collection already applies inheritance. Explicit application/location
+      // option values take precedence over process defaults with the same name.
+      rum_sdk_opts.insert_or_assign(std::move(opt_name), std::move(opt_value));
     }
   }
 
-  return ReadConfResult::ok(RumConfig{cfg_version, std::move(rum_sdk_opts), injection_strategy});
+  return ReadConfResult::ok(RumConfig{cfg_version, std::move(rum_sdk_opts), injection_strategy,
+                                      (baseline && baseline->has_enabled) || !enabled_is_default,
+                                      !enabled_is_default, version_overrides_stable,
+                                      merge != BaselineOptionMerge::Merge});
 }
 
 void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR config_path,
@@ -349,36 +669,64 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
     return;
   }
   if (result.status == ReadConfStatus::Absent) {
-    if (ctx.snippet != nullptr) {
-      snippet_cleanup(ctx.snippet);
-      ctx.snippet = nullptr;
-    }
-    ctx.application_id_tag.clear();
-    ctx.remote_config_tag.clear();
+    clear_module_snippet(ctx);
     ctx.injection_strategy = InjectionStrategy::HeadCloseTag;
     return;
   }
 
   auto& config = *result.config;
-  Snippet* snippet = make_snippet(config.version, config.sdk_options, logger);
+  const bool has_overlay = config.enabled_overrides_stable || config.version_overrides_stable ||
+                           !config.sdk_options.empty();
+  const auto overlay =
+      has_overlay ? make_overlay_json(
+                        config.version, config.version_overrides_stable,
+                        config.enabled_overrides_stable ? std::optional<bool>(true) : std::nullopt,
+                        config.sdk_options, logger)
+                  : std::string();
+  StableConfig* stable = stable_config_for_worker();
+  Snippet* snippet = stable == nullptr ? nullptr
+                                       : stable_config_snippet_create_with_options(
+                                             stable, has_overlay ? overlay.c_str() : nullptr,
+                                             config.suppress_stable_options);
 
   // On make_snippet failure, preserve the existing snippet/tags. Operators
   // prefer continued injection with the last-known-good config over going
   // dark on a broken deploy; the next valid reload replaces it.
-  auto report_invalid = [&](std::string error_tag, const std::string& message) {
-    logger.error(message + "; keeping previous config");
+  auto report_invalid = [&](std::string error_tag, const std::string& message, bool clear) {
+    logger.error(message + (clear ? "; clearing previous config" : "; keeping previous config"));
     datadog::telemetry::counter::increment(
         telemetry::config_invalid,
         telemetry::build_tags(std::move(error_tag), ctx.application_id_tag, ctx.remote_config_tag));
+    if (clear) clear_module_snippet(ctx);
   };
 
   if (snippet == nullptr) {
-    report_invalid("error_code:alloc", "Failed to create RUM snippet");
+    report_invalid("error_code:alloc", "Failed to create RUM snippet", true);
     return;
   }
+  if (snippet->error_code == 0 && snippet->rum_enabled == RUM_ENABLED_FALSE) {
+    snippet_cleanup(snippet);
+    clear_module_snippet(ctx);
+    ctx.injection_strategy = config.injection_strategy;
+    logger.info("RUM injection disabled by stable configuration");
+    return;
+  }
+  if (snippet->error_code == 6 && config.enabled_explicit_iis) {
+    // A broken stable source cannot establish its own opt-out. Only an explicit
+    // IIS enablement with fully valid IIS/baseline credentials can bypass it.
+    Snippet* manual = make_snippet(config.version, config.sdk_options, logger);
+    if (manual != nullptr && manual->error_code == 0) {
+      snippet_cleanup(snippet);
+      snippet = manual;
+    } else if (manual != nullptr) {
+      snippet_cleanup(manual);
+    }
+  }
   if (snippet->error_code != 0) {
-    report_invalid(std::format("error_code:{}", snippet->error_code),
-                   std::format("Failed to create RUM snippet: {}", snippet->error_message));
+    const int error_code = snippet->error_code;
+    const bool clear = config.suppress_stable_options || error_code == 6 || error_code == 10;
+    report_invalid(std::format("error_code:{}", error_code),
+                   std::format("Failed to create RUM snippet (code {})", error_code), clear);
     snippet_cleanup(snippet);
     return;
   }
@@ -394,12 +742,15 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
   ctx.injection_strategy = config.injection_strategy;
 
   ctx.application_id_tag.clear();
-  if (auto appIdIt = config.sdk_options.find("applicationId");
-      appIdIt != config.sdk_options.end()) {
+  if (snippet->application_id != nullptr) {
+    ctx.application_id_tag = std::format("application_id:{}", snippet->application_id);
+  } else if (auto appIdIt = config.sdk_options.find("applicationId");
+             appIdIt != config.sdk_options.end()) {
     ctx.application_id_tag = std::format("application_id:{}", appIdIt->second);
   }
 
-  auto rcUsed = config.sdk_options.count("remoteConfigurationId") > 0;
+  auto rcUsed = snippet->remote_configuration_id != nullptr ||
+                config.sdk_options.count("remoteConfigurationId") > 0;
   ctx.remote_config_tag = std::format("remote_config_used:{}", rcUsed);
 }
 

@@ -11,12 +11,15 @@
 // Uses mock IAppHost* COM interfaces to feed configuration, and a mock
 // HTTP response containing an HTML body with <head></head>.
 
+#include "config_reader.h"
 #include "entrypoint.h"
+#include "global_module.h"
 #include "http_module.h"
 #include "module_context.h"
 #include "mocks.h"
 #include "gtest/gtest.h"
 
+#include <cstring>
 #include <map>
 #include <optional>
 #include <string>
@@ -39,6 +42,7 @@ using ::testing::StrEq;
 class MockAppHostProperty : public IAppHostProperty {
   BSTR name_;
   VARIANT value_;
+  bool schema_default_ = false;
 
  public:
   MockAppHostProperty(LPCWSTR name, VARIANT val) : value_(val) { name_ = SysAllocString(name); }
@@ -58,6 +62,11 @@ class MockAppHostProperty : public IAppHostProperty {
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
+  void SetSchemaDefault(bool value) { schema_default_ = value; }
+  void SetValue(VARIANT value) {
+    VariantClear(&value_);
+    value_ = value;
+  }
 
   HRESULT STDMETHODCALLTYPE get_Name(BSTR* pName) override {
     *pName = SysAllocString(name_);
@@ -68,7 +77,13 @@ class MockAppHostProperty : public IAppHostProperty {
   }
   HRESULT STDMETHODCALLTYPE put_Value(VARIANT) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE get_Schema(IAppHostPropertySchema**) override { return E_NOTIMPL; }
-  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR, VARIANT*) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR name, VARIANT* out) override {
+    if (_wcsicmp(name, L"isDefaultValue") != 0) return E_NOTIMPL;
+    VariantInit(out);
+    out->vt = VT_BOOL;
+    out->boolVal = schema_default_ ? VARIANT_TRUE : VARIANT_FALSE;
+    return S_OK;
+  }
   HRESULT STDMETHODCALLTYPE SetMetadata(BSTR, VARIANT) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE get_Exception(IAppHostPropertyException**) override {
     return E_NOTIMPL;
@@ -184,6 +199,7 @@ class MockRumConfigElement : public IAppHostElement {
   MockElementCollection collection_;
   HRESULT collection_result_ = S_OK;
   bool enabled_lookup_fails_ = false;
+  std::wstring source_file_;
 
  public:
   // Configurable constructor.
@@ -210,6 +226,10 @@ class MockRumConfigElement : public IAppHostElement {
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
   void SetCollectionResult(HRESULT hr) { collection_result_ = hr; }
   void SetEnabledPropertyMissing(bool missing) { enabled_lookup_fails_ = missing; }
+  void SetEnabledIsSchemaDefault(bool value) { enabled_prop_.SetSchemaDefault(value); }
+  void SetVersionIsSchemaDefault(bool value) { version_prop_.SetSchemaDefault(value); }
+  void SetVersion(int value) { version_prop_.SetValue(int_variant(value)); }
+  void SetSourceFile(std::wstring path) { source_file_ = std::move(path); }
   void SetInjectionStrategy(InjectionStrategy strategy) {
     injection_strategy_prop_.emplace(L"injectionStrategy", int_variant(static_cast<int>(strategy)));
   }
@@ -226,7 +246,20 @@ class MockRumConfigElement : public IAppHostElement {
   HRESULT STDMETHODCALLTYPE get_ChildElements(IAppHostChildElementCollection**) override {
     return E_NOTIMPL;
   }
-  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR, VARIANT*) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR name, VARIANT* out) override {
+    VariantInit(out);
+    if (_wcsicmp(name, L"deepestFileNameSet") == 0) {
+      out->vt = VT_BSTR;
+      out->bstrVal = SysAllocString(source_file_.c_str());
+      return S_OK;
+    }
+    if (_wcsicmp(name, L"configSource") == 0 || _wcsicmp(name, L"childSource") == 0) {
+      out->vt = VT_BSTR;
+      out->bstrVal = SysAllocString(L"");
+      return S_OK;
+    }
+    return E_NOTIMPL;
+  }
   HRESULT STDMETHODCALLTYPE SetMetadata(BSTR, VARIANT) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE get_Schema(IAppHostElementSchema**) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE GetElementByName(BSTR, IAppHostElement**) override { return E_NOTIMPL; }
@@ -575,6 +608,49 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
   EXPECT_NE(output.find("test-client-token"), std::string::npos);
   EXPECT_NE(output.find("test-service"), std::string::npos);
   EXPECT_NE(output.find("</head>"), std::string::npos);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+TEST(InjectionPipeline, LazyPrepareAppIsIdempotent) {
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  auto* runtime = static_cast<GlobalModule*>(mod.global);
+  MockAppWithContext app;
+  ASSERT_EQ(runtime->PrepareApp(&app), S_OK);
+  auto* first = app.GetModuleContextContainer()->GetModuleContext(nullptr);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(static_cast<ModuleContext*>(first)->snippet, nullptr);
+
+  ASSERT_EQ(runtime->PrepareApp(&app), S_OK);
+  EXPECT_EQ(app.GetModuleContextContainer()->GetModuleContext(nullptr), first);
+  MockAppStartProvider appStart(app);
+  EXPECT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+  EXPECT_EQ(app.GetModuleContextContainer()->GetModuleContext(nullptr), first);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+TEST(InjectionPipeline, LazyPrepareAppUsesRaceWinner) {
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  auto* runtime = static_cast<GlobalModule*>(mod.global);
+  MockAppWithContext app;
+  auto* winner = new ModuleContext;
+  static_cast<MockModuleContextContainer*>(app.GetModuleContextContainer())
+      ->SimulateRaceWith(winner);
+  EXPECT_EQ(runtime->PrepareApp(&app), S_OK);
+  EXPECT_EQ(app.GetModuleContextContainer()->GetModuleContext(nullptr), winner);
 
   mod.factory->Terminate();
   mod.global->Terminate();
@@ -1523,4 +1599,289 @@ TEST(InjectionPipeline, MissingEnabledAttributePreservesExistingConfig) {
 
   mod.factory->Terminate();
   mod.global->Terminate();
+}
+
+class ScopedRumBaselineEnv {
+  std::optional<std::wstring> previous_;
+
+ public:
+  explicit ScopedRumBaselineEnv(LPCWSTR value) {
+    SetLastError(ERROR_SUCCESS);
+    DWORD size = GetEnvironmentVariableW(L"DD_IIS_RUM_CONFIG", nullptr, 0);
+    if (size > 0) {
+      std::wstring old(size, L'\0');
+      old.resize(GetEnvironmentVariableW(L"DD_IIS_RUM_CONFIG", old.data(), size));
+      previous_ = std::move(old);
+    } else if (GetLastError() != ERROR_ENVVAR_NOT_FOUND) {
+      previous_ = L"";
+    }
+    SetEnvironmentVariableW(L"DD_IIS_RUM_CONFIG", value);
+  }
+  ~ScopedRumBaselineEnv() {
+    SetEnvironmentVariableW(L"DD_IIS_RUM_CONFIG", previous_ ? previous_->c_str() : nullptr);
+  }
+};
+
+class ScopedConfigXml {
+  std::wstring path_;
+
+ public:
+  explicit ScopedConfigXml(const char* contents) {
+    wchar_t directory[MAX_PATH]{};
+    wchar_t path[MAX_PATH]{};
+    if (GetTempPathW(MAX_PATH, directory) == 0 ||
+        GetTempFileNameW(directory, L"rum", 0, path) == 0) {
+      return;
+    }
+    path_ = path;
+    HANDLE file = CreateFileW(path_.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+      path_.clear();
+      return;
+    }
+    DWORD written = 0;
+    WriteFile(file, contents, static_cast<DWORD>(strlen(contents)), &written, nullptr);
+    CloseHandle(file);
+  }
+  ~ScopedConfigXml() {
+    if (!path_.empty()) DeleteFileW(path_.c_str());
+  }
+  const std::wstring& path() const { return path_; }
+};
+
+TEST(InjectionPipeline, ManualRemoveClearsPreviouslyCachedCredentials) {
+  ScopedRumBaselineEnv env(
+      L"{\"options\":{\"applicationId\":\"auto-app\",\"clientToken\":\"auto-token\","
+      L"\"site\":\"datadoghq.com\"}}");
+  MockRumConfigElement initial(true, {});
+  MockAdminManager admin(&initial);
+  MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  auto mod = registerModule(server);
+
+  MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  MockAppStartProvider appStart(app);
+  mod.global->OnGlobalApplicationStart(&appStart);
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  ASSERT_NE(ctx, nullptr);
+  ASSERT_NE(ctx->snippet, nullptr);
+
+  ScopedConfigXml source(
+      "<configuration><system.webServer><datadogRum><remove name=\"clientToken\"/>"
+      "<option name=\"applicationId\" value=\"manual-app\"/>"
+      "</datadogRum></system.webServer></configuration>");
+  ASSERT_FALSE(source.path().empty());
+  MockRumConfigElement removed(true, {{L"applicationId", L"manual-app"}});
+  removed.SetSourceFile(source.path());
+  admin.SetConfig(&removed);
+
+  MockConfigChangeProvider change(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  mod.global->OnGlobalConfigurationChange(&change);
+  EXPECT_EQ(ctx->snippet, nullptr);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+TEST(InjectionPipeline, BaselineFillsSchemaDefaults) {
+  ScopedRumBaselineEnv env(
+      L"{\"enabled\":true,\"version\":6,\"options\":{\"applicationId\":\"auto-app\","
+      L"\"clientToken\":\"auto-token\",\"site\":\"datadoghq.com\"}}");
+  MockRumConfigElement config(true, {});
+  config.SetEnabledIsSchemaDefault(true);
+  config.SetVersionIsSchemaDefault(true);
+  MockAdminManager admin(&config);
+  MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+
+  auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  ASSERT_EQ(result.status, ReadConfStatus::Ok);
+  ASSERT_TRUE(result.config);
+  EXPECT_EQ(result.config->version, 6);
+  EXPECT_EQ(result.config->sdk_options.at("applicationId"), "auto-app");
+  EXPECT_EQ(result.config->sdk_options.at("clientToken"), "auto-token");
+}
+
+TEST(InjectionPipeline, OptionsOnlyBaselineDoesNotOverrideStableScalars) {
+  ScopedRumBaselineEnv env(L"{\"options\":{\"applicationId\":\"auto-app\"}}");
+  MockRumConfigElement config(true, {});
+  config.SetEnabledIsSchemaDefault(true);
+  config.SetVersionIsSchemaDefault(true);
+  MockAdminManager admin(&config);
+  MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+
+  auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  ASSERT_EQ(result.status, ReadConfStatus::Ok);
+  ASSERT_TRUE(result.config);
+  EXPECT_FALSE(result.config->enabled_overrides_stable);
+  EXPECT_FALSE(result.config->version_overrides_stable);
+  EXPECT_EQ(result.config->sdk_options.at("applicationId"), "auto-app");
+}
+
+TEST(InjectionPipeline, ManualOptionsOverrideBaselineByKey) {
+  ScopedRumBaselineEnv env(
+      L"{\"enabled\":true,\"version\":6,\"options\":{\"applicationId\":\"auto-app\","
+      L"\"clientToken\":\"auto-token\",\"site\":\"datadoghq.com\"}}");
+  ScopedConfigXml source(
+      "<configuration><system.webServer><datadogRum enabled=\"true\"><option "
+      "name=\"clientToken\" "
+      "value=\"manual-token\"/></datadogRum></system.webServer></configuration>");
+  ASSERT_FALSE(source.path().empty());
+  MockRumConfigElement config(true, {{L"clientToken", L"manual-token"}});
+  config.SetSourceFile(source.path());
+  MockAdminManager admin(&config);
+  MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+
+  auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  ASSERT_EQ(result.status, ReadConfStatus::Ok);
+  ASSERT_TRUE(result.config);
+  EXPECT_EQ(result.config->version, 5);  // Explicit IIS scalar wins over version 6 baseline.
+  EXPECT_EQ(result.config->sdk_options.at("applicationId"), "auto-app");
+  EXPECT_EQ(result.config->sdk_options.at("clientToken"), "manual-token");
+}
+
+TEST(InjectionPipeline, ManualRemoveDoesNotRestoreBaselineOptions) {
+  ScopedRumBaselineEnv env(
+      L"{\"options\":{\"applicationId\":\"auto-app\",\"clientToken\":\"auto-token\"}}");
+  ScopedConfigXml source(
+      "<configuration><system.webServer><datadogRum><remove name=\"clientToken\"/>"
+      "<option name=\"applicationId\" value=\"manual-app\"/>"
+      "</datadogRum></system.webServer></configuration>");
+  ASSERT_FALSE(source.path().empty());
+  MockRumConfigElement config(true, {{L"applicationId", L"manual-app"}});
+  config.SetSourceFile(source.path());
+  MockAdminManager admin(&config);
+  MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+
+  auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  ASSERT_EQ(result.status, ReadConfStatus::Ok);
+  ASSERT_TRUE(result.config);
+  EXPECT_EQ(result.config->sdk_options.at("applicationId"), "manual-app");
+  EXPECT_EQ(result.config->sdk_options.count("clientToken"), 0);
+}
+
+TEST(InjectionPipeline, ManualClearDoesNotRestoreBaselineOptions) {
+  ScopedRumBaselineEnv env(L"{\"options\":{\"applicationId\":\"auto-app\"}}");
+  ScopedConfigXml source(
+      "<configuration><system.webServer><datadogRum><clear/></datadogRum>"
+      "</system.webServer></configuration>");
+  ASSERT_FALSE(source.path().empty());
+  MockRumConfigElement config(true, {});
+  config.SetSourceFile(source.path());
+  MockAdminManager admin(&config);
+  MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+
+  auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  ASSERT_EQ(result.status, ReadConfStatus::Ok);
+  ASSERT_TRUE(result.config);
+  EXPECT_TRUE(result.config->sdk_options.empty());
+}
+
+TEST(InjectionPipeline, MissingSourceFileSuppressesBaselineOptions) {
+  ScopedRumBaselineEnv env(L"{\"options\":{\"clientToken\":\"auto-token\"}}");
+  ScopedConfigXml source("<configuration><system.webServer/></configuration>");
+  ASSERT_FALSE(source.path().empty());
+  ASSERT_TRUE(DeleteFileW(source.path().c_str()));
+  MockRumConfigElement config(true, {{L"applicationId", L"manual-app"}});
+  config.SetSourceFile(source.path());
+  MockAdminManager admin(&config);
+  MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+
+  auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  ASSERT_EQ(result.status, ReadConfStatus::Ok);
+  ASSERT_TRUE(result.config);
+  EXPECT_EQ(result.config->sdk_options.count("clientToken"), 0);
+  EXPECT_EQ(result.config->sdk_options.at("applicationId"), "manual-app");
+}
+
+TEST(InjectionPipeline, AncestorReadFailureSuppressesBaselineOptions) {
+  ScopedRumBaselineEnv env(L"{\"options\":{\"clientToken\":\"auto-token\"}}");
+  MockRumConfigElement config(true, {{L"applicationId", L"manual-app"}});
+  MockAdminManager admin(std::map<std::wstring, MockRumConfigElement*>{
+      {L"MACHINE/WEBROOT/APPHOST/Default Web Site", &config}});
+  MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+
+  auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  ASSERT_EQ(result.status, ReadConfStatus::Ok);
+  ASSERT_TRUE(result.config);
+  EXPECT_EQ(result.config->sdk_options.count("clientToken"), 0);
+  EXPECT_EQ(result.config->sdk_options.at("applicationId"), "manual-app");
+}
+
+TEST(InjectionPipeline, EmptyRumElementDoesNotCaptureUnrelatedClear) {
+  ScopedRumBaselineEnv env(L"{\"options\":{\"applicationId\":\"auto-app\"}}");
+  ScopedConfigXml source(
+      "<configuration><system.webServer><datadogRum/><other><clear/></other>"
+      "</system.webServer></configuration>");
+  ASSERT_FALSE(source.path().empty());
+  MockRumConfigElement config(true, {});
+  config.SetSourceFile(source.path());
+  MockAdminManager admin(&config);
+  MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+
+  auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  ASSERT_EQ(result.status, ReadConfStatus::Ok);
+  ASSERT_TRUE(result.config);
+  EXPECT_EQ(result.config->sdk_options.at("applicationId"), "auto-app");
+}
+
+TEST(InjectionPipeline, ManualDisableOverridesBaseline) {
+  ScopedRumBaselineEnv env(L"{\"enabled\":true,\"options\":{\"applicationId\":\"auto-app\"}}");
+  MockRumConfigElement config(false, {});
+  MockAdminManager admin(&config);
+  MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+
+  auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  EXPECT_EQ(result.status, ReadConfStatus::Absent);
+}
+
+TEST(InjectionPipeline, ExplicitManualEnableOverridesDisabledBaseline) {
+  ScopedRumBaselineEnv env(
+      L"{\"enabled\":false,\"version\":5,\"options\":{\"applicationId\":\"auto-app\"}}");
+  MockRumConfigElement config(true, {{L"clientToken", L"manual-token"}});
+  config.SetVersion(6);  // Same as schema default, but explicitly set by the application.
+  MockAdminManager admin(&config);
+  MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+
+  auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  ASSERT_EQ(result.status, ReadConfStatus::Ok);
+  ASSERT_TRUE(result.config);
+  EXPECT_EQ(result.config->version, 6);
+  EXPECT_EQ(result.config->sdk_options.at("clientToken"), "manual-token");
+}
+
+TEST(InjectionPipeline, InvalidEnvironmentBaselineLeavesManualConfig) {
+  ScopedRumBaselineEnv env(L"");  // Explicit empty value blocks registry fallback.
+  MockRumConfigElement config;
+  MockAdminManager admin(&config);
+  MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+
+  auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  ASSERT_EQ(result.status, ReadConfStatus::Ok);
+  ASSERT_TRUE(result.config);
+  EXPECT_EQ(result.config->version, 5);
+  EXPECT_EQ(result.config->sdk_options.at("applicationId"), "test-app-id");
 }

@@ -18,6 +18,11 @@ namespace datadog::rum {
 // Module identifier retrieve from the module info in register module function.
 extern HTTP_MODULE_ID g_module_id;
 
+// A DLL image can be registered both directly and through the durable bootstrap.
+// Only one registration may own the process-global module ID used for IIS contexts.
+bool try_claim_module_id(HTTP_MODULE_ID id) noexcept;
+void release_module_id_claim() noexcept;
+
 struct ModuleContext final : public IHttpStoredContext {
   Snippet* snippet = nullptr;
   Logger* logger = nullptr;

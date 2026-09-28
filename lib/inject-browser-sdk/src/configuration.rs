@@ -94,6 +94,30 @@ pub struct ConfigurationOverlay {
     pub rum: RumConfiguration,
 }
 
+impl ConfigurationOverlay {
+    /// A present overlay value takes precedence even if the lower-priority
+    /// stable value is malformed. Skip parsing that stable value entirely.
+    pub(crate) fn overrides_stable_key(&self, key: &str) -> bool {
+        return match key {
+            "DD_RUM_MAJOR_VERSION" => self.major_version.is_some(),
+            "DD_RUM_APPLICATION_ID" => self.rum.application_id.is_some(),
+            "DD_RUM_CLIENT_TOKEN" => self.rum.client_token.is_some(),
+            "DD_RUM_SITE" => self.rum.site.is_some(),
+            "DD_RUM_SERVICE" => self.rum.service.is_some(),
+            "DD_RUM_ENVIRONMENT" => self.rum.env.is_some(),
+            "DD_RUM_VERSION" => self.rum.version.is_some(),
+            "DD_RUM_TRACK_USER_INTERACTIONS" => self.rum.track_user_interactions.is_some(),
+            "DD_RUM_TRACK_RESOURCES" => self.rum.track_resources.is_some(),
+            "DD_RUM_TRACK_LONG_TASKS" => self.rum.track_long_tasks.is_some(),
+            "DD_RUM_DEFAULT_PRIVACY_LEVEL" => self.rum.default_privacy_level.is_some(),
+            "DD_RUM_SESSION_SAMPLE_RATE" => self.rum.session_sample_rate.is_some(),
+            "DD_RUM_SESSION_REPLAY_SAMPLE_RATE" => self.rum.session_replay_sample_rate.is_some(),
+            "DD_RUM_REMOTE_CONFIGURATION_ID" => self.rum.remote_configuration_id.is_some(),
+            _ => false,
+        };
+    }
+}
+
 fn overlay_field<T>(dst: &mut Option<T>, src: Option<T>) {
     if src.is_some() {
         *dst = src;

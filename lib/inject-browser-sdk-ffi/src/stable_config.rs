@@ -11,8 +11,8 @@ use core::ffi::{c_char, CStr};
 use core::ptr::null;
 
 use inject_browser_sdk::{
-    error::Error, parse_configuration_overlay, read_stable_config, snippet_from_stable_config,
-    ConfigurationOverlay, StableConfig as CoreStableConfig,
+    error::Error, parse_configuration_overlay, read_stable_config_with_paths,
+    snippet_from_stable_config, ConfigurationOverlay, StableConfig as CoreStableConfig,
 };
 
 use crate::snippet::{Snippet, SnippetInternal};
@@ -216,6 +216,19 @@ pub unsafe extern "C" fn stable_config_read(
     language: *const c_char,
     debug_logs: bool,
 ) -> *mut StableConfig {
+    return stable_config_read_with_paths(language, debug_logs, null(), null());
+}
+
+/// Read stable configuration with optional explicit source paths. A NULL path
+/// uses the normal platform path. IIS uses explicit paths only for isolated
+/// worker-process tests; parsing and priority remain in libdd-library-config.
+#[no_mangle]
+pub unsafe extern "C" fn stable_config_read_with_paths(
+    language: *const c_char,
+    debug_logs: bool,
+    local_path: *const c_char,
+    fleet_path: *const c_char,
+) -> *mut StableConfig {
     if language.is_null() {
         return StableConfigInternal::new(Err(Error::FfiNullPointer(String::from("language"))))
             .into_public_ptr();
@@ -227,8 +240,30 @@ pub unsafe extern "C" fn stable_config_read(
         Err(e) => return StableConfigInternal::new(Err(e)).into_public_ptr(),
     };
 
-    return StableConfigInternal::new(read_stable_config(language_str, debug_logs))
-        .into_public_ptr();
+    let local_path = if local_path.is_null() {
+        None
+    } else {
+        match cstr_to_str(CStr::from_ptr(local_path), "local_path") {
+            Ok(path) => Some(path),
+            Err(e) => return StableConfigInternal::new(Err(e)).into_public_ptr(),
+        }
+    };
+    let fleet_path = if fleet_path.is_null() {
+        None
+    } else {
+        match cstr_to_str(CStr::from_ptr(fleet_path), "fleet_path") {
+            Ok(path) => Some(path),
+            Err(e) => return StableConfigInternal::new(Err(e)).into_public_ptr(),
+        }
+    };
+
+    return StableConfigInternal::new(read_stable_config_with_paths(
+        language_str,
+        debug_logs,
+        local_path,
+        fleet_path,
+    ))
+    .into_public_ptr();
 }
 
 /// Build a snippet from an already-read [`StableConfig`]. Does no file I/O.
@@ -249,6 +284,18 @@ pub unsafe extern "C" fn stable_config_snippet_create(
     config: *const StableConfig,
     json_overlay: *const c_char,
 ) -> *mut Snippet {
+    return stable_config_snippet_create_with_options(config, json_overlay, false);
+}
+
+/// Build from a reusable stable-config handle while optionally suppressing
+/// stable SDK option defaults. `DD_RUM_ENABLED` and `DD_RUM_MAJOR_VERSION`
+/// still participate in resolution. IIS uses this after collection clear/remove.
+#[no_mangle]
+pub unsafe extern "C" fn stable_config_snippet_create_with_options(
+    config: *const StableConfig,
+    json_overlay: *const c_char,
+    suppress_rum_defaults: bool,
+) -> *mut Snippet {
     if config.is_null() {
         return SnippetInternal::new(Err(Error::FfiNullPointer(String::from("config"))))
             .into_public_ptr();
@@ -265,7 +312,9 @@ pub unsafe extern "C" fn stable_config_snippet_create(
 
     let internal = StableConfigInternal::borrow_public_ptr(config);
     let result = match &internal.inner {
-        Ok(stable_config) => stable_config.build_snippet(overlay),
+        Ok(stable_config) => {
+            stable_config.build_snippet_with_options(overlay, suppress_rum_defaults)
+        }
         Err(error) => Err(error.clone()),
     };
     return SnippetInternal::new_from_stable_config(result).into_public_ptr();

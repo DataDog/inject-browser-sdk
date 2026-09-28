@@ -24,6 +24,12 @@ struct RumConfig {  // NOLINT(bugprone-exception-escape)
   // Where the snippet is injected. Configures the module rather than the Browser SDK, so it is
   // read as its own attribute instead of going through the `option` collection.
   InjectionStrategy injection_strategy = InjectionStrategy::HeadCloseTag;
+  // Explicit IIS values and the optional advanced JSON baseline can override
+  // stable-config scalars. Collection directives suppress only SDK defaults.
+  bool enabled_overrides_stable = false;
+  bool enabled_explicit_iis = false;
+  bool version_overrides_stable = false;
+  bool suppress_stable_options = false;
 };
 
 enum class ReadConfStatus {

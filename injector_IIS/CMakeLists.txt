@@ -190,7 +190,10 @@ endif ()
 target_link_libraries(iis_injector-objects
   PUBLIC
   inject_browser_sdk_ffi dd-trace-cpp::static rapidjson
+  advapi32.lib
+  shlwapi.lib
   ws2_32.lib
+  xmllite.lib
   oleaut32.lib)
 
 ## shared lib

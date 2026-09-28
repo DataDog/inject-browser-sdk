@@ -30,16 +30,14 @@ namespace {
 // The injector supplies a process-wide baseline. IIS may override it at each application and
 // location through the normal datadogRum section. Read at configuration time, outside DllMain.
 struct BaselineConfig {
-  bool enabled = true;
-  int version = 6;
-  bool has_enabled = false;
-  bool has_version = false;
+  std::optional<bool> enabled;
+  std::optional<int> version;
   std::unordered_map<std::string, std::string> sdk_options;
 };
 
-std::optional<std::wstring> read_env_baseline() {
+std::optional<std::wstring> read_environment(LPCWSTR name) {
   SetLastError(ERROR_SUCCESS);
-  DWORD size = GetEnvironmentVariableW(L"DD_IIS_RUM_CONFIG", nullptr, 0);
+  DWORD size = GetEnvironmentVariableW(name, nullptr, 0);
   if (size == 0) {
     if (GetLastError() == ERROR_ENVVAR_NOT_FOUND) return std::nullopt;
     return std::wstring();  // An explicitly empty variable still overrides the registry.
@@ -47,7 +45,7 @@ std::optional<std::wstring> read_env_baseline() {
   if (size > 32768) return std::wstring();
 
   std::wstring value(size, L'\0');
-  DWORD written = GetEnvironmentVariableW(L"DD_IIS_RUM_CONFIG", value.data(), size);
+  DWORD written = GetEnvironmentVariableW(name, value.data(), size);
   if (written >= size) return std::wstring();
   value.resize(written);
   return value;
@@ -81,51 +79,48 @@ std::optional<std::wstring> read_registry_baseline(Logger& logger) {
   return value;
 }
 
-std::optional<BaselineConfig> read_baseline(Logger& logger) {
-  auto raw = read_env_baseline();
+BaselineConfig read_baseline(Logger& logger) {
+  auto raw = read_environment(L"DD_IIS_RUM_CONFIG");
   if (!raw) raw = read_registry_baseline(logger);
-  if (!raw) return std::nullopt;
+  if (!raw) return {};
 
   std::string json = wstring_to_utf8(*raw);
   rapidjson::Document doc;
   doc.Parse(json.data(), json.size());
   if (doc.HasParseError() || !doc.IsObject()) {
     logger.error("Invalid IIS RUM baseline JSON");
-    return std::nullopt;
+    return {};
   }
 
   BaselineConfig baseline;
   if (doc.HasMember("enabled")) {
     if (!doc["enabled"].IsBool()) {
       logger.error("Invalid IIS RUM baseline enabled value");
-      return std::nullopt;
+      return {};
     }
     baseline.enabled = doc["enabled"].GetBool();
-    baseline.has_enabled = true;
   }
   if (doc.HasMember("version")) {
     if (!doc["version"].IsInt() || doc["version"].GetInt() < 5 || doc["version"].GetInt() > 1000) {
       logger.error("Invalid IIS RUM baseline version value");
-      return std::nullopt;
+      return {};
     }
     baseline.version = doc["version"].GetInt();
-    baseline.has_version = true;
   }
-  if (doc.HasMember("options")) {
-    if (!doc["options"].IsObject()) {
-      logger.error("Invalid IIS RUM baseline options value");
-      return std::nullopt;
+  if (!doc.HasMember("options")) return baseline;
+  if (!doc["options"].IsObject()) {
+    logger.error("Invalid IIS RUM baseline options value");
+    return {};
+  }
+  for (auto item = doc["options"].MemberBegin(); item != doc["options"].MemberEnd(); ++item) {
+    if (!item->name.IsString() || item->name.GetStringLength() == 0 || !item->value.IsString() ||
+        item->value.GetStringLength() == 0) {
+      logger.error("Invalid IIS RUM baseline option");
+      return {};
     }
-    for (auto item = doc["options"].MemberBegin(); item != doc["options"].MemberEnd(); ++item) {
-      if (!item->name.IsString() || item->name.GetStringLength() == 0 || !item->value.IsString() ||
-          item->value.GetStringLength() == 0) {
-        logger.error("Invalid IIS RUM baseline option");
-        return std::nullopt;
-      }
-      baseline.sdk_options.insert_or_assign(
-          std::string(item->name.GetString(), item->name.GetStringLength()),
-          std::string(item->value.GetString(), item->value.GetStringLength()));
-    }
+    baseline.sdk_options.insert_or_assign(
+        std::string(item->name.GetString(), item->name.GetStringLength()),
+        std::string(item->value.GetString(), item->value.GetStringLength()));
   }
   return baseline;
 }
@@ -235,21 +230,17 @@ BaselineOptionMerge can_merge_baseline_options(IAppHostAdminManager& manager, PC
     const auto release_path = defer([&] { SysFreeString(bstr_path); });
     IAppHostElement* element = nullptr;
     HRESULT hr = manager.GetAdminSection(section, bstr_path, &element);
-    if (FAILED(hr)) {
+    if (FAILED(hr) || element == nullptr) return BaselineOptionMerge::SourceUnavailable;
+    const auto release_element = defer([&] { element->Release(); });
+    auto config_source = element_metadata_string(*element, L"configSource");
+    auto child_source = element_metadata_string(*element, L"childSource");
+    auto source_file = element_metadata_string(*element, L"deepestFileNameSet");
+    if (!config_source || !child_source || !source_file) {
       return BaselineOptionMerge::SourceUnavailable;
-    } else {
-      if (element == nullptr) return BaselineOptionMerge::SourceUnavailable;
-      const auto release_element = defer([&] { element->Release(); });
-      auto config_source = element_metadata_string(*element, L"configSource");
-      auto child_source = element_metadata_string(*element, L"childSource");
-      auto source_file = element_metadata_string(*element, L"deepestFileNameSet");
-      if (!config_source || !child_source || !source_file) {
-        return BaselineOptionMerge::SourceUnavailable;
-      }
-      if (!config_source->empty() || !child_source->empty())
-        return BaselineOptionMerge::ExternalSource;
-      if (!source_file->empty()) sources.insert(std::move(*source_file));
     }
+    if (!config_source->empty() || !child_source->empty())
+      return BaselineOptionMerge::ExternalSource;
+    if (!source_file->empty()) sources.insert(std::move(*source_file));
     if (path.size() == root.size()) break;
     path.resize(path.find_last_of(L'/'));
   }
@@ -267,6 +258,37 @@ BaselineOptionMerge can_merge_baseline_options(IAppHostAdminManager& manager, PC
   return BaselineOptionMerge::Merge;
 }
 
+std::optional<rapidjson::Value> parse_sdk_option(const std::string& key, const std::string& value,
+                                                 rapidjson::Document::AllocatorType& allocator,
+                                                 Logger& logger) {
+  if (key == "majorVersion") return std::nullopt;
+  if (key == "sessionSampleRate" || key == "sessionReplaySampleRate") {
+    try {
+      return rapidjson::Value(std::stod(value));
+    } catch (const std::exception&) {
+      logger.error(std::format("Invalid numeric value '{}' for config key '{}'", value, key));
+      return std::nullopt;
+    }
+  }
+  if (key == "trackResources" || key == "trackLongTasks" || key == "trackUserInteractions") {
+    return rapidjson::Value(value == "true");
+  }
+  if (key != "allowedTracingUrls") return rapidjson::Value(value.c_str(), allocator);
+
+  rapidjson::Value urls(rapidjson::kArrayType);
+  std::stringstream input(value);
+  std::string url;
+  while (std::getline(input, url, ',')) {
+    const auto start = url.find_first_not_of(" \t");
+    if (start == std::string::npos) continue;
+    const auto end = url.find_last_not_of(" \t");
+    url = url.substr(start, end - start + 1);
+    urls.PushBack(rapidjson::Value(url.c_str(), allocator).Move(), allocator);
+  }
+  if (urls.Empty()) return std::nullopt;
+  return urls;
+}
+
 std::string make_overlay_json(const int version, bool include_version, std::optional<bool> enabled,
                               const std::unordered_map<std::string, std::string>& opts,
                               Logger& logger) {
@@ -279,43 +301,9 @@ std::string make_overlay_json(const int version, bool include_version, std::opti
 
   rapidjson::Value rum(rapidjson::kObjectType);
   for (const auto& [key, value] : opts) {
-    if (key == "majorVersion") {
-      continue;
-    }
-    if (key == "sessionSampleRate" || key == "sessionReplaySampleRate") {
-      try {
-        rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
-                      rapidjson::Value(std::stod(value)).Move(), allocator);
-      } catch (const std::exception&) {
-        logger.error(std::format("Invalid numeric value '{}' for config key '{}'", value, key));
-        continue;
-      }
-    } else if (key == "trackResources" || key == "trackLongTasks" ||
-               key == "trackUserInteractions") {
-      auto b = (value == "true");
-      rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(), rapidjson::Value(b).Move(),
-                    allocator);
-    } else if (key == "allowedTracingUrls") {
-      rapidjson::Value urlArray(rapidjson::kArrayType);
-      std::stringstream ss(value);
-      std::string url;
-
-      while (std::getline(ss, url, ',')) {
-        auto start = url.find_first_not_of(" \t");
-        if (start != std::string::npos) {
-          auto end = url.find_last_not_of(" \t");
-          url = url.substr(start, end - start + 1);
-
-          urlArray.PushBack(rapidjson::Value(url.c_str(), allocator).Move(), allocator);
-        }
-      }
-
-      if (!urlArray.Empty()) {
-        rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(), urlArray.Move(), allocator);
-      }
-    } else {
-      rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
-                    rapidjson::Value(value.c_str(), allocator).Move(), allocator);
+    auto option = parse_sdk_option(key, value, allocator, logger);
+    if (option) {
+      rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(), option->Move(), allocator);
     }
   }
 
@@ -336,18 +324,9 @@ Snippet* make_snippet(const int version, const std::unordered_map<std::string, s
 }
 
 std::optional<std::string> read_stable_path_override(LPCWSTR name) {
-  SetLastError(ERROR_SUCCESS);
-  DWORD size = GetEnvironmentVariableW(name, nullptr, 0);
-  if (size == 0) {
-    if (GetLastError() == ERROR_ENVVAR_NOT_FOUND) return std::nullopt;
-    return std::string();
-  }
-  if (size > 32768) return std::string();
-  std::wstring value(size, L'\0');
-  DWORD written = GetEnvironmentVariableW(name, value.data(), size);
-  if (written >= size) return std::string();
-  value.resize(written);
-  return wstring_to_utf8(value);
+  const auto value = read_environment(name);
+  if (!value) return std::nullopt;
+  return wstring_to_utf8(*value);
 }
 
 // Rust stable configuration is immutable after loading. The process keeps the
@@ -422,6 +401,93 @@ Enum read_enum_property(IAppHostElement& element, std::wstring_view name, Enum f
     return fallback;
   }
   return static_cast<Enum>(raw);
+}
+
+// Merge the effective IIS collection over defaults. A collection read failure
+// preserves the caller's last valid configuration; malformed entries are skipped.
+bool read_sdk_options(IAppHostElement& element,
+                      std::unordered_map<std::string, std::string>& rum_sdk_opts, Logger& logger) {
+  IAppHostElementCollection* col = nullptr;
+  HRESULT const hr_col = element.get_Collection(&col);
+  if (FAILED(hr_col)) {
+    logger.error(std::format("Failed to read SDK options collection: {}",
+                             std::system_category().message(hr_col)));
+    return false;
+  }
+  if (col == nullptr) return true;
+  const auto defer_col = defer([&] { col->Release(); });
+
+  DWORD n_elem = 0;
+  HRESULT const hr_count = col->get_Count(&n_elem);
+  if (FAILED(hr_count)) {
+    logger.error(std::format("Failed to read SDK option count: {}",
+                             std::system_category().message(hr_count)));
+    return false;
+  }
+
+  VARIANT item_idx;
+  item_idx.vt = VT_UI4;
+
+  for (DWORD i = 0; i < n_elem; ++i) {
+    item_idx.ulVal = i;
+
+    IAppHostElement* option_element = nullptr;
+    HRESULT const hr_item = col->get_Item(item_idx, &option_element);
+    if (FAILED(hr_item) || option_element == nullptr) {
+      logger.debug(
+          std::format("Skipping config option at index {}: "
+                      "failed to read element",
+                      i));
+      continue;
+    }
+
+    const auto option_element_guard = defer([&] { option_element->Release(); });
+
+    auto* name_property = get_property(*option_element, L"name");
+    if (name_property == nullptr) {
+      logger.debug(
+          std::format("Skipping config option at index {}: "
+                      "missing 'name' attribute",
+                      i));
+      continue;
+    }
+    const auto defer_name_property = defer([&] { name_property->Release(); });
+    auto name_val = get_property_value(*name_property);
+    const auto defer_name_val = defer([&] { VariantClear(&name_val); });
+    if (name_val.vt != VT_BSTR || name_val.bstrVal == nullptr) {
+      logger.debug(
+          std::format("Skipping config option at index {}: "
+                      "'name' is not a string",
+                      i));
+      continue;
+    }
+    std::string opt_name = wstring_to_utf8(std::wstring(name_val.bstrVal));
+
+    auto* value_property = get_property(*option_element, L"value");
+    if (value_property == nullptr) {
+      logger.debug(
+          std::format("Skipping config option '{}': "
+                      "missing 'value' attribute",
+                      opt_name));
+      continue;
+    }
+    const auto defer_value_property = defer([&] { value_property->Release(); });
+    auto val_val = get_property_value(*value_property);
+    const auto defer_val_val = defer([&] { VariantClear(&val_val); });
+    if (val_val.vt != VT_BSTR || val_val.bstrVal == nullptr) {
+      logger.debug(
+          std::format("Skipping config option '{}': "
+                      "'value' is not a string",
+                      opt_name));
+      continue;
+    }
+    std::string opt_value = wstring_to_utf8(std::wstring(val_val.bstrVal));
+
+    // The effective IIS collection already applies inheritance. Explicit application/location
+    // option values take precedence over process defaults with the same name.
+    rum_sdk_opts.insert_or_assign(std::move(opt_name), std::move(opt_value));
+  }
+  return true;
 }
 
 }  // namespace
@@ -519,8 +585,8 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     return ReadConfResult::error();
   }
   const bool enabled_is_default = is_schema_default(*enabled_prop);
-  const bool enabled = baseline && baseline->has_enabled && enabled_is_default
-                           ? baseline->enabled
+  const bool enabled = baseline.enabled && enabled_is_default
+                           ? *baseline.enabled
                            : enabled_val.boolVal != VARIANT_FALSE;
   if (!enabled) {
     logger.info("RUM injection disabled for this path");
@@ -528,7 +594,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   }
 
   int cfg_version = 6;
-  bool version_overrides_stable = baseline && baseline->has_version;
+  bool version_overrides_stable = baseline.version.has_value();
   auto* version_prop = get_property(*cfg_root_elem, L"version");
   if (version_prop != nullptr) {
     const auto defer_version_prop = defer([&] { version_prop->Release(); });
@@ -546,9 +612,9 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
                       "using default version {}",
                       version_val.vt, cfg_version));
     }
-    if (baseline && baseline->has_version && version_is_default) cfg_version = baseline->version;
-  } else if (baseline && baseline->has_version) {
-    cfg_version = baseline->version;
+    if (baseline.version && version_is_default) cfg_version = *baseline.version;
+  } else if (baseline.version) {
+    cfg_version = *baseline.version;
   }
 
   auto const injection_strategy = read_enum_property(
@@ -560,7 +626,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   const auto merge = can_merge_baseline_options(*admin_manager, cfg_path);
   switch (merge) {
     case BaselineOptionMerge::Merge:
-      if (baseline) rum_sdk_opts = std::move(baseline->sdk_options);
+      rum_sdk_opts = std::move(baseline.sdk_options);
       break;
     case BaselineOptionMerge::ManualDirective:
       logger.debug("IIS RUM clear/remove directive suppresses SDK option defaults");
@@ -573,90 +639,12 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
       break;
   }
 
-  IAppHostElementCollection* col = nullptr;
-  HRESULT const hr_col = cfg_root_elem->get_Collection(&col);
-  if (FAILED(hr_col)) {
-    logger.error(std::format("Failed to read SDK options collection: {}",
-                             std::system_category().message(hr_col)));
+  if (!read_sdk_options(*cfg_root_elem, rum_sdk_opts, logger)) {
     return ReadConfResult::error();
-  }
-  if (col != nullptr) {
-    const auto defer_col = defer([&] { col->Release(); });
-
-    DWORD n_elem = 0;
-    HRESULT const hr_count = col->get_Count(&n_elem);
-    if (FAILED(hr_count)) {
-      logger.error(std::format("Failed to read SDK option count: {}",
-                               std::system_category().message(hr_count)));
-      return ReadConfResult::error();
-    }
-
-    VARIANT item_idx;
-    item_idx.vt = VT_UI4;
-
-    for (DWORD i = 0; i < n_elem; ++i) {
-      item_idx.ulVal = i;
-
-      IAppHostElement* option_element = nullptr;
-      HRESULT const hr_item = col->get_Item(item_idx, &option_element);
-      if (FAILED(hr_item) || option_element == nullptr) {
-        logger.debug(
-            std::format("Skipping config option at index {}: "
-                        "failed to read element",
-                        i));
-        continue;
-      }
-
-      const auto option_element_guard = defer([&] { option_element->Release(); });
-
-      auto* name_property = get_property(*option_element, L"name");
-      if (name_property == nullptr) {
-        logger.debug(
-            std::format("Skipping config option at index {}: "
-                        "missing 'name' attribute",
-                        i));
-        continue;
-      }
-      const auto defer_name_property = defer([&] { name_property->Release(); });
-      auto name_val = get_property_value(*name_property);
-      const auto defer_name_val = defer([&] { VariantClear(&name_val); });
-      if (name_val.vt != VT_BSTR || name_val.bstrVal == nullptr) {
-        logger.debug(
-            std::format("Skipping config option at index {}: "
-                        "'name' is not a string",
-                        i));
-        continue;
-      }
-      std::string opt_name = wstring_to_utf8(std::wstring(name_val.bstrVal));
-
-      auto* value_property = get_property(*option_element, L"value");
-      if (value_property == nullptr) {
-        logger.debug(
-            std::format("Skipping config option '{}': "
-                        "missing 'value' attribute",
-                        opt_name));
-        continue;
-      }
-      const auto defer_value_property = defer([&] { value_property->Release(); });
-      auto val_val = get_property_value(*value_property);
-      const auto defer_val_val = defer([&] { VariantClear(&val_val); });
-      if (val_val.vt != VT_BSTR || val_val.bstrVal == nullptr) {
-        logger.debug(
-            std::format("Skipping config option '{}': "
-                        "'value' is not a string",
-                        opt_name));
-        continue;
-      }
-      std::string opt_value = wstring_to_utf8(std::wstring(val_val.bstrVal));
-
-      // The effective IIS collection already applies inheritance. Explicit application/location
-      // option values take precedence over process defaults with the same name.
-      rum_sdk_opts.insert_or_assign(std::move(opt_name), std::move(opt_value));
-    }
   }
 
   return ReadConfResult::ok(RumConfig{cfg_version, std::move(rum_sdk_opts), injection_strategy,
-                                      (baseline && baseline->has_enabled) || !enabled_is_default,
+                                      baseline.enabled.has_value() || !enabled_is_default,
                                       !enabled_is_default, version_overrides_stable,
                                       merge != BaselineOptionMerge::Merge});
 }

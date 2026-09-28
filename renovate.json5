@@ -1,6 +1,5 @@
 {
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
-  extends: ['config:recommended'],
   // Adapted from dd-repo-tools' shared/windows-image/renovate.json5. Keep the
   // manager local so the existing updater need not read another private repo.
   customManagers: [
@@ -14,6 +13,12 @@
     },
   ],
   packageRules: [
+    {
+      // Dependabot owns Actions updates; keep other managers available to
+      // the existing ADMS Renovate jobs (including Cargo security updates).
+      matchManagers: ['github-actions'],
+      enabled: false,
+    },
     {
       matchManagers: ['custom.regex'],
       matchDepNames: [

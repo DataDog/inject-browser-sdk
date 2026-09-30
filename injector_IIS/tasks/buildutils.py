@@ -17,14 +17,19 @@ from .utils import parse_version
 
 
 def do_get_build_env(ctx, vstudio_root=None):
-    numeric, pre = parse_version()
-    build_maj, build_min, build_patch = numeric.split(".")
+    build_maj, build_min, pre = parse_version()
+    if os.environ.get("IIS_RELEASE_BUILD") == "1":
+        pre = ""
+    # The BUILD slot of the MSI ProductVersion is CI_PIPELINE_IID at build
+    # time. Locally that env var is unset, so we fall back to "0".
+    build_build = os.environ.get("CI_PIPELINE_IID", "0")
+    numeric = f"{build_maj}.{build_min}.{build_build}"
     fullver = f"{numeric}-{pre}" if pre else numeric
 
     env = {
         "MAJ_VER": build_maj,
         "MIN_VER": build_min,
-        "PATCH_VER": build_patch,
+        "BUILD_VER": build_build,
         "VERSION_PRE": pre,
     }
 

@@ -336,10 +336,10 @@ promote_injector_IIS_release_candidate:
   tags: ["arch:amd64"]
   image: $IIS_AGENT_DEPLOY_IMAGE
   when: manual
+  needs: ["manual_injector_IIS_release"]
   variables:
-    RC_COMMIT: ""
     ARCH: x64
     S3_BUCKET: rum-auto-instrumentation
   script:
-    - aws s3 cp --region us-east-1 --sse AES256 --acl public-read s3://$S3_BUCKET/iis/$RC_COMMIT/$ARCH/injector_IIS.msi injector_IIS.msi
+    - aws s3 cp --region us-east-1 --sse AES256 --acl public-read s3://$S3_BUCKET/iis/$CI_COMMIT_SHORT_SHA/$ARCH/injector_IIS.msi injector_IIS.msi
     - aws s3 cp --region us-east-1 --sse AES256 --acl public-read injector_IIS.msi s3://$S3_BUCKET/iis/latest/$ARCH/

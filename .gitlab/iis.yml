@@ -37,6 +37,7 @@ variables:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
+      -e CARGO_HOME=c:\ci-cargo
       -e BUILD_OUTDIR="c:\mnt\build-out\${CI_JOB_ID}"
       -e BUILD_CONFIGURATION=$BUILD_CONFIGURATION
       -e ARCH=$ARCH
@@ -103,6 +104,7 @@ injector_IIS_unit_test:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
+      -e CARGO_HOME=c:\ci-cargo
       ${WINDOWS_BUILD_IMAGE}
       powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
     - If ($lastExitCode -ne 0) { exit $lastExitCode }
@@ -118,6 +120,7 @@ injector_IIS_unit_test_asan:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
+      -e CARGO_HOME=c:\ci-cargo
       ${WINDOWS_BUILD_IMAGE}
       powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
       -Preset ci-native-asan -BuildDir build-asan -BuildType Debug
@@ -241,6 +244,7 @@ manual_go_e2e_deps:
     when:
       - script_failure
   image: $E2E_LINUX_IMAGE
+  timeout: 1h30m
   variables:
     AWS_SSM_PREFIX: "ci.inject-browser-sdk."
     KEY_PAIR_NAME: "ci.inject-browser-sdk"
@@ -274,10 +278,11 @@ manual_go_e2e_deps:
     ## the msi will have a version-specific name, but there should be only one.
     ## copy that to the filename expected by the test.
     - cp ${ARTIFACTS_DIR}/*.msi injector_IIS/test/e2e_tests/test_assets/injector_IIS.msi
+    - cp ${ARTIFACTS_DIR}/injector_IIS.version injector_IIS/test/e2e_tests/test_assets/injector_IIS.version
     # Both suites provision their own Windows VM and install IIS on it, which alone takes upwards of
     # ten minutes each: a green run sits at around 24 of the 30 minutes this used to allow, so a
     # slower than usual VM setup timed the whole binary out rather than failing anything.
-    - cd injector_IIS/test/e2e_tests && go test -v -timeout 45m
+    - cd injector_IIS/test/e2e_tests && go test -v -timeout 60m
   artifacts:
     expire_in: 2 weeks
     when: always

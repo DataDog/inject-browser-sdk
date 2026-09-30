@@ -49,12 +49,26 @@ cmake --build build -j
 ## Installer
 Native Windows installer with [WiX Toolset v3.11](https://wixtoolset.org/releases/v3.11/stable).
 
-Build from Windows with [WiX Toolset Build Tools](https://marketplace.visualstudio.com/items?itemName=WixToolset.WiXToolset). Build with
-Visual Studio 2019 Community or:
+Build locally with Visual Studio C++ tools, CMake, Rust and WiX 3.x installed:
 
-```bash
-MSBuild.exe injector_IIS\injector_IIS_installer\injector_IIS_installer.wixproj /p:InjectorDll=${pwd}\injector_IIS\build\iis_injector.dll
+```powershell
+.\injector_IIS\scripts\build-msi.ps1
+# Optional local BUILD override; PatchVer remains a compatibility alias.
+.\injector_IIS\scripts\build-msi.ps1 -BuildVer 123
 ```
+
+`VERSION` holds the marketing version (`1.3-dev`). The MSI ProductVersion and
+DLL file version are `MAJ.MIN.BUILD.0`, where BUILD is `CI_PIPELINE_IID`, or `0`
+when unset or empty. Major/minor must be decimal values from 0 to 255; BUILD
+must be from 0 to 65535. Invalid values fail before building. Each new GitLab
+pipeline gets a greater IID, allowing upgrades within the same marketing
+version; retrying a job in the same pipeline keeps the same ProductVersion.
+Plan a bounded BUILD counter before the project's pipeline IID exceeds 65535.
+
+The installer display name retains `-dev`; setting `IIS_RELEASE_BUILD=1`
+removes the suffix without changing the numeric version. The build checks the
+actual MSI ProductVersion and DLL metadata for equality before publishing
+artifacts, and exports `injector_IIS.version` for install/upgrade E2E checks.
 
 # Powershell Module
 

@@ -32,7 +32,27 @@ def parse_version(version_file=_VERSION_FILE):
     """
     with open(version_file) as f:
         raw = f.read().strip()
-    m = re.match(r'^(\d+)\.(\d+)(?:-(.+))?$', raw)
+    m = re.fullmatch(r'([0-9]+)\.([0-9]+)(?:-(.+))?', raw)
     if m:
         return m.group(1), m.group(2), m.group(3) or ""
     raise Exception(f"Could not parse version from {version_file}: '{raw}'")
+
+
+def version_field(value, name, maximum):
+    """Validate and normalize a decimal Windows Installer version field."""
+    if not re.fullmatch(r"[0-9]+", value):
+        raise ValueError(f"{name} must contain decimal digits, got {value!r}")
+    value = value.lstrip("0") or "0"
+    if len(value) > len(str(maximum)) or int(value) > maximum:
+        raise ValueError(f"{name}={value} exceeds the Windows Installer limit ({maximum})")
+    return value
+
+
+def build_version(version_file=_VERSION_FILE):
+    major, minor, pre = parse_version(version_file)
+    major = version_field(major, "MAJ_VER", 255)
+    minor = version_field(minor, "MIN_VER", 255)
+    build = version_field(os.environ.get("CI_PIPELINE_IID") or "0", "CI_PIPELINE_IID", 65535)
+    if os.environ.get("IIS_RELEASE_BUILD") == "1":
+        pre = ""
+    return major, minor, build, pre

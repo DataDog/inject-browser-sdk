@@ -7,41 +7,7 @@
 
 cmake_minimum_required(VERSION 3.24)
 
-# IIS injector version: marketing version (MAJ.MIN, optionally -prerelease)
-# comes from injector_IIS/VERSION; the MSI ProductVersion BUILD slot is
-# CI_PIPELINE_IID at build time (0 locally), so dev builds upgrade cleanly.
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" _IIS_VERSION_RAW)
-string(STRIP "${_IIS_VERSION_RAW}" _IIS_VERSION_RAW)
-if(_IIS_VERSION_RAW MATCHES "^([0-9]+)\\.([0-9]+)(-(.+))?$")
-  set(IIS_INJECTOR_VERSION_MAJ "${CMAKE_MATCH_1}")
-  set(IIS_INJECTOR_VERSION_MIN "${CMAKE_MATCH_2}")
-  set(IIS_INJECTOR_VERSION_PRE "${CMAKE_MATCH_4}")
-else()
-  message(FATAL_ERROR "Could not parse version from injector_IIS/VERSION: '${_IIS_VERSION_RAW}' (expected MAJ.MIN or MAJ.MIN-PRE)")
-endif()
-unset(_IIS_VERSION_RAW)
-
-if("$ENV{IIS_RELEASE_BUILD}" STREQUAL "1")
-  set(IIS_INJECTOR_VERSION_PRE "")
-endif()
-
-if(DEFINED ENV{CI_PIPELINE_IID} AND NOT "$ENV{CI_PIPELINE_IID}" STREQUAL "")
-  set(IIS_INJECTOR_VERSION_BUILD "$ENV{CI_PIPELINE_IID}")
-else()
-  set(IIS_INJECTOR_VERSION_BUILD "0")
-endif()
-
-# Windows Installer caps each ProductVersion field at 65535; fail loudly here
-# rather than letting WiX produce an invalid MSI when the pipeline counter
-# crosses the threshold.
-if(NOT IIS_INJECTOR_VERSION_BUILD MATCHES "^[0-9]+$")
-  message(FATAL_ERROR "CI_PIPELINE_IID must be an integer, got '${IIS_INJECTOR_VERSION_BUILD}'")
-endif()
-if(IIS_INJECTOR_VERSION_BUILD GREATER 65535)
-  message(FATAL_ERROR "CI_PIPELINE_IID=${IIS_INJECTOR_VERSION_BUILD} exceeds the Windows Installer ProductVersion field limit (65535). Switch the BUILD slot to a bounded counter before pipelines cross this threshold.")
-endif()
-
-set(IIS_INJECTOR_VERSION "${IIS_INJECTOR_VERSION_MAJ}.${IIS_INJECTOR_VERSION_MIN}.${IIS_INJECTOR_VERSION_BUILD}")
+include(cmake/version.cmake)
 
 project(iis-injector LANGUAGES CXX VERSION ${IIS_INJECTOR_VERSION})
 

@@ -14,8 +14,8 @@ use inject_browser_sdk::{
     error::Error,
     parse_configuration_overlay,
     platform::{FLEET_STABLE_CONFIGURATION_PATH, LOCAL_STABLE_CONFIGURATION_PATH},
-    read_stable_config, read_stable_config_from_paths, snippet_from_stable_config,
-    ConfigurationOverlay, StableConfig as CoreStableConfig,
+    read_stable_config_from_paths, snippet_from_stable_config, ConfigurationOverlay,
+    StableConfig as CoreStableConfig,
 };
 
 use crate::snippet::{Snippet, SnippetInternal};
@@ -236,19 +236,7 @@ pub unsafe extern "C" fn stable_config_read(
     language: *const c_char,
     debug_logs: bool,
 ) -> *mut StableConfig {
-    if language.is_null() {
-        return StableConfigInternal::new(Err(Error::FfiNullPointer(String::from("language"))))
-            .into_public_ptr();
-    }
-
-    let language_cstr = CStr::from_ptr(language);
-    let language_str = match cstr_to_str(language_cstr, "language") {
-        Ok(s) => s,
-        Err(e) => return StableConfigInternal::new(Err(e)).into_public_ptr(),
-    };
-
-    return StableConfigInternal::new(read_stable_config(language_str, debug_logs))
-        .into_public_ptr();
+    return stable_config_read_from_paths(language, debug_logs, null(), null());
 }
 
 /// Variant of [`stable_config_read`] that reads the configuration files from

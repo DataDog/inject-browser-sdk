@@ -225,9 +225,9 @@ TEST(TelemetryGuard, EmittingBeforeInitIsSafe) {
 // Tier A: make_config_json
 // ---------------------------------------------------------------------------
 
-TEST(MakeConfigJson, OmitsMajorVersionAndEnabledWhenDisengaged) {
+TEST(MakeConfigJson, OmitsMajorVersionWhenDisengaged) {
   NullLogger logger;
-  const auto doc = parse(make_config_json(std::nullopt, std::nullopt, {}, logger));
+  const auto doc = parse(make_config_json(std::nullopt, {}, logger));
 
   EXPECT_FALSE(doc.HasMember("majorVersion"))
       << "an omitted key is what lets stable config supply the value";
@@ -236,14 +236,13 @@ TEST(MakeConfigJson, OmitsMajorVersionAndEnabledWhenDisengaged) {
   EXPECT_TRUE(doc["rum"].IsObject());
 }
 
-TEST(MakeConfigJson, EmitsMajorVersionAndEnabledWhenEngaged) {
+TEST(MakeConfigJson, EmitsMajorVersionWhenEngaged) {
   NullLogger logger;
-  const auto doc = parse(make_config_json(5, false, {}, logger));
+  const auto doc = parse(make_config_json(5, {}, logger));
 
   ASSERT_TRUE(doc.HasMember("majorVersion"));
   EXPECT_EQ(doc["majorVersion"].GetInt(), 5);
-  ASSERT_TRUE(doc.HasMember("enabled"));
-  EXPECT_FALSE(doc["enabled"].GetBool());
+  EXPECT_FALSE(doc.HasMember("enabled"));
 }
 
 TEST(MakeConfigJson, TopLevelKeysStayWithinTheOverlaySchema) {
@@ -251,9 +250,9 @@ TEST(MakeConfigJson, TopLevelKeysStayWithinTheOverlaySchema) {
   // reject the whole overlay, so guard the emitted shape.
   NullLogger logger;
   const Opts opts{{"applicationId", "app"}, {"clientToken", "tok"}, {"majorVersion", "9"}};
-  const auto doc = parse(make_config_json(6, true, opts, logger));
+  const auto doc = parse(make_config_json(6, opts, logger));
 
-  const std::set<std::string> allowed{"majorVersion", "enabled", "rum"};
+  const std::set<std::string> allowed{"majorVersion", "rum"};
   for (auto it = doc.MemberBegin(); it != doc.MemberEnd(); ++it) {
     EXPECT_TRUE(allowed.count(it->name.GetString()) > 0)
         << "unexpected top-level key: " << it->name.GetString();
@@ -265,7 +264,7 @@ TEST(MakeConfigJson, TopLevelKeysStayWithinTheOverlaySchema) {
 TEST(MakeConfigJson, SampleRatesBecomeNumbers) {
   NullLogger logger;
   const Opts opts{{"sessionSampleRate", "12.5"}, {"sessionReplaySampleRate", "0"}};
-  const auto doc = parse(make_config_json(std::nullopt, std::nullopt, opts, logger));
+  const auto doc = parse(make_config_json(std::nullopt, opts, logger));
 
   ASSERT_TRUE(doc["rum"]["sessionSampleRate"].IsNumber());
   EXPECT_DOUBLE_EQ(doc["rum"]["sessionSampleRate"].GetDouble(), 12.5);
@@ -275,7 +274,7 @@ TEST(MakeConfigJson, SampleRatesBecomeNumbers) {
 TEST(MakeConfigJson, UnparseableSampleRateIsDropped) {
   NullLogger logger;
   const Opts opts{{"sessionSampleRate", "not-a-number"}, {"applicationId", "app"}};
-  const auto doc = parse(make_config_json(std::nullopt, std::nullopt, opts, logger));
+  const auto doc = parse(make_config_json(std::nullopt, opts, logger));
 
   EXPECT_FALSE(doc["rum"].HasMember("sessionSampleRate"))
       << "a garbage rate is dropped and logged, not passed through as a string";
@@ -288,7 +287,7 @@ TEST(MakeConfigJson, TrackFlagsAreBooleansComparedAgainstTheLiteralTrue) {
   NullLogger logger;
   const Opts opts{
       {"trackResources", "1"}, {"trackLongTasks", "true"}, {"trackUserInteractions", "True"}};
-  const auto doc = parse(make_config_json(std::nullopt, std::nullopt, opts, logger));
+  const auto doc = parse(make_config_json(std::nullopt, opts, logger));
 
   ASSERT_TRUE(doc["rum"]["trackResources"].IsBool());
   EXPECT_FALSE(doc["rum"]["trackResources"].GetBool());
@@ -299,7 +298,7 @@ TEST(MakeConfigJson, TrackFlagsAreBooleansComparedAgainstTheLiteralTrue) {
 TEST(MakeConfigJson, AllowedTracingUrlsSplitsAndTrims) {
   NullLogger logger;
   const Opts opts{{"allowedTracingUrls", "a, b ,c"}};
-  const auto doc = parse(make_config_json(std::nullopt, std::nullopt, opts, logger));
+  const auto doc = parse(make_config_json(std::nullopt, opts, logger));
 
   ASSERT_TRUE(doc["rum"]["allowedTracingUrls"].IsArray());
   const auto& urls = doc["rum"]["allowedTracingUrls"];
@@ -313,7 +312,7 @@ TEST(MakeConfigJson, UnknownKeysPassThroughAsStrings) {
   // Forward-compat with new Browser SDK init options.
   NullLogger logger;
   const Opts opts{{"someFutureOption", "value"}};
-  const auto doc = parse(make_config_json(std::nullopt, std::nullopt, opts, logger));
+  const auto doc = parse(make_config_json(std::nullopt, opts, logger));
 
   EXPECT_STREQ(doc["rum"]["someFutureOption"].GetString(), "value");
 }

@@ -10,9 +10,8 @@
 #include "module_context.h"
 #include "telemetry.h"
 
-#include <cassert>
-#include <datadog/telemetry/telemetry.h>
 #include <format>
+#include <memory>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -43,6 +42,23 @@ VARIANT get_property_value(IAppHostProperty& property) {
     VariantClear(&v);
   }
   return v;
+}
+
+std::optional<std::string> read_string_property(IAppHostElement& element, std::wstring_view name,
+                                                Logger& logger) {
+  auto* property = get_property(element, name);
+  if (property == nullptr) {
+    logger.debug(std::format("Missing '{}' attribute", wstring_to_utf8(std::wstring(name))));
+    return std::nullopt;
+  }
+  const auto defer_property = defer([&] { property->Release(); });
+  auto value = get_property_value(*property);
+  const auto defer_value = defer([&] { VariantClear(&value); });
+  if (value.vt != VT_BSTR || value.bstrVal == nullptr) {
+    logger.debug(std::format("'{}' is not a string", wstring_to_utf8(std::wstring(name))));
+    return std::nullopt;
+  }
+  return wstring_to_utf8(std::wstring(value.bstrVal));
 }
 
 // Reads an `enum`-typed attribute, which IIS hands back as an integer. Returns `fallback` when the
@@ -93,7 +109,7 @@ std::pair<const char*, const char*> stable_config_paths() {
   return {g_stable_config_local_path, g_stable_config_fleet_path};
 }
 
-std::string make_config_json(std::optional<int> major_version, std::optional<bool> enabled,
+std::string make_config_json(std::optional<int> major_version,
                              const std::unordered_map<std::string, std::string>& opts,
                              Logger& logger) {
   rapidjson::Document doc;
@@ -102,9 +118,6 @@ std::string make_config_json(std::optional<int> major_version, std::optional<boo
   rapidjson::Document::AllocatorType& allocator = doc.GetAllocator();
   if (major_version.has_value()) {
     doc.AddMember("majorVersion", *major_version, allocator);
-  }
-  if (enabled.has_value()) {
-    doc.AddMember("enabled", *enabled, allocator);
   }
 
   rapidjson::Value rum(rapidjson::kObjectType);
@@ -223,7 +236,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   auto* admin_manager = server.GetAdminManager();
   if (admin_manager == nullptr) {
     logger.debug("Admin manager is null, cannot read RUM config");
-    return ReadConfResult::error();
+    return {ReadConfStatus::Error};
   }
 
   IAppHostElement* cfg_root_elem = nullptr;
@@ -233,12 +246,12 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     logger.debug(std::format("Failed to read datadogRum config section: {}",
                              std::system_category().message(res)));
     if (res == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
-      return ReadConfResult::not_found();
+      return {ReadConfStatus::NotFound};
     }
-    return ReadConfResult::error();
+    return {ReadConfStatus::Error};
   }
   if (cfg_root_elem == nullptr) {
-    return ReadConfResult::error();
+    return {ReadConfStatus::Error};
   }
 
   const auto defer_root = defer([&] { cfg_root_elem->Release(); });
@@ -248,7 +261,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     // get_property conflates "attribute missing" with COM failure; treat as
     // Error so a transient failure can't silently wipe injection.
     logger.debug("Failed to read 'enabled' property");
-    return ReadConfResult::error();
+    return {ReadConfStatus::Error};
   }
 
   const auto defer_enabled_prop = defer([&] { enabled_prop->Release(); });
@@ -257,11 +270,11 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   const auto defer_enabled_val = defer([&] { VariantClear(&enabled_val); });
   if (enabled_val.vt != VT_BOOL) {
     logger.debug("Failed to read 'enabled' property value");
-    return ReadConfResult::error();
+    return {ReadConfStatus::Error};
   }
   if (!enabled_val.boolVal) {
     logger.info("RUM injection disabled for this path");
-    return ReadConfResult::disabled();
+    return {ReadConfStatus::Disabled};
   }
 
   // Left unset when the section carries no usable version, so the value can
@@ -280,17 +293,17 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     const HRESULT hr_default = version_prop->GetMetadata((BSTR)L"isDefaultValue", &is_default);
     if (FAILED(hr_default) || is_default.vt != VT_BOOL) {
       logger.debug("Failed to read version default metadata");
-      return ReadConfResult::error();
+      return {ReadConfStatus::Error};
     }
-    if (is_default.boolVal != VARIANT_FALSE) {
-      // Leave majorVersion unset so stable configuration can supply it.
-    } else if (version_val.vt == VT_I4) {
-      cfg_version = version_val.lVal;
-    } else if (version_val.vt == VT_I2) {
-      cfg_version = version_val.iVal;
-    } else if (version_val.vt != VT_EMPTY) {
-      logger.info(std::format("Unexpected version type (vt={}), leaving majorVersion unset",
-                              version_val.vt));
+    if (is_default.boolVal == VARIANT_FALSE) {
+      if (version_val.vt == VT_I4) {
+        cfg_version = version_val.lVal;
+      } else if (version_val.vt == VT_I2) {
+        cfg_version = version_val.iVal;
+      } else if (version_val.vt != VT_EMPTY) {
+        logger.info(std::format("Unexpected version type (vt={}), leaving majorVersion unset",
+                                version_val.vt));
+      }
     }
   }
 
@@ -306,7 +319,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   if (FAILED(hr_col)) {
     logger.error(std::format("Failed to read SDK options collection: {}",
                              std::system_category().message(hr_col)));
-    return ReadConfResult::error();
+    return {ReadConfStatus::Error};
   }
   if (col != nullptr) {
     const auto defer_col = defer([&] { col->Release(); });
@@ -316,7 +329,7 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     if (FAILED(hr_count)) {
       logger.error(std::format("Failed to read SDK option count: {}",
                                std::system_category().message(hr_count)));
-      return ReadConfResult::error();
+      return {ReadConfStatus::Error};
     }
 
     VARIANT item_idx;
@@ -337,60 +350,27 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
 
       const auto option_element_guard = defer([&] { option_element->Release(); });
 
-      auto* name_property = get_property(*option_element, L"name");
-      if (name_property == nullptr) {
-        logger.debug(
-            std::format("Skipping config option at index {}: "
-                        "missing 'name' attribute",
-                        i));
+      auto name = read_string_property(*option_element, L"name", logger);
+      if (!name.has_value()) {
         continue;
       }
-      const auto defer_name_property = defer([&] { name_property->Release(); });
-      auto name_val = get_property_value(*name_property);
-      const auto defer_name_val = defer([&] { VariantClear(&name_val); });
-      if (name_val.vt != VT_BSTR || name_val.bstrVal == nullptr) {
-        logger.debug(
-            std::format("Skipping config option at index {}: "
-                        "'name' is not a string",
-                        i));
-        continue;
+      auto value = read_string_property(*option_element, L"value", logger);
+      if (value.has_value()) {
+        rum_sdk_opts.emplace(std::move(*name), std::move(*value));
       }
-      std::string opt_name = wstring_to_utf8(std::wstring(name_val.bstrVal));
-
-      auto* value_property = get_property(*option_element, L"value");
-      if (value_property == nullptr) {
-        logger.debug(
-            std::format("Skipping config option '{}': "
-                        "missing 'value' attribute",
-                        opt_name));
-        continue;
-      }
-      const auto defer_value_property = defer([&] { value_property->Release(); });
-      auto val_val = get_property_value(*value_property);
-      const auto defer_val_val = defer([&] { VariantClear(&val_val); });
-      if (val_val.vt != VT_BSTR || val_val.bstrVal == nullptr) {
-        logger.debug(
-            std::format("Skipping config option '{}': "
-                        "'value' is not a string",
-                        opt_name));
-        continue;
-      }
-      std::string opt_value = wstring_to_utf8(std::wstring(val_val.bstrVal));
-
-      rum_sdk_opts.emplace(std::move(opt_name), std::move(opt_value));
     }
   }
 
   RumConfig config{cfg_version, std::move(rum_sdk_opts), injection_strategy};
-  if (config.empty()) {
+  if (config.sdk_options.empty()) {
     // IIS hands back the schema-defaulted section for every site once
     // datadogRum is registered in configSections, so "the section resolved" is
     // not evidence that anyone configured this site. Reporting NotFound is what
     // lets stable configuration apply to sites with no <datadogRum> element.
     logger.debug("datadogRum section carries no SDK options; treating as unconfigured");
-    return ReadConfResult::not_found(std::move(config));
+    return {ReadConfStatus::NotFound, std::move(config)};
   }
-  return ReadConfResult::ok(std::move(config));
+  return {ReadConfStatus::Ok, std::move(config)};
 }
 
 void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR config_path,
@@ -424,48 +404,35 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
       break;
   }
 
-  // Rendered outside the branches so the C string stays alive across the call.
-  std::string config_json;
-  Snippet* snippet = nullptr;
+  const auto& config = result.config;
+  auto create_iis_snippet = [&] {
+    const auto json = make_config_json(config.version.value_or(k_iis_default_major_version),
+                                       config.sdk_options, logger);
+    return snippet_create_from_json(json.c_str());
+  };
+  using SnippetPtr = std::unique_ptr<Snippet, decltype(&snippet_cleanup)>;
+  SnippetPtr snippet(nullptr, snippet_cleanup);
   if (stable_config == nullptr) {
-    // No usable stable configuration: the IIS section is the whole story, so
-    // supply the schema's majorVersion rather than leaving it to the library's
-    // own default.
-    const auto& config = *result.config;
-    config_json = make_config_json(config.version.value_or(k_iis_default_major_version),
-                                   std::nullopt, config.sdk_options, logger);
-    snippet = snippet_create_from_json(config_json.c_str());
+    snippet.reset(create_iis_snippet());
   } else {
-    const char* overlay = nullptr;
-    if (result.config.has_value() &&
-        (result.config->version.has_value() || !result.config->sdk_options.empty())) {
-      const auto& config = *result.config;
-      // `enabled` is deliberately never emitted: IIS's enabled="false" is
-      // already handled as Disabled above, and emitting enabled=true here would
-      // override a DD_RUM_ENABLED=false coming from stable configuration.
-      config_json = make_config_json(config.version, std::nullopt, config.sdk_options, logger);
-      overlay = config_json.c_str();
+    std::string overlay;
+    if (config.version.has_value() || !config.sdk_options.empty()) {
+      overlay = make_config_json(config.version, config.sdk_options, logger);
     }
-    snippet = stable_config_snippet_create(stable_config, overlay);
-    // A parsed file can still carry invalid RUM values. A complete, valid IIS
-    // configuration remains usable in that case, just as when the file fails
-    // to parse. Successful stable opt-outs never enter this error path.
+    snippet.reset(
+        stable_config_snippet_create(stable_config, overlay.empty() ? nullptr : overlay.c_str()));
+    // Invalid stable values may fall back to a complete IIS configuration.
+    // Successful stable opt-outs never enter this error path.
     if (snippet != nullptr && snippet->error_code >= 2 && snippet->error_code <= 6 &&
         result.status == ReadConfStatus::Ok) {
-      const auto& config = *result.config;
-      config_json = make_config_json(config.version.value_or(k_iis_default_major_version),
-                                     std::nullopt, config.sdk_options, logger);
-      Snippet* fallback = snippet_create_from_json(config_json.c_str());
+      SnippetPtr fallback(create_iis_snippet(), snippet_cleanup);
       if (fallback != nullptr && fallback->error_code == 0) {
         logger.info("Ignoring invalid stable RUM values; using IIS configuration");
         telemetry::increment(
             telemetry::config_invalid,
             telemetry::build_tags(std::format("error_code:{}", snippet->error_code),
                                   ctx.application_id_tag, ctx.remote_config_tag));
-        snippet_cleanup(snippet);
-        snippet = fallback;
-      } else {
-        snippet_cleanup(fallback);
+        snippet = std::move(fallback);
       }
     }
   }
@@ -484,11 +451,6 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
     report_invalid("error_code:alloc", "Failed to create RUM snippet");
     return;
   }
-  const auto defer_snippet = defer([&] {
-    if (snippet != nullptr) {
-      snippet_cleanup(snippet);
-    }
-  });
 
   if (snippet->error_code == 10) {
     // Nothing configured in IIS, nothing in application_monitoring.yaml. The
@@ -522,12 +484,10 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
   if (ctx.snippet != nullptr) {
     snippet_cleanup(ctx.snippet);
   }
-  ctx.snippet = snippet;
-  snippet = nullptr;  // ownership moved to ctx; keep defer_snippet from freeing it
+  ctx.snippet = snippet.release();
   ctx.application_id_tag = std::move(application_id_tag);
   ctx.remote_config_tag = std::move(remote_config_tag);
-  ctx.injection_strategy = result.config.has_value() ? result.config->injection_strategy
-                                                     : InjectionStrategy::HeadCloseTag;
+  ctx.injection_strategy = config.injection_strategy;
 }
 
 }  // namespace datadog::rum

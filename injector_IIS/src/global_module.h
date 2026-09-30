@@ -25,19 +25,9 @@ class GlobalModule final : public CGlobalModule {
   IHttpServer* server_;
   std::shared_ptr<Logger> logger_;
   std::map<std::wstring, ModuleContext*> configurations_;
-  // Stable configuration, read once from the constructor (which runs inside
-  // RegisterModule, before any notification is registered, so there is no
-  // publication race). Null when there was nothing usable to read.
-  //
-  // Every ModuleContext borrows this pointer without owning it, so the handle is
-  // never replaced for the lifetime of the module — the contexts would be left
-  // dangling. That also means changes to application_monitoring.yaml only take
-  // effect after an app-pool recycle: the file lives outside IIS's config tree,
-  // so OnGlobalConfigurationChange never fires for it.
-  //
-  // Sharing is safe: stable_config_snippet_create takes a const handle, does no
-  // I/O and mutates nothing, so worker threads may build snippets from it
-  // concurrently with OnGlobalConfigurationChange.
+  // Read before notifications are registered and never replaced: contexts
+  // borrow this immutable handle concurrently. YAML changes require an app-pool
+  // recycle because they do not trigger OnGlobalConfigurationChange.
   std::unique_ptr<::StableConfig, StableConfigDeleter> stable_config_;
 
  public:

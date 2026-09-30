@@ -92,21 +92,16 @@ Enum read_enum_property(IAppHostElement& element, std::wstring_view name, Enum f
   return static_cast<Enum>(raw);
 }
 
-// Test-only override of the stable-config file paths; see
-// set_stable_config_paths_for_testing.
-const char* g_stable_config_local_path = nullptr;
-const char* g_stable_config_fleet_path = nullptr;
+StableConfigReader g_stable_config_reader = stable_config_read;
 
 }  // namespace
 
-// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-void set_stable_config_paths_for_testing(const char* local_path, const char* fleet_path) {
-  g_stable_config_local_path = local_path;
-  g_stable_config_fleet_path = fleet_path;
+void set_stable_config_reader_for_testing(StableConfigReader reader) {
+  g_stable_config_reader = reader != nullptr ? reader : stable_config_read;
 }
 
-std::pair<const char*, const char*> stable_config_paths() {
-  return {g_stable_config_local_path, g_stable_config_fleet_path};
+::StableConfig* read_stable_config() {
+  return g_stable_config_reader(k_stable_config_language, /* debug_logs */ false);
 }
 
 std::string make_config_json(std::optional<int> major_version,

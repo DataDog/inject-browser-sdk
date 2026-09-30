@@ -7,9 +7,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-#[cfg(test)]
-use libdd_library_config::ConfigRead;
-use libdd_library_config::LibraryConfig;
+use libdd_library_config::{ConfigRead, ConfigReadError, LibraryConfig, MAX_CONFIG_FILE_SIZE};
 
 use crate::configuration::{parse_bool, Configuration, ConfigurationOverlay};
 use crate::error::Error;
@@ -168,13 +166,48 @@ pub fn read_stable_config(language: &str, debug_logs: bool) -> Result<StableConf
     return stable_config_from_read(read);
 }
 
-/// Variant of [`read_stable_config`] that reads the two configuration files from
-/// caller-supplied paths instead of the platform defaults.
-///
-/// Exists so tests can exercise the real reader against real files without
-/// touching machine-global paths — the production paths are compile-time
-/// constants in libdatadog.
-pub fn read_stable_config_from_paths(
+/// Parse local and fleet-managed YAML contents without reading files.
+/// `None` represents an absent source; an empty slice represents an empty file.
+pub fn read_stable_config_from_contents(
+    language: &str,
+    debug_logs: bool,
+    local: Option<&[u8]>,
+    fleet: Option<&[u8]>,
+) -> Result<StableConfig, Error> {
+    struct ContentsReader<'a> {
+        local: Option<&'a [u8]>,
+        fleet: Option<&'a [u8]>,
+    }
+
+    impl ConfigRead for ContentsReader<'_> {
+        type IoError = core::convert::Infallible;
+
+        fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
+            let contents = match path {
+                crate::platform::LOCAL_STABLE_CONFIGURATION_PATH => self.local,
+                crate::platform::FLEET_STABLE_CONFIGURATION_PATH => self.fleet,
+                _ => None,
+            }
+            .ok_or(ConfigReadError::NotFound)?;
+            if contents.len() > MAX_CONFIG_FILE_SIZE {
+                return Err(ConfigReadError::TooLarge);
+            }
+            return Ok(contents.to_vec());
+        }
+    }
+
+    let read = crate::platform::read_stable_configs_with_reader(
+        &ContentsReader { local, fleet },
+        language,
+        debug_logs,
+    )
+    .map_err(Error::StableConfig)?;
+    return stable_config_from_read(read);
+}
+
+// Real filesystem overrides exist only in Rust unit tests.
+#[cfg(test)]
+fn read_stable_config_from_paths(
     language: &str,
     debug_logs: bool,
     local_path: &str,
@@ -224,6 +257,21 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use serde_json::Value;
+
+    #[test]
+    fn oversized_contents_reject_partial_configuration() {
+        let oversized = alloc::vec![0; MAX_CONFIG_FILE_SIZE + 1];
+        let valid = b"apm_configuration_default:\n  DD_RUM_ENABLED: \"true\"\n";
+        for (local, fleet) in [
+            (oversized.as_slice(), valid.as_slice()),
+            (valid.as_slice(), oversized.as_slice()),
+        ] {
+            assert!(matches!(
+                read_stable_config_from_contents("browser-sdk", false, Some(local), Some(fleet)),
+                Err(Error::StableConfig(_))
+            ));
+        }
+    }
 
     /// Extract the JSON object passed to `DD_RUM.init(...)`, so tests assert on fields
     /// rather than on raw bytes that match by accident within the CDN URL ("us1" also

@@ -209,13 +209,8 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
     );
 }
 
-/// Variant of [`read_stable_configs_with_reader`] that also takes the two
-/// configuration-file paths.
-///
-/// The production paths are compile-time constants in libdatadog, so tests that
-/// need real files on disk have no other way to point the reader somewhere
-/// writable. Mirrors libdatadog's own FFI, which exposes the same escape hatch.
-pub fn read_stable_configs_with_paths<R: ConfigRead>(
+// Production callers supply fixed paths; unit tests can use temporary files.
+pub(crate) fn read_stable_configs_with_paths<R: ConfigRead>(
     reader: &R,
     language: &str,
     debug_logs: bool,

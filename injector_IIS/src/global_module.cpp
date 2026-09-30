@@ -66,9 +66,7 @@ void GlobalModule::init_telemetry(DWORD server_version) {
 }
 
 void GlobalModule::load_stable_config() {
-  const auto [local_path, fleet_path] = stable_config_paths();
-  std::unique_ptr<::StableConfig, StableConfigDeleter> config(stable_config_read_from_paths(
-      k_stable_config_language, /* debug_logs */ false, local_path, fleet_path));
+  std::unique_ptr<::StableConfig, StableConfigDeleter> config(read_stable_config());
   if (config == nullptr) {
     logger_->error("Failed to allocate stable configuration handle");
     return;

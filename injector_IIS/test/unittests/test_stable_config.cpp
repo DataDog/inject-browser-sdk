@@ -11,7 +11,7 @@
 //   * make_config_json  — pure, no COM, no I/O. Pins the per-key typing and the
 //                         overlay shape the Rust side accepts.
 //   * update_module_context — driven with a real StableConfig handle read from a
-//                         temp-directory YAML file via stable_config_read_from_paths,
+//                         in-memory YAML via stable_config_read_from_contents,
 //                         so the whole IIS-overlay-on-stable-config merge is
 //                         exercised end to end.
 
@@ -22,8 +22,6 @@
 #include <rapidjson/document.h>
 
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
 #include <memory>
 #include <optional>
 #include <set>
@@ -49,51 +47,13 @@ rapidjson::Document parse(const std::string& json) {
   return doc;
 }
 
-// ---------------------------------------------------------------------------
-// Temp-directory YAML fixture
-// ---------------------------------------------------------------------------
-
-// Writes application_monitoring.yaml files into a unique temp directory and
-// hands out a StableConfig handle read from them. Uses
-// stable_config_read_from_paths so nothing touches C:\ProgramData\Datadog.
-class StableConfigFixture {
-  std::filesystem::path dir_;
-
- public:
-  explicit StableConfigFixture(const std::string& name) {
-    dir_ = std::filesystem::temp_directory_path() /
-           ("iis-stable-config-" + name + "-" + std::to_string(::GetCurrentProcessId()));
-    std::filesystem::remove_all(dir_);
-    std::filesystem::create_directories(dir_);
-  }
-
-  ~StableConfigFixture() {
-    std::error_code ec;
-    std::filesystem::remove_all(dir_, ec);
-  }
-
-  StableConfigFixture(const StableConfigFixture&) = delete;
-  StableConfigFixture& operator=(const StableConfigFixture&) = delete;
-
-  // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-  std::string write(const std::string& name, const std::string& contents) {
-    const auto path = dir_ / name;
-    std::ofstream out(path, std::ios::binary);
-    out << contents;
-    out.close();
-    return path.string();
-  }
-
-  std::string absent(const std::string& name) const { return (dir_ / name).string(); }
-
-  // Reads a handle from `local` (and optionally `fleet`). Both may be paths to
-  // files that don't exist, which models a host with no stable configuration.
-  std::unique_ptr<::StableConfig, StableConfigDeleter> read(const std::string& local,
-                                                            const std::string& fleet) {
-    return std::unique_ptr<::StableConfig, StableConfigDeleter>(stable_config_read_from_paths(
-        k_stable_config_language, /* debug_logs */ false, local.c_str(), fleet.c_str()));
-  }
-};
+// Parse YAML without touching the host's stable-configuration files.
+std::unique_ptr<::StableConfig, StableConfigDeleter> read_config(
+    const std::optional<std::string>& local, const std::optional<std::string>& fleet) {
+  return std::unique_ptr<::StableConfig, StableConfigDeleter>(stable_config_read_from_contents(
+      k_stable_config_language, /* debug_logs */ false, local ? local->c_str() : nullptr,
+      fleet ? fleet->c_str() : nullptr));
+}
 
 // A minimal rule matching language=browser-sdk with the given DD_RUM_* keys.
 std::string browser_sdk_rule(const std::string& keys) {
@@ -322,12 +282,11 @@ TEST(MakeConfigJson, UnknownKeysPassThroughAsStrings) {
 // ---------------------------------------------------------------------------
 
 TEST(StableConfig, InjectsWithNoIisSectionAtAll) {
-  StableConfigFixture fixture("only-stable");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
-                                                   "    DD_RUM_SITE: datadoghq.com\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
+      "    DD_RUM_SITE: datadoghq.com\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_NE(config, nullptr);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
 
@@ -346,12 +305,11 @@ TEST(StableConfig, InjectsWithNoIisSectionAtAll) {
 }
 
 TEST(StableConfig, IisOptionsOverrideStableConfigPerKey) {
-  StableConfigFixture fixture("overlay");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
-                                                   "    DD_RUM_SERVICE: svc-stable\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
+      "    DD_RUM_SERVICE: svc-stable\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
 
   // The section overrides service only; applicationId/clientToken stay.
@@ -372,12 +330,11 @@ TEST(StableConfig, EmptyIisSectionDoesNotDefeatStableConfig) {
   // Risk: once the MSI registers datadogRum in configSections, IIS materialises
   // the section for every site. A schema-defaulted section must not turn into an
   // overlay, or it would pin majorVersion on sites nobody configured.
-  StableConfigFixture fixture("empty-section");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
-                                                   "    DD_RUM_MAJOR_VERSION: 5\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
+      "    DD_RUM_MAJOR_VERSION: 5\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
 
   MockRumConfigElement section(true, {}, 6);  // enabled, schema-defaulted version, no options
@@ -395,11 +352,10 @@ TEST(StableConfig, EmptyIisSectionDoesNotDefeatStableConfig) {
 }
 
 TEST(StableConfig, EmptyIisSectionPreservesInjectionStrategy) {
-  StableConfigFixture fixture("strategy-only");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-stable\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
   MockRumConfigElement section(true, {}, 6);
   section.SetVersionDefault(true);
@@ -412,12 +368,11 @@ TEST(StableConfig, EmptyIisSectionPreservesInjectionStrategy) {
 }
 
 TEST(StableConfig, SchemaVersionDoesNotOverrideStableMajorWithIisOptions) {
-  StableConfigFixture fixture("schema-version-overlay");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
-                                                   "    DD_RUM_MAJOR_VERSION: 5\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
+      "    DD_RUM_MAJOR_VERSION: 5\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
   MockRumConfigElement section(true, {{L"service", L"svc-iis"}}, 6);
   section.SetVersionDefault(true);
@@ -430,12 +385,11 @@ TEST(StableConfig, SchemaVersionDoesNotOverrideStableMajorWithIisOptions) {
 }
 
 TEST(StableConfig, ExplicitVersionWorksWithoutIisSdkOptions) {
-  StableConfigFixture fixture("version-only");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
-                                                   "    DD_RUM_MAJOR_VERSION: 5\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
+      "    DD_RUM_MAJOR_VERSION: 5\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
   MockRumConfigElement section(true, {}, 6);
   MockAdminManager admin(&section);
@@ -450,11 +404,10 @@ TEST(StableConfig, DefaultMajorVersionMatchesTheIisSchema) {
   // the library default decides. It must match RUM_schema.xml's default of 6, or
   // two sites on one host would get different Browser SDK majors depending only
   // on whether they have a <datadogRum> section.
-  StableConfigFixture fixture("default-major-version");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-stable\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
 
   const std::map<std::wstring, MockRumConfigElement*> none;
@@ -469,12 +422,11 @@ TEST(StableConfig, DefaultMajorVersionMatchesTheIisSchema) {
 }
 
 TEST(StableConfig, MajorVersionComesFromTheSectionWhenItHasOne) {
-  StableConfigFixture fixture("major-version-iis");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
-                                                   "    DD_RUM_MAJOR_VERSION: 5\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
+      "    DD_RUM_MAJOR_VERSION: 5\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
 
   MockRumConfigElement section(true, {{L"service", L"svc-iis"}}, /* version */ 6);
@@ -489,12 +441,11 @@ TEST(StableConfig, MajorVersionComesFromTheSectionWhenItHasOne) {
 }
 
 TEST(StableConfig, DdRumEnabledFalseClearsInjection) {
-  StableConfigFixture fixture("disabled-by-stable");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_ENABLED: \"false\"\n"
-                                                   "    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-stable\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_ENABLED: \"false\"\n"
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
 
   // A site that does configure itself through IIS is still switched off: the
@@ -509,11 +460,10 @@ TEST(StableConfig, DdRumEnabledFalseClearsInjection) {
 }
 
 TEST(StableConfig, IisEnabledFalseWinsOverStableConfig) {
-  StableConfigFixture fixture("disabled-by-iis");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-stable\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
 
   MockRumConfigElement section(false, {{L"service", L"svc-iis"}});
@@ -525,8 +475,7 @@ TEST(StableConfig, IisEnabledFalseWinsOverStableConfig) {
 }
 
 TEST(StableConfig, NothingConfiguredAnywhereIsQuiet) {
-  StableConfigFixture fixture("nothing");
-  auto config = fixture.read(fixture.absent("local.yaml"), fixture.absent("fleet.yaml"));
+  auto config = read_config(std::nullopt, std::nullopt);
   ASSERT_NE(config, nullptr);
   EXPECT_EQ(config->error_code, 0) << "absent files are not an error";
   EXPECT_TRUE(config->is_empty);
@@ -546,9 +495,8 @@ TEST(StableConfig, BrokenYamlFallsBackToIisConfig) {
   // Highest-severity regression guard: one malformed application_monitoring.yaml
   // must not take injection down on sites configured entirely through IIS. The
   // handle is dropped at load time, so update_module_context sees nullptr.
-  StableConfigFixture fixture("broken");
-  const auto local = fixture.write("local.yaml", "::: not : yaml :::\n");
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = "::: not : yaml :::\n";
+  auto config = read_config(local, std::nullopt);
   ASSERT_NE(config, nullptr);
   EXPECT_NE(config->error_code, 0) << "a broken file must surface as a read error";
 
@@ -567,11 +515,10 @@ TEST(StableConfig, BrokenYamlFallsBackToIisConfig) {
 }
 
 TEST(StableConfig, ReloadReplacesTheSnippetWithoutLeaking) {
-  StableConfigFixture fixture("reload");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-stable\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
 
   MockRumConfigElement first(true, {{L"service", L"svc-one"}});
@@ -601,14 +548,13 @@ TEST(StableConfig, ReloadReplacesTheSnippetWithoutLeaking) {
 }
 
 TEST(StableConfig, FleetFileOverridesTheLocalOne) {
-  StableConfigFixture fixture("fleet-precedence");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-local\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-local\n"));
-  const auto fleet =
-      fixture.write("fleet.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-fleet\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-fleet\n"));
-  auto config = fixture.read(local, fleet);
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-local\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-local\n");
+  const auto fleet = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-fleet\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-fleet\n");
+  auto config = read_config(local, fleet);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
 
   const std::map<std::wstring, MockRumConfigElement*> none;
@@ -621,11 +567,10 @@ TEST(StableConfig, FleetFileOverridesTheLocalOne) {
 }
 
 TEST(StableConfig, FailedIisReloadPreservesExplicitOptOut) {
-  StableConfigFixture fixture("failed-reload");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                   "    DD_RUM_CLIENT_TOKEN: tok-stable\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
   MockRumConfigElement section(false, {});
   MockAdminManager admin(&section);
@@ -643,8 +588,7 @@ TEST(StableConfig, FailedIisReloadPreservesExplicitOptOut) {
 }
 
 TEST(StableConfig, RemovingIisOptionsWithNoStableRumClearsInjection) {
-  StableConfigFixture fixture("removed-iis-options");
-  auto config = fixture.read(fixture.absent("local.yaml"), fixture.absent("fleet.yaml"));
+  auto config = read_config(std::nullopt, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
   MockRumConfigElement enabled;
   MockRumConfigElement empty(true, {}, 6);
@@ -668,12 +612,11 @@ TEST(StableConfig, InvalidStableValuesFallBackToCompleteIisConfig) {
       "    DD_RUM_TRACK_RESOURCES: nope\n",     "    DD_RUM_SITE: invalid.example\n"};
   for (const auto& invalid : invalid_values) {
     SCOPED_TRACE(invalid);
-    StableConfigFixture fixture("invalid-stable-value");
-    const auto local =
-        fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                                     "    DD_RUM_CLIENT_TOKEN: tok-stable\n" +
-                                                     invalid));
-    auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+    const auto local = browser_sdk_rule(
+        "    DD_RUM_APPLICATION_ID: app-stable\n"
+        "    DD_RUM_CLIENT_TOKEN: tok-stable\n" +
+        invalid);
+    auto config = read_config(local, std::nullopt);
     ASSERT_EQ(config->error_code, 0) << config->error_message;
     MockRumConfigElement section(
         true, {{L"applicationId", L"test-app-id"}, {L"clientToken", L"test-client-token"}}, 6);
@@ -688,18 +631,17 @@ TEST(StableConfig, InvalidStableValuesFallBackToCompleteIisConfig) {
 }
 
 TEST(StableConfig, IisOverridesInvalidValuesWithoutDroppingStableCredentials) {
-  StableConfigFixture fixture("invalid-overridden-stable-values");
-  const auto local = fixture.write(
-      "local.yaml", browser_sdk_rule("    DD_RUM_APPLICATION_ID: app-stable\n"
-                                     "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
-                                     "    DD_RUM_SERVICE: svc-stable\n"
-                                     "    DD_RUM_MAJOR_VERSION: nope\n"
-                                     "    DD_RUM_TRACK_USER_INTERACTIONS: nope\n"
-                                     "    DD_RUM_TRACK_RESOURCES: nope\n"
-                                     "    DD_RUM_TRACK_LONG_TASKS: nope\n"
-                                     "    DD_RUM_SESSION_SAMPLE_RATE: nope\n"
-                                     "    DD_RUM_SESSION_REPLAY_SAMPLE_RATE: nope\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_APPLICATION_ID: app-stable\n"
+      "    DD_RUM_CLIENT_TOKEN: tok-stable\n"
+      "    DD_RUM_SERVICE: svc-stable\n"
+      "    DD_RUM_MAJOR_VERSION: nope\n"
+      "    DD_RUM_TRACK_USER_INTERACTIONS: nope\n"
+      "    DD_RUM_TRACK_RESOURCES: nope\n"
+      "    DD_RUM_TRACK_LONG_TASKS: nope\n"
+      "    DD_RUM_SESSION_SAMPLE_RATE: nope\n"
+      "    DD_RUM_SESSION_REPLAY_SAMPLE_RATE: nope\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
   MockRumConfigElement section(true,
                                {{L"trackUserInteractions", L"false"},
@@ -719,11 +661,10 @@ TEST(StableConfig, IisOverridesInvalidValuesWithoutDroppingStableCredentials) {
 }
 
 TEST(StableConfig, StableOptOutWinsOverInvalidValuesAndCompleteIisConfig) {
-  StableConfigFixture fixture("disabled-invalid-stable");
-  const auto local =
-      fixture.write("local.yaml", browser_sdk_rule("    DD_RUM_ENABLED: \"false\"\n"
-                                                   "    DD_RUM_SESSION_SAMPLE_RATE: nope\n"));
-  auto config = fixture.read(local, fixture.absent("fleet.yaml"));
+  const auto local = browser_sdk_rule(
+      "    DD_RUM_ENABLED: \"false\"\n"
+      "    DD_RUM_SESSION_SAMPLE_RATE: nope\n");
+  auto config = read_config(local, std::nullopt);
   ASSERT_EQ(config->error_code, 0) << config->error_message;
   MockRumConfigElement section;
   MockAdminManager admin(&section);

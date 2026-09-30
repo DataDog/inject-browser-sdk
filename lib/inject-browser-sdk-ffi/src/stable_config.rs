@@ -11,10 +11,8 @@ use core::ffi::{c_char, CStr};
 use core::ptr::null;
 
 use inject_browser_sdk::{
-    error::Error,
-    parse_configuration_overlay,
-    platform::{FLEET_STABLE_CONFIGURATION_PATH, LOCAL_STABLE_CONFIGURATION_PATH},
-    read_stable_config_from_paths, snippet_from_stable_config, ConfigurationOverlay,
+    error::Error, parse_configuration_overlay, read_stable_config,
+    read_stable_config_from_contents, snippet_from_stable_config, ConfigurationOverlay,
     StableConfig as CoreStableConfig,
 };
 
@@ -28,21 +26,32 @@ fn cstr_to_str<'a>(cstr: &'a CStr, field: &str) -> Result<&'a str, Error> {
         .map_err(|_| return Error::FfiInvalidUtf8(field.to_string()));
 }
 
-/// Borrows an optional C string, substituting `default` when it is NULL.
+/// Borrows optional UTF-8 YAML contents; NULL represents an absent source.
 ///
 /// # Safety
 ///
 /// If `ptr` is non-null it must point to a valid NUL-terminated C string that
-/// outlives the returned `&str`.
-unsafe fn str_or_default<'a>(
+/// outlives the returned slice.
+unsafe fn optional_contents<'a>(
     ptr: *const c_char,
     field: &str,
-    default: &'a str,
-) -> Result<&'a str, Error> {
+) -> Result<Option<&'a [u8]>, Error> {
     if ptr.is_null() {
-        return Ok(default);
+        return Ok(None);
     }
-    return cstr_to_str(CStr::from_ptr(ptr), field);
+    return cstr_to_str(CStr::from_ptr(ptr), field).map(|value| return Some(value.as_bytes()));
+}
+
+unsafe fn read_config(
+    language: *const c_char,
+    read: impl FnOnce(&str) -> Result<CoreStableConfig, Error>,
+) -> *mut StableConfig {
+    let result = if language.is_null() {
+        Err(Error::FfiNullPointer(String::from("language")))
+    } else {
+        cstr_to_str(CStr::from_ptr(language), "language").and_then(read)
+    };
+    return StableConfigInternal::new(result).into_public_ptr();
 }
 
 /// Create a snippet from Datadog stable configuration files, with an optional JSON overlay.
@@ -236,16 +245,14 @@ pub unsafe extern "C" fn stable_config_read(
     language: *const c_char,
     debug_logs: bool,
 ) -> *mut StableConfig {
-    return stable_config_read_from_paths(language, debug_logs, null(), null());
+    return read_config(language, |language| {
+        return read_stable_config(language, debug_logs);
+    });
 }
 
-/// Variant of [`stable_config_read`] that reads the configuration files from
-/// caller-supplied paths.
-///
-/// Exists for tests: the production paths are compile-time constants, so there
-/// is otherwise no way to exercise a real YAML file without writing to a
-/// machine-global location. Passing NULL for either path uses the platform
-/// default for that file.
+/// Parse local and fleet-managed UTF-8 YAML contents without reading files.
+/// NULL represents an absent source; an empty string represents an empty file.
+/// The contents are consumed before returning and need not outlive the handle.
 ///
 /// # Memory ownership
 ///
@@ -257,37 +264,17 @@ pub unsafe extern "C" fn stable_config_read(
 /// Each non-NULL pointer must point to a valid NUL-terminated C string. A NULL
 /// `language` is tolerated and returns error code 7.
 #[no_mangle]
-pub unsafe extern "C" fn stable_config_read_from_paths(
+pub unsafe extern "C" fn stable_config_read_from_contents(
     language: *const c_char,
     debug_logs: bool,
-    local_path: *const c_char,
-    fleet_path: *const c_char,
+    local_yaml: *const c_char,
+    fleet_yaml: *const c_char,
 ) -> *mut StableConfig {
-    if language.is_null() {
-        return StableConfigInternal::new(Err(Error::FfiNullPointer(String::from("language"))))
-            .into_public_ptr();
-    }
-
-    let language_str = match cstr_to_str(CStr::from_ptr(language), "language") {
-        Ok(s) => s,
-        Err(e) => return StableConfigInternal::new(Err(e)).into_public_ptr(),
-    };
-    let local = match str_or_default(local_path, "local_path", LOCAL_STABLE_CONFIGURATION_PATH) {
-        Ok(s) => s,
-        Err(e) => return StableConfigInternal::new(Err(e)).into_public_ptr(),
-    };
-    let fleet = match str_or_default(fleet_path, "fleet_path", FLEET_STABLE_CONFIGURATION_PATH) {
-        Ok(s) => s,
-        Err(e) => return StableConfigInternal::new(Err(e)).into_public_ptr(),
-    };
-
-    return StableConfigInternal::new(read_stable_config_from_paths(
-        language_str,
-        debug_logs,
-        local,
-        fleet,
-    ))
-    .into_public_ptr();
+    return read_config(language, |language| {
+        let local = optional_contents(local_yaml, "local_yaml")?;
+        let fleet = optional_contents(fleet_yaml, "fleet_yaml")?;
+        return read_stable_config_from_contents(language, debug_logs, local, fleet);
+    });
 }
 
 /// Build a snippet from an already-read [`StableConfig`]. Does no file I/O.
@@ -299,8 +286,8 @@ pub unsafe extern "C" fn stable_config_read_from_paths(
 ///
 /// # Safety
 ///
-/// - `config` must be a non-NULL pointer returned by [`stable_config_read`] and
-///   not yet passed to [`stable_config_cleanup`].
+/// - `config` must be a non-NULL handle returned by [`stable_config_read`] or
+///   [`stable_config_read_from_contents`], not yet passed to [`stable_config_cleanup`].
 /// - If `json_overlay` is non-null, it must point to a valid NUL-terminated C
 ///   string.
 #[no_mangle]
@@ -330,13 +317,12 @@ pub unsafe extern "C" fn stable_config_snippet_create(
     return SnippetInternal::new_from_stable_config(result).into_public_ptr();
 }
 
-/// Free a [`StableConfig`] created by [`stable_config_read`]. Existing snippets
-/// remain valid.
+/// Free a [`StableConfig`] handle. Existing snippets remain valid.
 ///
 /// # Safety
 ///
-/// `config` must be a pointer returned by [`stable_config_read`] and not
-/// already freed. NULL is tolerated and does nothing.
+/// `config` must be returned by [`stable_config_read`] or [`stable_config_read_from_contents`]
+/// and not already freed. NULL is tolerated and does nothing.
 #[no_mangle]
 pub unsafe extern "C" fn stable_config_cleanup(config: *mut StableConfig) {
     if config.is_null() {
@@ -544,117 +530,124 @@ mod tests {
         unsafe { stable_config_cleanup(null_mut()) };
     }
 
-    /// Covers `stable_config_read_from_paths`, the entry point the IIS unit
-    /// tests use to point the reader at a temp directory instead of
-    /// `C:\ProgramData\Datadog`.
-    mod from_paths {
+    mod from_contents {
         use super::*;
         use alloc::ffi::CString;
-        use pretty_assertions::{assert_eq, assert_ne};
-        use std::fs;
-        use std::path::{Path, PathBuf};
-
-        fn tmp_dir(name: &str) -> PathBuf {
-            let mut dir = std::env::temp_dir();
-            dir.push(std::format!(
-                "inject-browser-sdk-ffi-{}-{}",
-                std::process::id(),
-                name
-            ));
-            fs::create_dir_all(&dir).expect("temp dir");
-            return dir;
-        }
-
-        fn c_path(dir: &Path, name: &str, contents: Option<&str>) -> CString {
-            let path = dir.join(name);
-            if let Some(contents) = contents {
-                fs::write(&path, contents).expect("write config");
-            }
-            return CString::new(path.to_str().expect("UTF-8 temp path")).expect("no NUL");
-        }
+        use pretty_assertions::assert_eq;
 
         #[test]
-        fn reads_a_real_file_and_builds_a_snippet() {
-            let dir = tmp_dir("read");
-            let local = c_path(
-                &dir,
-                "local.yaml",
-                Some("apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-file\n  DD_RUM_CLIENT_TOKEN: tok-file\n"),
-            );
-            let fleet = c_path(&dir, "absent.yaml", None);
-
-            let config = unsafe {
-                stable_config_read_from_paths(
-                    cstr_ptr(b"browser-sdk\0"),
-                    false,
-                    local.as_ptr(),
-                    fleet.as_ptr(),
+        fn parsed_handle_outlives_inputs_and_preserves_fleet_precedence() {
+            let config = {
+                let local = CString::new(
+                    "\u{feff}apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-local\n  DD_RUM_CLIENT_TOKEN: tok-local\n",
+                ).unwrap();
+                let fleet = CString::new(
+                    "apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-fleet\n",
                 )
+                .unwrap();
+                unsafe {
+                    stable_config_read_from_contents(
+                        cstr_ptr(b"browser-sdk\0"),
+                        false,
+                        local.as_ptr(),
+                        fleet.as_ptr(),
+                    )
+                }
             };
             let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
             assert_eq!(c.error_code, 0);
-            assert!(!c.is_empty, "the local file supplied DD_RUM_* entries");
-
+            assert!(!c.is_empty);
             let snippet = unsafe { stable_config_snippet_create(config, null()) };
             let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
             assert_eq!(s.error_code, 0);
             assert!(s.length > 0);
-            assert_ne!(s.application_id, null());
+            assert!(!s.application_id.is_null());
             assert_eq!(
                 unsafe { CStr::from_ptr(s.application_id) }
                     .to_str()
                     .unwrap(),
-                "app-file"
+                "app-fleet"
             );
-
             unsafe { snippet_cleanup(snippet) };
             unsafe { stable_config_cleanup(config) };
-            let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]
-        fn null_paths_fall_back_to_the_platform_defaults() {
-            // Equivalent to stable_config_read on a host with no stable config.
-            let config = unsafe {
-                stable_config_read_from_paths(cstr_ptr(b"browser-sdk\0"), false, null(), null())
-            };
-            let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
-            assert_eq!(c.error_code, 0);
-            unsafe { stable_config_cleanup(config) };
+        fn absent_and_empty_sources_remain_distinct() {
+            for (local, expected_error) in [(null(), 10), (cstr_ptr(b"\0"), 6)] {
+                let config = unsafe {
+                    stable_config_read_from_contents(
+                        cstr_ptr(b"browser-sdk\0"),
+                        false,
+                        local,
+                        null(),
+                    )
+                };
+                let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
+                assert_eq!(c.error_code, 0);
+                assert!(c.is_empty);
+                let snippet = unsafe { stable_config_snippet_create(config, null()) };
+                let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+                assert_eq!(s.error_code, expected_error);
+                unsafe { snippet_cleanup(snippet) };
+                unsafe { stable_config_cleanup(config) };
+            }
         }
 
         #[test]
-        fn broken_file_surfaces_error_code_6() {
-            let dir = tmp_dir("broken");
-            let local = c_path(&dir, "local.yaml", Some("::: not : yaml :::"));
-            let fleet = c_path(&dir, "absent.yaml", None);
-
+        fn caller_supplied_filename_is_never_read() {
+            let path = std::env::temp_dir().join(std::format!(
+                "inject-browser-sdk-ffi-path-regression-{}.yaml",
+                std::process::id()
+            ));
+            std::fs::write(&path,
+                "apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-file\n  DD_RUM_CLIENT_TOKEN: tok-file\n"
+            ).unwrap();
+            let filename = CString::new(path.to_str().unwrap()).unwrap();
             let config = unsafe {
-                stable_config_read_from_paths(
+                stable_config_read_from_contents(
                     cstr_ptr(b"browser-sdk\0"),
                     false,
-                    local.as_ptr(),
-                    fleet.as_ptr(),
+                    filename.as_ptr(),
+                    null(),
+                )
+            };
+            let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
+            assert_eq!(
+                c.error_code, 6,
+                "the filename must be parsed as YAML, never opened"
+            );
+            unsafe { stable_config_cleanup(config) };
+            std::fs::remove_file(path).unwrap();
+        }
+
+        #[test]
+        fn broken_yaml_surfaces_error_code_6() {
+            let config = unsafe {
+                stable_config_read_from_contents(
+                    cstr_ptr(b"browser-sdk\0"),
+                    false,
+                    cstr_ptr(b"::: not : yaml :::\0"),
+                    null(),
                 )
             };
             let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
             assert_eq!(c.error_code, 6);
             unsafe { stable_config_cleanup(config) };
-            let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]
         fn null_language_is_reported() {
-            let config = unsafe { stable_config_read_from_paths(null(), false, null(), null()) };
+            let config = unsafe { stable_config_read_from_contents(null(), false, null(), null()) };
             let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
             assert_eq!(c.error_code, 7);
             unsafe { stable_config_cleanup(config) };
         }
 
         #[test]
-        fn invalid_utf8_path_is_reported() {
+        fn invalid_utf8_contents_are_reported() {
             let config = unsafe {
-                stable_config_read_from_paths(
+                stable_config_read_from_contents(
                     cstr_ptr(b"browser-sdk\0"),
                     false,
                     cstr_ptr(&[0xFFu8, 0u8]),

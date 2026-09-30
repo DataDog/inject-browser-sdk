@@ -449,16 +449,10 @@ struct RegisteredModule {
 // Register the module with the given admin manager. Returns the global module
 // and HTTP factory for driving the rest of the lifecycle.
 static RegisteredModule registerModule(MockServer& server) {
-  // These tests assert on IIS-sourced configuration only. Point GlobalModule's
-  // stable-config read at paths that cannot exist, so the result does not depend
-  // on whether the host running the tests has an agent-written
-  // application_monitoring.yaml. Without this, InjectionPipeline.MissingConfig
-  // fails on any machine with a configured agent.
-  // A plain absent path, not a malformed one: the read must come back "not
-  // found" rather than as an error the module would log and report.
-  datadog::rum::set_stable_config_paths_for_testing(
-      "C:\\iis-injector-tests-no-such-dir\\no-local-stable-config.yaml",
-      "C:\\iis-injector-tests-no-such-dir\\no-fleet-stable-config.yaml");
+  // Keep IIS-only tests independent of agent-written configuration on the host.
+  datadog::rum::set_stable_config_reader_for_testing([](const char* language, bool debug_logs) {
+    return stable_config_read_from_contents(language, debug_logs, nullptr, nullptr);
+  });
 
   MockModule moduleInfo;
   EXPECT_CALL(moduleInfo, GetId()).WillOnce(Return(nullptr));

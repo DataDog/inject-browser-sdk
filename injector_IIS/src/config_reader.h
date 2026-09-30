@@ -14,7 +14,6 @@
 
 #include <optional>
 #include <string>
-#include <utility>
 #include <unordered_map>
 
 namespace datadog::rum {
@@ -27,11 +26,10 @@ struct StableConfigDeleter {
 // Matches `origin: language` rules in application_monitoring.yaml.
 inline constexpr const char* k_stable_config_language = "browser-sdk";
 
-// Test-only path overrides. Call before RegisterModule; NULL restores defaults.
-void set_stable_config_paths_for_testing(const char* local_path, const char* fleet_path);
-
-// The paths GlobalModule should read; NULL members mean "platform default".
-std::pair<const char*, const char*> stable_config_paths();
+using StableConfigReader = ::StableConfig* (*)(const char*, bool);
+// Call before RegisterModule; nullptr restores the production reader.
+void set_stable_config_reader_for_testing(StableConfigReader reader);
+::StableConfig* read_stable_config();
 
 // IIS-only default; matches RUM_schema.xml and the Rust library's default.
 inline constexpr int k_iis_default_major_version = 6;

@@ -94,6 +94,30 @@ pub struct ConfigurationOverlay {
     pub rum: RumConfiguration,
 }
 
+impl ConfigurationOverlay {
+    /// Whether this overlay replaces a stable-config field. Check before parsing
+    /// the lower-priority value so an invalid value cannot defeat its override.
+    pub(crate) fn overrides_stable_key(&self, key: &str) -> bool {
+        return match key {
+            "DD_RUM_MAJOR_VERSION" => self.major_version.is_some(),
+            "DD_RUM_APPLICATION_ID" => self.rum.application_id.is_some(),
+            "DD_RUM_CLIENT_TOKEN" => self.rum.client_token.is_some(),
+            "DD_RUM_SITE" => self.rum.site.is_some(),
+            "DD_RUM_SERVICE" => self.rum.service.is_some(),
+            "DD_RUM_ENVIRONMENT" => self.rum.env.is_some(),
+            "DD_RUM_VERSION" => self.rum.version.is_some(),
+            "DD_RUM_TRACK_USER_INTERACTIONS" => self.rum.track_user_interactions.is_some(),
+            "DD_RUM_TRACK_RESOURCES" => self.rum.track_resources.is_some(),
+            "DD_RUM_TRACK_LONG_TASKS" => self.rum.track_long_tasks.is_some(),
+            "DD_RUM_DEFAULT_PRIVACY_LEVEL" => self.rum.default_privacy_level.is_some(),
+            "DD_RUM_SESSION_SAMPLE_RATE" => self.rum.session_sample_rate.is_some(),
+            "DD_RUM_SESSION_REPLAY_SAMPLE_RATE" => self.rum.session_replay_sample_rate.is_some(),
+            "DD_RUM_REMOTE_CONFIGURATION_ID" => self.rum.remote_configuration_id.is_some(),
+            _ => false,
+        };
+    }
+}
+
 fn overlay_field<T>(dst: &mut Option<T>, src: Option<T>) {
     if src.is_some() {
         *dst = src;
@@ -214,8 +238,18 @@ fn is_valid_datacenter_prefix(s: &str) -> bool {
 
 const MAJOR_VERSIONS: [u32; 2] = [5, 6];
 
-/// Browser SDK major version used when `DD_RUM_MAJOR_VERSION` is not set.
-const DEFAULT_MAJOR_VERSION: u32 = 6;
+/// The Browser SDK major version used when nothing configured one.
+///
+/// Only reachable through [`Configuration::from_lookup`], i.e. the stable-config
+/// path: `majorVersion` is a required field of the JSON shape, so
+/// [`parse_configuration`] never falls back to this.
+///
+/// It is 6 to agree with the IIS injector's `RUM_schema.xml`, whose `version`
+/// attribute defaults to 6. The agent installer writes no
+/// `DD_RUM_MAJOR_VERSION` into `application_monitoring.yaml`, so without this a
+/// fleet-configured site would silently get a different major version than a
+/// site configured through the IIS section on the same host.
+pub const DEFAULT_MAJOR_VERSION: u32 = 6;
 
 /// Parse a [`Configuration`] from JSON.
 ///
@@ -566,6 +600,19 @@ mod test {
         assert_eq!(config.rum.client_token.as_deref(), Some("tok-1"));
         assert_eq!(config.major_version, DEFAULT_MAJOR_VERSION);
         assert_eq!(config.rum.site, None);
+    }
+
+    #[test]
+    fn default_major_version_matches_the_iis_schema() {
+        // Pinned deliberately: the IIS RUM_schema.xml defaults `version` to 6, and
+        // the agent installer never writes DD_RUM_MAJOR_VERSION. If these drift
+        // apart, two sites on the same host get different Browser SDK majors
+        // depending only on whether they have a <datadogRum> section.
+        assert_eq!(DEFAULT_MAJOR_VERSION, 6);
+        assert!(MAJOR_VERSIONS.contains(&DEFAULT_MAJOR_VERSION));
+
+        let config = Configuration::from_lookup(|_| return None).unwrap();
+        assert_eq!(config.major_version, 6);
     }
 
     #[test]

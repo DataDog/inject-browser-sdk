@@ -59,7 +59,8 @@ pub struct Snippet {
     /// The snippet bytes length.
     pub length: u32,
     /// Resolved `DD_RUM_ENABLED`, using the `RUM_ENABLED_*` constants below.
-    /// Plain JSON snippets always report [`RUM_ENABLED_UNSET`].
+    /// Plain JSON snippets always report [`RUM_ENABLED_UNSET`]: the JSON shape
+    /// accepted by [`snippet_create_from_json`] has no `enabled` key.
     pub rum_enabled: u8,
     /// Resolved `applicationId`, or `NULL` when unset.
     pub application_id: *const c_char,
@@ -242,10 +243,20 @@ pub unsafe extern "C" fn snippet_create_from_json(json: *const c_char) -> *mut S
     }
     let json_bytes = CStr::from_ptr(json).to_bytes();
 
-    let result = parse_configuration(json_bytes)
-        .and_then(|configuration| return generate_snippet(&configuration));
+    // Report the resolved ids the same way the stable-config path does, so
+    // hosts can derive telemetry tags from the snippet regardless of which
+    // constructor produced it. `enabled` has no place in this JSON shape, so
+    // `rum_enabled` stays RUM_ENABLED_UNSET.
+    let result = parse_configuration(json_bytes).and_then(|configuration| {
+        return Ok(StableConfigSnippet {
+            bytes: generate_snippet(&configuration)?,
+            enabled: None,
+            application_id: configuration.rum.application_id.clone(),
+            remote_configuration_id: configuration.rum.remote_configuration_id.clone(),
+        });
+    });
 
-    return SnippetInternal::new(result).into_public_ptr();
+    return SnippetInternal::new_from_stable_config(result).into_public_ptr();
 }
 
 /// Free the [`Snippet`] associated memory.
@@ -272,6 +283,49 @@ mod tests {
         let snippet =
             unsafe { snippet_create_from_json(cstr_ptr(b"{\"majorVersion\":5,\"rum\":{}}\0")) };
         assert_ne!(snippet, null_mut());
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn json_snippet_reports_resolved_ids() {
+        // The IIS module derives its telemetry tags from these fields, so both
+        // snippet constructors have to populate them.
+        let snippet = unsafe {
+            snippet_create_from_json(
+                cstr_ptr(b"{\"majorVersion\":5,\"rum\":{\"applicationId\":\"app-json\",\"clientToken\":\"tok-json\",\"remoteConfigurationId\":\"rc-json\"}}\0"),
+            )
+        };
+        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_eq!(s.error_code, 0);
+        assert_eq!(
+            unsafe { CStr::from_ptr(s.application_id) }
+                .to_str()
+                .unwrap(),
+            "app-json"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(s.remote_configuration_id) }
+                .to_str()
+                .unwrap(),
+            "rc-json"
+        );
+        assert_eq!(
+            s.rum_enabled, RUM_ENABLED_UNSET,
+            "the JSON shape has no enabled key"
+        );
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn json_snippet_without_ids_reports_null() {
+        let snippet = unsafe {
+            snippet_create_from_json(
+                cstr_ptr(b"{\"majorVersion\":5,\"rum\":{\"applicationId\":\"app\",\"clientToken\":\"tok\"}}\0"),
+            )
+        };
+        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_eq!(s.error_code, 0);
+        assert_eq!(s.remote_configuration_id, null());
         unsafe { snippet_cleanup(snippet) };
     }
 

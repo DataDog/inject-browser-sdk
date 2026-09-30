@@ -18,69 +18,10 @@
 #include <rapidjson/writer.h>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace datadog::rum {
 namespace {
-
-Snippet* make_snippet(const int version, const std::unordered_map<std::string, std::string>& opts,
-                      Logger& logger) {
-  rapidjson::Document doc;
-  doc.SetObject();
-
-  rapidjson::Document::AllocatorType& allocator = doc.GetAllocator();
-  doc.AddMember("majorVersion", version, allocator);
-
-  rapidjson::Value rum(rapidjson::kObjectType);
-  for (const auto& [key, value] : opts) {
-    if (key == "majorVersion") {
-      continue;
-    }
-    if (key == "sessionSampleRate" || key == "sessionReplaySampleRate") {
-      try {
-        rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
-                      rapidjson::Value(std::stod(value)).Move(), allocator);
-      } catch (const std::exception&) {
-        logger.error(std::format("Invalid numeric value '{}' for config key '{}'", value, key));
-        continue;
-      }
-    } else if (key == "trackResources" || key == "trackLongTasks" ||
-               key == "trackUserInteractions") {
-      auto b = (value == "true");
-      rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(), rapidjson::Value(b).Move(),
-                    allocator);
-    } else if (key == "allowedTracingUrls") {
-      rapidjson::Value urlArray(rapidjson::kArrayType);
-      std::stringstream ss(value);
-      std::string url;
-
-      while (std::getline(ss, url, ',')) {
-        auto start = url.find_first_not_of(" \t");
-        if (start != std::string::npos) {
-          auto end = url.find_last_not_of(" \t");
-          url = url.substr(start, end - start + 1);
-
-          urlArray.PushBack(rapidjson::Value(url.c_str(), allocator).Move(), allocator);
-        }
-      }
-
-      if (!urlArray.Empty()) {
-        rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(), urlArray.Move(), allocator);
-      }
-    } else {
-      rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
-                    rapidjson::Value(value.c_str(), allocator).Move(), allocator);
-    }
-  }
-
-  doc.AddMember("rum", rum, allocator);
-
-  // Convert the document to a JSON string
-  rapidjson::StringBuffer buffer;
-  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-  doc.Accept(writer);
-
-  return snippet_create_from_json(buffer.GetString());
-}
 
 IAppHostProperty* get_property(IAppHostElement& xmlElement, std::wstring_view name) {
   IAppHostProperty* property = nullptr;
@@ -135,7 +76,91 @@ Enum read_enum_property(IAppHostElement& element, std::wstring_view name, Enum f
   return static_cast<Enum>(raw);
 }
 
+// Test-only override of the stable-config file paths; see
+// set_stable_config_paths_for_testing.
+const char* g_stable_config_local_path = nullptr;
+const char* g_stable_config_fleet_path = nullptr;
+
 }  // namespace
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+void set_stable_config_paths_for_testing(const char* local_path, const char* fleet_path) {
+  g_stable_config_local_path = local_path;
+  g_stable_config_fleet_path = fleet_path;
+}
+
+std::pair<const char*, const char*> stable_config_paths() {
+  return {g_stable_config_local_path, g_stable_config_fleet_path};
+}
+
+std::string make_config_json(std::optional<int> major_version, std::optional<bool> enabled,
+                             const std::unordered_map<std::string, std::string>& opts,
+                             Logger& logger) {
+  rapidjson::Document doc;
+  doc.SetObject();
+
+  rapidjson::Document::AllocatorType& allocator = doc.GetAllocator();
+  if (major_version.has_value()) {
+    doc.AddMember("majorVersion", *major_version, allocator);
+  }
+  if (enabled.has_value()) {
+    doc.AddMember("enabled", *enabled, allocator);
+  }
+
+  rapidjson::Value rum(rapidjson::kObjectType);
+  for (const auto& [key, value] : opts) {
+    if (key == "majorVersion") {
+      continue;
+    }
+    if (key == "sessionSampleRate" || key == "sessionReplaySampleRate") {
+      try {
+        rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
+                      rapidjson::Value(std::stod(value)).Move(), allocator);
+      } catch (const std::exception&) {
+        logger.error(std::format("Invalid numeric value '{}' for config key '{}'", value, key));
+        continue;
+      }
+    } else if (key == "trackResources" || key == "trackLongTasks" ||
+               key == "trackUserInteractions") {
+      auto b = (value == "true");
+      rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(), rapidjson::Value(b).Move(),
+                    allocator);
+    } else if (key == "allowedTracingUrls") {
+      rapidjson::Value urlArray(rapidjson::kArrayType);
+      std::stringstream ss(value);
+      std::string url;
+
+      while (std::getline(ss, url, ',')) {
+        auto start = url.find_first_not_of(" \t");
+        if (start != std::string::npos) {
+          auto end = url.find_last_not_of(" \t");
+          url = url.substr(start, end - start + 1);
+
+          urlArray.PushBack(rapidjson::Value(url.c_str(), allocator).Move(), allocator);
+        }
+      }
+
+      if (!urlArray.Empty()) {
+        rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(), urlArray.Move(), allocator);
+      }
+    } else {
+      rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
+                    rapidjson::Value(value.c_str(), allocator).Move(), allocator);
+    }
+  }
+
+  // Always present, even when empty: the overlay's `rum` member is what carries
+  // the per-site SDK options, and an absent one is indistinguishable from an
+  // empty one to the parser.
+  doc.AddMember("rum", rum, allocator);
+
+  // Convert the document to a JSON string
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+
+  return buffer.GetString();
+}
 
 std::string wstring_to_utf8(const std::wstring& wstr) {
   if (wstr.empty()) return {};
@@ -205,9 +230,15 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   auto res = admin_manager->GetAdminSection((BSTR)L"system.webServer/datadogRum",
                                             const_cast<BSTR>(cfg_path), &cfg_root_elem);
   if (res != S_OK) {
-    logger.debug(std::format("datadogRum config section not found: {}",
+    logger.debug(std::format("Failed to read datadogRum config section: {}",
                              std::system_category().message(res)));
-    return ReadConfResult::absent();
+    if (res == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
+      return ReadConfResult::not_found();
+    }
+    return ReadConfResult::error();
+  }
+  if (cfg_root_elem == nullptr) {
+    return ReadConfResult::error();
   }
 
   const auto defer_root = defer([&] { cfg_root_elem->Release(); });
@@ -230,24 +261,36 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   }
   if (!enabled_val.boolVal) {
     logger.info("RUM injection disabled for this path");
-    return ReadConfResult::absent();
+    return ReadConfResult::disabled();
   }
 
-  int cfg_version = 6;
+  // Left unset when the section carries no usable version, so the value can
+  // come from stable configuration instead of being pinned here.
+  std::optional<int> cfg_version;
   auto* version_prop = get_property(*cfg_root_elem, L"version");
   if (version_prop != nullptr) {
     const auto defer_version_prop = defer([&] { version_prop->Release(); });
     auto version_val = get_property_value(*version_prop);
     const auto defer_version_val = defer([&] { VariantClear(&version_val); });
-    if (version_val.vt == VT_I4) {
+    // A schema default must not override a stable-config major version. IIS exposes
+    // the same isDefaultValue metadata used by ConfigurationAttribute.
+    VARIANT is_default;
+    VariantInit(&is_default);
+    const auto defer_default = defer([&] { VariantClear(&is_default); });
+    const HRESULT hr_default = version_prop->GetMetadata((BSTR)L"isDefaultValue", &is_default);
+    if (FAILED(hr_default) || is_default.vt != VT_BOOL) {
+      logger.debug("Failed to read version default metadata");
+      return ReadConfResult::error();
+    }
+    if (is_default.boolVal != VARIANT_FALSE) {
+      // Leave majorVersion unset so stable configuration can supply it.
+    } else if (version_val.vt == VT_I4) {
       cfg_version = version_val.lVal;
     } else if (version_val.vt == VT_I2) {
       cfg_version = version_val.iVal;
     } else if (version_val.vt != VT_EMPTY) {
-      logger.info(
-          std::format("Unexpected version type (vt={}), "
-                      "using default version {}",
-                      version_val.vt, cfg_version));
+      logger.info(std::format("Unexpected version type (vt={}), leaving majorVersion unset",
+                              version_val.vt));
     }
   }
 
@@ -338,17 +381,21 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     }
   }
 
-  return ReadConfResult::ok(RumConfig{cfg_version, std::move(rum_sdk_opts), injection_strategy});
+  RumConfig config{cfg_version, std::move(rum_sdk_opts), injection_strategy};
+  if (config.empty()) {
+    // IIS hands back the schema-defaulted section for every site once
+    // datadogRum is registered in configSections, so "the section resolved" is
+    // not evidence that anyone configured this site. Reporting NotFound is what
+    // lets stable configuration apply to sites with no <datadogRum> element.
+    logger.debug("datadogRum section carries no SDK options; treating as unconfigured");
+    return ReadConfResult::not_found(std::move(config));
+  }
+  return ReadConfResult::ok(std::move(config));
 }
 
 void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR config_path,
-                           Logger& logger) {
-  auto result = read_conf(server, config_path, logger);
-  if (result.status == ReadConfStatus::Error) {
-    logger.info("Keeping existing config after transient read error");
-    return;
-  }
-  if (result.status == ReadConfStatus::Absent) {
+                           Logger& logger, const ::StableConfig* stable_config) {
+  auto disable_injection = [&] {
     if (ctx.snippet != nullptr) {
       snippet_cleanup(ctx.snippet);
       ctx.snippet = nullptr;
@@ -356,18 +403,79 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
     ctx.application_id_tag.clear();
     ctx.remote_config_tag.clear();
     ctx.injection_strategy = InjectionStrategy::HeadCloseTag;
-    return;
+  };
+
+  auto result = read_conf(server, config_path, logger);
+  switch (result.status) {
+    case ReadConfStatus::Error:
+      logger.info("Keeping existing config after transient read error");
+      return;
+    case ReadConfStatus::Disabled:
+      // An explicit enabled="false" outranks stable configuration.
+      disable_injection();
+      return;
+    case ReadConfStatus::NotFound:
+      if (stable_config == nullptr) {
+        disable_injection();
+        return;
+      }
+      break;
+    case ReadConfStatus::Ok:
+      break;
   }
 
-  auto& config = *result.config;
-  Snippet* snippet = make_snippet(config.version, config.sdk_options, logger);
+  // Rendered outside the branches so the C string stays alive across the call.
+  std::string config_json;
+  Snippet* snippet = nullptr;
+  if (stable_config == nullptr) {
+    // No usable stable configuration: the IIS section is the whole story, so
+    // supply the schema's majorVersion rather than leaving it to the library's
+    // own default.
+    const auto& config = *result.config;
+    config_json = make_config_json(config.version.value_or(k_iis_default_major_version),
+                                   std::nullopt, config.sdk_options, logger);
+    snippet = snippet_create_from_json(config_json.c_str());
+  } else {
+    const char* overlay = nullptr;
+    if (result.config.has_value() &&
+        (result.config->version.has_value() || !result.config->sdk_options.empty())) {
+      const auto& config = *result.config;
+      // `enabled` is deliberately never emitted: IIS's enabled="false" is
+      // already handled as Disabled above, and emitting enabled=true here would
+      // override a DD_RUM_ENABLED=false coming from stable configuration.
+      config_json = make_config_json(config.version, std::nullopt, config.sdk_options, logger);
+      overlay = config_json.c_str();
+    }
+    snippet = stable_config_snippet_create(stable_config, overlay);
+    // A parsed file can still carry invalid RUM values. A complete, valid IIS
+    // configuration remains usable in that case, just as when the file fails
+    // to parse. Successful stable opt-outs never enter this error path.
+    if (snippet != nullptr && snippet->error_code >= 2 && snippet->error_code <= 6 &&
+        result.status == ReadConfStatus::Ok) {
+      const auto& config = *result.config;
+      config_json = make_config_json(config.version.value_or(k_iis_default_major_version),
+                                     std::nullopt, config.sdk_options, logger);
+      Snippet* fallback = snippet_create_from_json(config_json.c_str());
+      if (fallback != nullptr && fallback->error_code == 0) {
+        logger.info("Ignoring invalid stable RUM values; using IIS configuration");
+        telemetry::increment(
+            telemetry::config_invalid,
+            telemetry::build_tags(std::format("error_code:{}", snippet->error_code),
+                                  ctx.application_id_tag, ctx.remote_config_tag));
+        snippet_cleanup(snippet);
+        snippet = fallback;
+      } else {
+        snippet_cleanup(fallback);
+      }
+    }
+  }
 
-  // On make_snippet failure, preserve the existing snippet/tags. Operators
+  // On snippet-creation failure, preserve the existing snippet/tags. Operators
   // prefer continued injection with the last-known-good config over going
   // dark on a broken deploy; the next valid reload replaces it.
   auto report_invalid = [&](std::string error_tag, const std::string& message) {
     logger.error(message + "; keeping previous config");
-    datadog::telemetry::counter::increment(
+    telemetry::increment(
         telemetry::config_invalid,
         telemetry::build_tags(std::move(error_tag), ctx.application_id_tag, ctx.remote_config_tag));
   };
@@ -376,31 +484,50 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
     report_invalid("error_code:alloc", "Failed to create RUM snippet");
     return;
   }
+  const auto defer_snippet = defer([&] {
+    if (snippet != nullptr) {
+      snippet_cleanup(snippet);
+    }
+  });
+
+  if (snippet->error_code == 10) {
+    // Nothing configured in IIS, nothing in application_monitoring.yaml. The
+    // ordinary state of a host that doesn't use RUM injection, so stay quiet
+    // and emit no telemetry.
+    logger.debug("No RUM configuration found in IIS config or stable configuration");
+    disable_injection();
+    return;
+  }
   if (snippet->error_code != 0) {
     report_invalid(std::format("error_code:{}", snippet->error_code),
                    std::format("Failed to create RUM snippet: {}", snippet->error_message));
-    snippet_cleanup(snippet);
     return;
   }
+  if (snippet->rum_enabled == RUM_ENABLED_FALSE || snippet->length == 0) {
+    logger.info("RUM injection disabled by stable configuration");
+    disable_injection();
+    return;
+  }
+
+  // Read the resolved ids off the snippet before anything can free it: they are
+  // the only place values sourced from stable configuration are visible.
+  std::string application_id_tag;
+  if (snippet->application_id != nullptr) {
+    application_id_tag = std::format("application_id:{}", snippet->application_id);
+  }
+  auto remote_config_tag =
+      std::format("remote_config_used:{}", snippet->remote_configuration_id != nullptr);
 
   logger.info("Configuration validated");
   if (ctx.snippet != nullptr) {
     snippet_cleanup(ctx.snippet);
   }
   ctx.snippet = snippet;
-
-  // Only updated alongside the snippet: on a failed read the previous setting stays in force, for
-  // the same reason the previous snippet does.
-  ctx.injection_strategy = config.injection_strategy;
-
-  ctx.application_id_tag.clear();
-  if (auto appIdIt = config.sdk_options.find("applicationId");
-      appIdIt != config.sdk_options.end()) {
-    ctx.application_id_tag = std::format("application_id:{}", appIdIt->second);
-  }
-
-  auto rcUsed = config.sdk_options.count("remoteConfigurationId") > 0;
-  ctx.remote_config_tag = std::format("remote_config_used:{}", rcUsed);
+  snippet = nullptr;  // ownership moved to ctx; keep defer_snippet from freeing it
+  ctx.application_id_tag = std::move(application_id_tag);
+  ctx.remote_config_tag = std::move(remote_config_tag);
+  ctx.injection_strategy = result.config.has_value() ? result.config->injection_strategy
+                                                     : InjectionStrategy::HeadCloseTag;
 }
 
 }  // namespace datadog::rum

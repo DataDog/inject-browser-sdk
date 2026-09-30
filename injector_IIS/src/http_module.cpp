@@ -78,10 +78,12 @@ ModuleContext* try_cache_per_location_context(IHttpContext& http_context, Module
   auto new_ctx = std::make_unique<ModuleContext>();
   new_ctx->logger = app_ctx.logger;
   new_ctx->server = app_ctx.server;
+  new_ctx->stable_config = app_ctx.stable_config;
 
   // Cache even on Error: avoids retrying a broken COM read every request.
   // Recovery happens via OnGlobalConfigurationChange.
-  update_module_context(*new_ctx, *app_ctx.server, meta_path, *app_ctx.logger);
+  update_module_context(*new_ctx, *app_ctx.server, meta_path, *app_ctx.logger,
+                        app_ctx.stable_config);
 
   // Inherit app-level tags when per-location config didn't set its own.
   if (new_ctx->application_id_tag.empty()) new_ctx->application_id_tag = app_ctx.application_id_tag;
@@ -203,10 +205,9 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
   if (content_type.size() < kHtmlPrefix.size() ||
       _strnicmp(content_type.data(),  // NOLINT(bugprone-suspicious-stringview-data-usage)
                 kHtmlPrefix.data(), kHtmlPrefix.size()) != 0) {
-    datadog::telemetry::counter::increment(
-        telemetry::injection_skipped,
-        telemetry::build_tags("reason:content-type", ctx.application_id_tag,
-                              ctx.remote_config_tag));
+    telemetry::increment(telemetry::injection_skipped,
+                         telemetry::build_tags("reason:content-type", ctx.application_id_tag,
+                                               ctx.remote_config_tag));
     ctx.logger->debug("Skipping RUM injection: content type is not text/html ");
     return false;
   }
@@ -222,20 +223,18 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
 
   if (auto content_encoding = get_header(pHttpResponse, "Content-Encoding");
       !content_encoding.empty()) {
-    datadog::telemetry::counter::increment(
-        telemetry::injection_skipped,
-        telemetry::build_tags("reason:compressed_html",
-                              "content_encoding:" + std::string(content_encoding),
-                              ctx.application_id_tag, ctx.remote_config_tag));
+    telemetry::increment(telemetry::injection_skipped,
+                         telemetry::build_tags("reason:compressed_html",
+                                               "content_encoding:" + std::string(content_encoding),
+                                               ctx.application_id_tag, ctx.remote_config_tag));
     ctx.logger->debug("Skipping RUM injection: content is compressed");
     return false;
   }
 
   if (!get_header(pHttpResponse, k_injection_header).empty()) {
-    datadog::telemetry::counter::increment(
-        telemetry::injection_skipped,
-        telemetry::build_tags("reason:already_injected", ctx.application_id_tag,
-                              ctx.remote_config_tag));
+    telemetry::increment(telemetry::injection_skipped,
+                         telemetry::build_tags("reason:already_injected", ctx.application_id_tag,
+                                               ctx.remote_config_tag));
     ctx.logger->debug(
         "Skipping RUM injection: injection has "
         "already been attempted on this response");
@@ -394,10 +393,9 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
     // fit would be allocated short and written past its end.
     static_assert(k_max_buffered_response_length <= (std::numeric_limits<DWORD>::max)());
     if (total_length > k_max_buffered_response_length) {
-      datadog::telemetry::counter::increment(
-          telemetry::injection_skipped,
-          telemetry::build_tags("reason:response_too_large", ctx.application_id_tag,
-                                ctx.remote_config_tag));
+      telemetry::increment(telemetry::injection_skipped,
+                           telemetry::build_tags("reason:response_too_large",
+                                                 ctx.application_id_tag, ctx.remote_config_tag));
       logger.debug("Skipping RUM injection: response too large to buffer (" +
                    std::to_string(total_length) + " bytes)");
       injector_cleanup(injector);
@@ -468,13 +466,11 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
   }
 
   if (injected) {
-    datadog::telemetry::counter::increment(
-        telemetry::injection_succeed,
-        telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
+    telemetry::increment(telemetry::injection_succeed,
+                         telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
   } else {
-    datadog::telemetry::counter::increment(
-        telemetry::injection_failed,
-        telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
+    telemetry::increment(telemetry::injection_failed,
+                         telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
   }
 
   injector_cleanup(injector);

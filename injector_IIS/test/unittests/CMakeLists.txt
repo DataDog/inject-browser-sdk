@@ -16,6 +16,7 @@ target_sources(iis_injector_tests
     test_entrypoint.cpp
     test_http_module.cpp
     test_injection_pipeline.cpp
+    test_stable_config.cpp
 )
 
 target_compile_options(iis_injector_tests

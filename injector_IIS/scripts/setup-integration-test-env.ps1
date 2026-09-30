@@ -29,6 +29,12 @@
 .PARAMETER RepoRoot
     Repository root. Defaults to two directories above this script.
 
+.PARAMETER StableConfig
+    Create a third site (port 8082) with no IIS RUM configuration and explicitly
+    opt the disabled site out. Use run-integration-tests.ps1 -StableConfig to
+    install a temporary YAML fixture for the test session. Setup never changes
+    an existing application_monitoring.yaml.
+
 .EXAMPLE
     # Raw DLL (after a local native build):
     .\setup-integration-test-env.ps1 -DllPath .\injector_IIS\build\iis_injector.dll
@@ -42,7 +48,8 @@
 param(
     [string]$DllPath,
     [string]$MsiPath,
-    [string]$RepoRoot
+    [string]$RepoRoot,
+    [switch]$StableConfig
 )
 
 #Requires -RunAsAdministrator
@@ -327,7 +334,37 @@ function New-TestSites {
     }
 
     Add-RewriteProxyRule -SiteName $site2Name
-    # Intentionally no RUM configuration on this site
+    # Intentionally no RUM configuration on this site.
+    # In -StableConfig mode that is no longer enough to keep it quiet -- stable
+    # configuration applies to every site with no IIS section -- so opt it out
+    # explicitly. This also asserts that an explicit per-site enabled="false"
+    # outranks stable configuration.
+    if ($StableConfig) {
+        Write-Host "Explicitly disabling RUM on '$site2Name' (stable config is present)..."
+        Set-WebConfigurationProperty -PSPath "MACHINE/WEBROOT/APPHOST/$site2Name" `
+            -filter "system.webServer/datadogRum" -name "enabled" -value "False"
+    }
+
+    # Site 3: no IIS RUM configuration whatsoever (port 8082). Injects purely
+    # from application_monitoring.yaml.
+    if ($StableConfig) {
+        $site3Name = "TestRumStableConfig"
+        $site3Root = "$env:SystemDrive\$site3Name"
+
+        if (-not (Get-Website -Name $site3Name -ErrorAction SilentlyContinue)) {
+            Write-Host "Creating site '$site3Name'..."
+            New-Item -ItemType Directory -Force -Path $site3Root | Out-Null
+            if (Test-Path $staticSrc) {
+                Copy-Item "$staticSrc\*" $site3Root -Recurse -Force
+            }
+            New-Website -Name $site3Name -Port 8082 -PhysicalPath $site3Root -ApplicationPool $appPool -Force
+        } else {
+            Write-Host "Site '$site3Name' already exists."
+            Set-ItemProperty "IIS:\Sites\$site3Name" -Name applicationPool -Value $appPool
+        }
+
+        Add-RewriteProxyRule -SiteName $site3Name
+    }
 
     Write-Host "Restarting IIS to apply all changes..."
     iisreset /restart

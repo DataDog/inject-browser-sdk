@@ -11,7 +11,10 @@ use core::ffi::{c_char, CStr};
 use core::ptr::null;
 
 use inject_browser_sdk::{
-    error::Error, parse_configuration_overlay, read_stable_config, snippet_from_stable_config,
+    error::Error,
+    parse_configuration_overlay,
+    platform::{FLEET_STABLE_CONFIGURATION_PATH, LOCAL_STABLE_CONFIGURATION_PATH},
+    read_stable_config, read_stable_config_from_paths, snippet_from_stable_config,
     ConfigurationOverlay, StableConfig as CoreStableConfig,
 };
 
@@ -23,6 +26,23 @@ fn cstr_to_str<'a>(cstr: &'a CStr, field: &str) -> Result<&'a str, Error> {
     return cstr
         .to_str()
         .map_err(|_| return Error::FfiInvalidUtf8(field.to_string()));
+}
+
+/// Borrows an optional C string, substituting `default` when it is NULL.
+///
+/// # Safety
+///
+/// If `ptr` is non-null it must point to a valid NUL-terminated C string that
+/// outlives the returned `&str`.
+unsafe fn str_or_default<'a>(
+    ptr: *const c_char,
+    field: &str,
+    default: &'a str,
+) -> Result<&'a str, Error> {
+    if ptr.is_null() {
+        return Ok(default);
+    }
+    return cstr_to_str(CStr::from_ptr(ptr), field);
 }
 
 /// Create a snippet from Datadog stable configuration files, with an optional JSON overlay.
@@ -229,6 +249,57 @@ pub unsafe extern "C" fn stable_config_read(
 
     return StableConfigInternal::new(read_stable_config(language_str, debug_logs))
         .into_public_ptr();
+}
+
+/// Variant of [`stable_config_read`] that reads the configuration files from
+/// caller-supplied paths.
+///
+/// Exists for tests: the production paths are compile-time constants, so there
+/// is otherwise no way to exercise a real YAML file without writing to a
+/// machine-global location. Passing NULL for either path uses the platform
+/// default for that file.
+///
+/// # Memory ownership
+///
+/// All input pointers are owned by the caller. The returned `StableConfig` must
+/// be freed with [`stable_config_cleanup`].
+///
+/// # Safety
+///
+/// Each non-NULL pointer must point to a valid NUL-terminated C string. A NULL
+/// `language` is tolerated and returns error code 7.
+#[no_mangle]
+pub unsafe extern "C" fn stable_config_read_from_paths(
+    language: *const c_char,
+    debug_logs: bool,
+    local_path: *const c_char,
+    fleet_path: *const c_char,
+) -> *mut StableConfig {
+    if language.is_null() {
+        return StableConfigInternal::new(Err(Error::FfiNullPointer(String::from("language"))))
+            .into_public_ptr();
+    }
+
+    let language_str = match cstr_to_str(CStr::from_ptr(language), "language") {
+        Ok(s) => s,
+        Err(e) => return StableConfigInternal::new(Err(e)).into_public_ptr(),
+    };
+    let local = match str_or_default(local_path, "local_path", LOCAL_STABLE_CONFIGURATION_PATH) {
+        Ok(s) => s,
+        Err(e) => return StableConfigInternal::new(Err(e)).into_public_ptr(),
+    };
+    let fleet = match str_or_default(fleet_path, "fleet_path", FLEET_STABLE_CONFIGURATION_PATH) {
+        Ok(s) => s,
+        Err(e) => return StableConfigInternal::new(Err(e)).into_public_ptr(),
+    };
+
+    return StableConfigInternal::new(read_stable_config_from_paths(
+        language_str,
+        debug_logs,
+        local,
+        fleet,
+    ))
+    .into_public_ptr();
 }
 
 /// Build a snippet from an already-read [`StableConfig`]. Does no file I/O.
@@ -483,6 +554,129 @@ mod tests {
     #[test]
     fn cleanup_tolerates_null() {
         unsafe { stable_config_cleanup(null_mut()) };
+    }
+
+    /// Covers `stable_config_read_from_paths`, the entry point the IIS unit
+    /// tests use to point the reader at a temp directory instead of
+    /// `C:\ProgramData\Datadog`.
+    mod from_paths {
+        use super::*;
+        use alloc::ffi::CString;
+        use pretty_assertions::{assert_eq, assert_ne};
+        use std::fs;
+        use std::path::{Path, PathBuf};
+
+        fn tmp_dir(name: &str) -> PathBuf {
+            let mut dir = std::env::temp_dir();
+            dir.push(std::format!(
+                "inject-browser-sdk-ffi-{}-{}",
+                std::process::id(),
+                name
+            ));
+            fs::create_dir_all(&dir).expect("temp dir");
+            return dir;
+        }
+
+        fn c_path(dir: &Path, name: &str, contents: Option<&str>) -> CString {
+            let path = dir.join(name);
+            if let Some(contents) = contents {
+                fs::write(&path, contents).expect("write config");
+            }
+            return CString::new(path.to_str().expect("UTF-8 temp path")).expect("no NUL");
+        }
+
+        #[test]
+        fn reads_a_real_file_and_builds_a_snippet() {
+            let dir = tmp_dir("read");
+            let local = c_path(
+                &dir,
+                "local.yaml",
+                Some("apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-file\n  DD_RUM_CLIENT_TOKEN: tok-file\n"),
+            );
+            let fleet = c_path(&dir, "absent.yaml", None);
+
+            let config = unsafe {
+                stable_config_read_from_paths(
+                    cstr_ptr(b"browser-sdk\0"),
+                    false,
+                    local.as_ptr(),
+                    fleet.as_ptr(),
+                )
+            };
+            let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
+            assert_eq!(c.error_code, 0);
+            assert!(!c.is_empty, "the local file supplied DD_RUM_* entries");
+
+            let snippet = unsafe { stable_config_snippet_create(config, null()) };
+            let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+            assert_eq!(s.error_code, 0);
+            assert!(s.length > 0);
+            assert_ne!(s.application_id, null());
+            assert_eq!(
+                unsafe { CStr::from_ptr(s.application_id) }
+                    .to_str()
+                    .unwrap(),
+                "app-file"
+            );
+
+            unsafe { snippet_cleanup(snippet) };
+            unsafe { stable_config_cleanup(config) };
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn null_paths_fall_back_to_the_platform_defaults() {
+            // Equivalent to stable_config_read on a host with no stable config.
+            let config = unsafe {
+                stable_config_read_from_paths(cstr_ptr(b"browser-sdk\0"), false, null(), null())
+            };
+            let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
+            assert_eq!(c.error_code, 0);
+            unsafe { stable_config_cleanup(config) };
+        }
+
+        #[test]
+        fn broken_file_surfaces_error_code_6() {
+            let dir = tmp_dir("broken");
+            let local = c_path(&dir, "local.yaml", Some("::: not : yaml :::"));
+            let fleet = c_path(&dir, "absent.yaml", None);
+
+            let config = unsafe {
+                stable_config_read_from_paths(
+                    cstr_ptr(b"browser-sdk\0"),
+                    false,
+                    local.as_ptr(),
+                    fleet.as_ptr(),
+                )
+            };
+            let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
+            assert_eq!(c.error_code, 6);
+            unsafe { stable_config_cleanup(config) };
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn null_language_is_reported() {
+            let config = unsafe { stable_config_read_from_paths(null(), false, null(), null()) };
+            let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
+            assert_eq!(c.error_code, 7);
+            unsafe { stable_config_cleanup(config) };
+        }
+
+        #[test]
+        fn invalid_utf8_path_is_reported() {
+            let config = unsafe {
+                stable_config_read_from_paths(
+                    cstr_ptr(b"browser-sdk\0"),
+                    false,
+                    cstr_ptr(&[0xFFu8, 0u8]),
+                    null(),
+                )
+            };
+            let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
+            assert_eq!(c.error_code, 8);
+            unsafe { stable_config_cleanup(config) };
+        }
     }
 
     #[test]

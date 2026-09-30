@@ -10,6 +10,8 @@ variables:
 
 ########################################
 # IIS build and test jobs
+# Windows containers use a fresh CARGO_HOME: extracting new crates into the
+# image's prepopulated registry currently fails with invalid-path errors.
 ########################################
 
 .IIS_build:
@@ -47,6 +49,7 @@ variables:
       -e CI=true
       -e CI_JOB_ID=${CI_JOB_ID}
       -e CI_PROJECT_NAME=${CI_PROJECT_NAME}
+      -e CARGO_HOME=c:\ci-cargo
       ${WINDOWS_BUILD_IMAGE}
       c:\mnt\injector_IIS\scripts\build_injector_IIS.bat
     # Copy output files to artifacts dir for use in later jobs
@@ -101,6 +104,7 @@ injector_IIS_unit_test:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
+      -e CARGO_HOME=c:\ci-cargo
       ${WINDOWS_BUILD_IMAGE}
       powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
     - If ($lastExitCode -ne 0) { exit $lastExitCode }
@@ -116,6 +120,7 @@ injector_IIS_unit_test_asan:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
+      -e CARGO_HOME=c:\ci-cargo
       ${WINDOWS_BUILD_IMAGE}
       powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
       -Preset ci-native-asan -BuildDir build-asan -BuildType Debug
@@ -142,6 +147,20 @@ injector_IIS_integration_test:
   script:
     - .\injector_IIS\scripts\setup-integration-test-env.ps1 -DllPath ".\${ARTIFACTS_DIR}\injector_IIS.dll" -RepoRoot "."
     - .\injector_IIS\scripts\run-integration-tests.ps1
+
+# Same environment as injector_IIS_integration_test plus a site with no IIS RUM
+# section. The runner installs a temporary local stable-config fixture and
+# restores any original file afterward. Both runs require no fleet-managed file.
+injector_IIS_integration_test_stable_config:
+  stage: test
+  tags: ["windows-v2:2022"]
+  extends: .IIS_build_when
+  needs: ["injector_IIS_build"]
+  variables:
+    DD_RUM_STABLE_CONFIG_TEST: "1"
+  script:
+    - .\injector_IIS\scripts\setup-integration-test-env.ps1 -DllPath ".\${ARTIFACTS_DIR}\injector_IIS.dll" -RepoRoot "." -StableConfig
+    - .\injector_IIS\scripts\run-integration-tests.ps1 -StableConfig
 
 injector_IIS_integration_test_msi:
   stage: test

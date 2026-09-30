@@ -55,6 +55,8 @@ jobs:
           path: injector_IIS/build
       - name: Run Unit Tests
         run: .\injector_IIS\build\test\unittests\iis_injector_tests.exe
+      - name: Check stable-config test cleanup
+        run: .\injector_IIS\test\test_stable_configuration.ps1
       - name: Install Dependencies
         run: |
           choco install -y wixtoolset
@@ -79,4 +81,9 @@ jobs:
       - name: Run End-to-End Tests
         # --isolation=hyperv allows running Windows images built on a different Windows Server
         # version than the runner (e.g. ltsc2019 image on windows-2022 host).
-        run: docker run --isolation=hyperv -e WEBSERVER-FLAVOR=iis -v ${pwd}:C:\inject-browser-sdk datadog/docker-library:rum-auto-instrumentation-windows-iis-latest powershell -Command "C:\inject-browser-sdk\injector_IIS\scripts\SetupIntegrationTestEnvironment.ps1; pytest C:\inject-browser-sdk\tests\integration_tests\scenario -v"
+        run: >-
+          docker run --isolation=hyperv --entrypoint powershell
+          -e WEBSERVER-FLAVOR=iis -v ${pwd}:C:\inject-browser-sdk
+          datadog/docker-library:rum-auto-instrumentation-windows-iis-latest
+          -NoProfile -ExecutionPolicy Bypass -File
+          C:\inject-browser-sdk\injector_IIS\scripts\ci\run-container-integration-tests.ps1

@@ -10,6 +10,8 @@ variables:
 
 ########################################
 # IIS build and test jobs
+# Windows containers use a fresh CARGO_HOME: extracting new crates into the
+# image's prepopulated registry currently fails with invalid-path errors.
 ########################################
 
 .IIS_build:
@@ -47,6 +49,7 @@ variables:
       -e CI=true
       -e CI_JOB_ID=${CI_JOB_ID}
       -e CI_PROJECT_NAME=${CI_PROJECT_NAME}
+      -e CARGO_HOME=c:\ci-cargo
       ${WINDOWS_BUILD_IMAGE}
       c:\mnt\injector_IIS\scripts\build_injector_IIS.bat
     # Copy output files to artifacts dir for use in later jobs
@@ -101,6 +104,7 @@ injector_IIS_unit_test:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
+      -e CARGO_HOME=c:\ci-cargo
       ${WINDOWS_BUILD_IMAGE}
       powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
     - If ($lastExitCode -ne 0) { exit $lastExitCode }
@@ -116,6 +120,7 @@ injector_IIS_unit_test_asan:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
+      -e CARGO_HOME=c:\ci-cargo
       ${WINDOWS_BUILD_IMAGE}
       powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
       -Preset ci-native-asan -BuildDir build-asan -BuildType Debug
@@ -234,6 +239,11 @@ manual_go_e2e_deps:
 .injector_IIS_e2e_test_template:
   stage: test
   tags: ["arch:amd64"]
+  # Two suites, each provisioning its own EC2 stack: successful runs land at
+  # 20-27min, so the old 30m go-test timeout tripped on any slow provision or
+  # slow IIS feature install. Keep the runner timeout above the go one so Go
+  # gets to print its goroutine dump instead of the job being cut short.
+  timeout: 1h30m
   retry:
     max: 2
     when:
@@ -272,10 +282,7 @@ manual_go_e2e_deps:
     ## the msi will have a version-specific name, but there should be only one.
     ## copy that to the filename expected by the test.
     - cp ${ARTIFACTS_DIR}/*.msi injector_IIS/test/e2e_tests/test_assets/injector_IIS.msi
-    # Both suites provision their own Windows VM and install IIS on it, which alone takes upwards of
-    # ten minutes each: a green run sits at around 24 of the 30 minutes this used to allow, so a
-    # slower than usual VM setup timed the whole binary out rather than failing anything.
-    - cd injector_IIS/test/e2e_tests && go test -v -timeout 45m
+    - cd injector_IIS/test/e2e_tests && go test -v -timeout 60m
   artifacts:
     expire_in: 2 weeks
     when: always
@@ -292,6 +299,92 @@ manual_injector_IIS_e2e_test:
   extends: .injector_IIS_e2e_test_template
   when: manual
   needs: ["manual_injector_IIS_build", "manual_go_e2e_deps"]
+
+########################################
+# OCI package (fleet automation)
+########################################
+
+# Builds datadog-apm-library-iis-rum from injector_IIS_build's artifacts. Runs on
+# Linux: datadog-package is a Linux binary, and the payload is already
+# Authenticode-signed by the Windows build job, so this job must only ever stage
+# files -- never produce them.
+.injector_IIS_oci:
+  stage: release
+  tags: ["arch:amd64"]
+  image: $IIS_AGENT_DEPLOY_IMAGE
+  variables:
+    # OCI_OUT_DIR is deliberately not $ARTIFACTS_DIR: .injector_IIS_release and
+    # the e2e template glob ${ARTIFACTS_DIR}/*.msi.
+    OCI_OUT_DIR: oci-out
+  before_script:
+    - !reference [.assert_oci_tooling]
+  script:
+    # --allow-prerelease so the packaging path and the shape assertion run on
+    # every change. iis.oci-push refuses a prerelease version, so a dev build can
+    # never be published.
+    - python3 -m unittest discover -s injector_IIS/test -p test_oci_signatures.py
+    - (cd injector_IIS && invoke iis.oci --allow-prerelease --artifacts-dir "../${ARTIFACTS_DIR}" --out-dir "../${OCI_OUT_DIR}")
+    - VERSION=$(cd injector_IIS && invoke iis.oci-version --allow-prerelease)
+    - python3 injector_IIS/scripts/ci/assert_oci_package.py
+      "${OCI_OUT_DIR}/datadog-apm-library-iis-rum-${VERSION}-windows-amd64.oci.tar"
+      datadog-apm-library-iis-rum "${VERSION}"
+  artifacts:
+    expire_in: 2 weeks
+    paths:
+      - $OCI_OUT_DIR
+
+# $IIS_AGENT_DEPLOY_IMAGE already ships datadog-package (the same CLI the agent's
+# own OCI jobs use), invoke, and zstd. That pins the CLI through the image tag,
+# which beats fetching it per-job. Assert rather than assume, so a buildimage
+# bump that drops one of them fails here instead of producing a bad package.
+.assert_oci_tooling:
+  - |
+    set -euo pipefail
+    missing=""
+    for tool in datadog-package invoke python3 zstd; do
+      command -v "$tool" >/dev/null || missing="$missing $tool"
+    done
+    if [ -n "$missing" ]; then
+      echo "Missing required tooling in \$IIS_AGENT_DEPLOY_IMAGE:$missing" >&2
+      exit 1
+    fi
+    datadog-package create --help >/dev/null
+
+injector_IIS_oci:
+  extends:
+    - .injector_IIS_oci
+    - .IIS_build_when
+  needs: ["injector_IIS_build"]
+
+manual_injector_IIS_oci:
+  extends: .injector_IIS_oci
+  when: manual
+  needs: ["manual_injector_IIS_build"]
+
+# Publishing is always a deliberate act: manual only.
+.injector_IIS_oci_push:
+  stage: release
+  tags: ["arch:amd64"]
+  image: $IIS_AGENT_DEPLOY_IMAGE
+  when: manual
+  allow_failure: false
+  variables:
+    OCI_OUT_DIR: oci-out
+    OCI_REGISTRY: registry.ddbuild.io/ci/remote-updates
+  before_script:
+    - !reference [.assert_oci_tooling]
+  script:
+    # No --allow-prerelease: publishing is releases-only, since there is no
+    # apmPackageDefaultVersions pin for iis-rum and `latest` is what an opted-in
+    # customer without a pin receives.
+    - (cd injector_IIS && invoke iis.oci-push
+      --oci-dir "../${OCI_OUT_DIR}"
+      --registry "${OCI_REGISTRY}"
+      --extra-tag "pipeline-${CI_PIPELINE_ID}")
+
+manual_injector_IIS_oci_push:
+  extends: .injector_IIS_oci_push
+  needs: ["manual_injector_IIS_oci"]
 
 .injector_IIS_release:
   stage: release

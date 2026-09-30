@@ -22,6 +22,15 @@ dir %outdir%
 if not exist %BUILD_OUTDIR% (mkdir %BUILD_OUTDIR%)
 copy /y %outdir%\*.msi %BUILD_OUTDIR% || exit /b 6
 copy /y %outdir%\*.dll %BUILD_OUTDIR% || exit /b 7
+:: The OCI payload, signed by iis.package. The injector_IIS_oci job runs on
+:: Linux and cannot sign anything, so these must travel from here.
+copy /y %outdir%\*.ps1 %BUILD_OUTDIR% || exit /b 8
+copy /y %outdir%\*.psm1 %BUILD_OUTDIR% || exit /b 9
+copy /y %outdir%\*.psd1 %BUILD_OUTDIR% || exit /b 10
+copy /y %outdir%\RUM_schema.xml %BUILD_OUTDIR% || exit /b 11
+if defined SIGN_WINDOWS_DD_WCS (
+    copy /y %outdir%\oci-signatures.json %BUILD_OUTDIR% || exit /b 12
+)
 
 goto :EOF
 

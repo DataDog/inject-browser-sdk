@@ -31,6 +31,16 @@ else()
   set(IIS_INJECTOR_VERSION_BUILD "0")
 endif()
 
+# Windows Installer caps each ProductVersion field at 65535; fail loudly here
+# rather than letting WiX produce an invalid MSI when the pipeline counter
+# crosses the threshold.
+if(NOT IIS_INJECTOR_VERSION_BUILD MATCHES "^[0-9]+$")
+  message(FATAL_ERROR "CI_PIPELINE_IID must be an integer, got '${IIS_INJECTOR_VERSION_BUILD}'")
+endif()
+if(IIS_INJECTOR_VERSION_BUILD GREATER 65535)
+  message(FATAL_ERROR "CI_PIPELINE_IID=${IIS_INJECTOR_VERSION_BUILD} exceeds the Windows Installer ProductVersion field limit (65535). Switch the BUILD slot to a bounded counter before pipelines cross this threshold.")
+endif()
+
 set(IIS_INJECTOR_VERSION "${IIS_INJECTOR_VERSION_MAJ}.${IIS_INJECTOR_VERSION_MIN}.${IIS_INJECTOR_VERSION_BUILD}")
 
 project(iis-injector LANGUAGES CXX VERSION ${IIS_INJECTOR_VERSION})

@@ -22,7 +22,19 @@ def do_get_build_env(ctx, vstudio_root=None):
         pre = ""
     # The BUILD slot of the MSI ProductVersion is CI_PIPELINE_IID at build
     # time. Locally that env var is unset, so we fall back to "0".
+    # Windows Installer caps each ProductVersion field at 65535, so fail
+    # loudly here rather than letting WiX produce an invalid MSI.
     build_build = os.environ.get("CI_PIPELINE_IID", "0")
+    try:
+        if int(build_build) > 65535:
+            raise Exit(
+                f"CI_PIPELINE_IID={build_build} exceeds the Windows Installer "
+                "ProductVersion field limit (65535). Switch the BUILD slot to a "
+                "bounded counter before pipelines cross this threshold.",
+                code=2,
+            )
+    except ValueError:
+        raise Exit(f"CI_PIPELINE_IID must be an integer, got {build_build!r}", code=2)
     numeric = f"{build_maj}.{build_min}.{build_build}"
     fullver = f"{numeric}-{pre}" if pre else numeric
 

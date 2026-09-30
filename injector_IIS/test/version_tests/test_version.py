@@ -54,6 +54,10 @@ class VersionContract(unittest.TestCase):
                     version.build_version(self.file)
             else:
                 self.assertEqual(expected, version.build_version(self.file))
+                # Existing module-stamp and OCI helpers unpack exactly two
+                # values and require a three-component numeric version.
+                numeric, pre = version.parse_version(self.file)
+                self.assertEqual((".".join(expected[:3]), expected[3]), (numeric, pre))
         cmake = subprocess.run(["cmake", "-P", str(self.cmake)], env=env, text=True, capture_output=True)
         if expected is None:
             self.assertNotEqual(0, cmake.returncode, cmake.stderr)

@@ -20,6 +20,17 @@ _VERSION_FILE = os.path.join(
 
 
 def parse_version(version_file=_VERSION_FILE):
+    """Return the effective numeric version and prerelease suffix.
+
+    Preserve the two-value API used by package versions and module stamps.
+    The numeric version is MAJ.MIN.BUILD, including the pipeline IID (or 0
+    locally), so those consumers agree with the DLL and MSI metadata.
+    """
+    major, minor, build, pre = build_version(version_file)
+    return f"{major}.{minor}.{build}", pre
+
+
+def _parse_marketing_version(version_file):
     """Parse the IIS injector version from its VERSION file.
 
     The VERSION file holds the marketing version as ``MAJ.MIN`` (optionally
@@ -49,7 +60,7 @@ def version_field(value, name, maximum):
 
 
 def build_version(version_file=_VERSION_FILE):
-    major, minor, pre = parse_version(version_file)
+    major, minor, pre = _parse_marketing_version(version_file)
     major = version_field(major, "MAJ_VER", 255)
     minor = version_field(minor, "MIN_VER", 255)
     build = version_field(os.environ.get("CI_PIPELINE_IID") or "0", "CI_PIPELINE_IID", 65535)

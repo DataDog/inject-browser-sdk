@@ -295,8 +295,9 @@ const DD_FIELDS: &[(&str, Setter)] = &[
 ];
 
 /// Whether a stable-configuration key is consumed by the RUM configuration
-/// path. `DD_RUM_ENABLED` is resolved by [`crate::stable_config::StableConfig`]
-/// rather than [`Configuration::from_lookup`].
+/// path. `DD_RUM_ENABLED` is resolved by the stable-configuration reader
+/// rather than by [`Configuration::from_lookup`].
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub(crate) fn is_rum_configuration_key(name: &str) -> bool {
     return name == "DD_RUM_ENABLED"
         || DD_FIELDS

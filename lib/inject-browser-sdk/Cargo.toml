@@ -12,11 +12,17 @@ support_gov_domain = []
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+
+# The platform module reading the Datadog stable configuration files needs
+# rustix and libdd-library-config; wasm32-unknown-unknown guests have no file
+# system, so on that target the crate compiles to the pure injection core and
+# hosts own stable configuration themselves.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 rustix = { version = "1.0", default-features = false, features = ["fs", "stdio"] }
 libdd-library-config.workspace = true
 
 # On Windows: libdd-library-config needs `std` because its StdConfigRead reader
-# uses std::fs. See the KNOWN RISK note in the root workspace Cargo.toml.
+# uses std::fs.
 [target.'cfg(windows)'.dependencies]
 libdd-library-config = { workspace = true, features = ["std"] }
 

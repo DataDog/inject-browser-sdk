@@ -14,10 +14,20 @@ extern crate std;
 mod configuration;
 pub mod error;
 pub mod injector;
-pub mod platform;
 mod snippet;
+
+// The filesystem-backed stable-configuration surface only exists on platforms
+// with an OS: it needs rustix and libdd-library-config to read the Datadog
+// stable configuration files. wasm32-unknown-unknown (the bare, no-OS Wasm
+// target used when embedding this crate in a Wasm guest such as a Cocoon
+// shim) has no file system, so hosts read stable configuration themselves and
+// pass resolved values through the ordinary configuration API instead.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub mod platform;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod stable_config;
 
 pub use configuration::*;
 pub use snippet::*;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use stable_config::*;

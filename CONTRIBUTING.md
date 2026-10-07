@@ -47,7 +47,7 @@ The `llm-cc-analyze` child pipeline's `comparison-aggregate` job publishes
 `comparison/report/`, retained for 30 days. PR comments summarize the changes
 and link to the full report and worker logs. PR discovery requires
 `.github/chainguard/self.gitlab.branch-automation.sts.yaml` on the default
-branch, so comments become available after the initial integration is merged.
+branch; this read-only policy is already installed on `main`.
 
 [Selection rules](.llm-cc/rules.json) cover Rust, Go, C/C++, and Python across
 the core library, FFI, CLIs, IIS module, installer, tests, fuzz targets, and

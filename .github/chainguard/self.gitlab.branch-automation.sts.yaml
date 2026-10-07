@@ -1,0 +1,16 @@
+# Read-only PR discovery for the shared advisory LM-CC jobs.
+# This policy must reach the default branch before discovery can use it.
+issuer: https://gitlab.ddbuild.io
+subject_pattern: "project_path:DataDog/inject-browser-sdk:ref_type:branch:ref:.+"
+
+claim_pattern:
+  project_path: "DataDog/inject-browser-sdk"
+  ref: ".+"
+  ref_type: "branch"
+  ref_path: "refs/heads/.+"
+  pipeline_source: "push"
+  ci_config_ref_uri: "gitlab\\.ddbuild\\.io/DataDog/inject-browser-sdk//\\.gitlab-ci\\.yml@refs/heads/.+"
+
+permissions:
+  contents: read
+  pull_requests: read

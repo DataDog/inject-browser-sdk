@@ -257,14 +257,8 @@ mod tests {
     struct TooLargeReader;
 
     impl ConfigRead for TooLargeReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(
-            &self,
-            _path: &str,
-        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
-        {
-            return Err(libdd_library_config::ConfigReadError::TooLarge);
+        fn read(&self, _path: &str) -> libdd_library_config::io::Result<alloc::vec::Vec<u8>> {
+            return Err(libdd_library_config::io::ErrorKind::FileTooLarge.into());
         }
     }
 
@@ -288,19 +282,13 @@ mod tests {
     struct ContentReader(Option<&'static [u8]>);
 
     impl ConfigRead for ContentReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(
-            &self,
-            path: &str,
-        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
-        {
+        fn read(&self, path: &str) -> libdd_library_config::io::Result<alloc::vec::Vec<u8>> {
             if path == libdd_library_config::Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
                 if let Some(contents) = self.0 {
                     return Ok(contents.into());
                 }
             }
-            return Err(libdd_library_config::ConfigReadError::NotFound);
+            return Err(libdd_library_config::io::ErrorKind::NotFound.into());
         }
     }
 
@@ -433,20 +421,14 @@ mod tests {
     struct LocalConfigFleetTooLargeReader;
 
     impl ConfigRead for LocalConfigFleetTooLargeReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(
-            &self,
-            path: &str,
-        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
-        {
+        fn read(&self, path: &str) -> libdd_library_config::io::Result<alloc::vec::Vec<u8>> {
             if path == libdd_library_config::Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
                 return Ok(DISABLED_CONFIG.into());
             }
             if path == libdd_library_config::Configurator::FLEET_STABLE_CONFIGURATION_PATH {
-                return Err(libdd_library_config::ConfigReadError::TooLarge);
+                return Err(libdd_library_config::io::ErrorKind::FileTooLarge.into());
             }
-            return Err(libdd_library_config::ConfigReadError::NotFound);
+            return Err(libdd_library_config::io::ErrorKind::NotFound.into());
         }
     }
 
@@ -455,13 +437,7 @@ mod tests {
     }
 
     impl ConfigRead for CountingReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(
-            &self,
-            path: &str,
-        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
-        {
+        fn read(&self, path: &str) -> libdd_library_config::io::Result<alloc::vec::Vec<u8>> {
             self.reads.set(self.reads.get() + 1);
             return ContentReader(Some(DISABLED_CONFIG)).read(path);
         }

@@ -10,10 +10,12 @@ variables:
 
 ########################################
 # IIS build and test jobs
-# Windows containers use a fresh CARGO_HOME: extracting new crates into the
-# image's prepopulated registry currently fails with invalid-path errors.
 ########################################
 
+# Give each disposable Windows container a fresh Cargo cache. The profile
+# cache baked into the builder by `cargo install cbindgen` fails to unpack
+# additional crates with ERROR_BAD_PATHNAME (161).
+# Keep the image's PATH so its installed cargo/cbindgen binaries remain usable.
 .IIS_build:
   stage: build
   tags: ["windows-v2:2022"]
@@ -39,6 +41,7 @@ variables:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
+      -e CARGO_HOME=c:\cargo
       -e BUILD_OUTDIR="c:\mnt\build-out\${CI_JOB_ID}"
       -e BUILD_CONFIGURATION=$BUILD_CONFIGURATION
       -e ARCH=$ARCH
@@ -49,7 +52,6 @@ variables:
       -e CI=true
       -e CI_JOB_ID=${CI_JOB_ID}
       -e CI_PROJECT_NAME=${CI_PROJECT_NAME}
-      -e CARGO_HOME=c:\ci-cargo
       ${WINDOWS_BUILD_IMAGE}
       c:\mnt\injector_IIS\scripts\build_injector_IIS.bat
     # Copy output files to artifacts dir for use in later jobs
@@ -104,7 +106,7 @@ injector_IIS_unit_test:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
-      -e CARGO_HOME=c:\ci-cargo
+      -e CARGO_HOME=c:\cargo
       ${WINDOWS_BUILD_IMAGE}
       powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
     - If ($lastExitCode -ne 0) { exit $lastExitCode }
@@ -120,7 +122,7 @@ injector_IIS_unit_test_asan:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
-      -e CARGO_HOME=c:\ci-cargo
+      -e CARGO_HOME=c:\cargo
       ${WINDOWS_BUILD_IMAGE}
       powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
       -Preset ci-native-asan -BuildDir build-asan -BuildType Debug

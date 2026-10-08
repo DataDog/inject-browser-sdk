@@ -34,3 +34,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Test
         run: cargo test --verbose
+      - name: Check wasm32-unknown-unknown
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p inject-browser-sdk --target wasm32-unknown-unknown

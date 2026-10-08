@@ -21,7 +21,12 @@
         'registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64',
       ],
       versioning: 'loose',
+      // Loose versioning reads the pipeline ID in v<pipeline>-<sha> as the
+      // major version, so the default limit of 500 would skip every bump.
+      maxMajorIncrement: 0,
       pinDigests: true,
+      // Every bump is "major"; keep one branch so new builds update the PR.
+      branchTopic: 'windows-build-image',
       commitMessageTopic: 'Windows build image',
       labels: ['dependencies', 'windows-image'],
     },

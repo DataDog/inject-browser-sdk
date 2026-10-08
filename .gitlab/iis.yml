@@ -11,6 +11,10 @@ variables:
 # IIS build and test jobs
 ########################################
 
+# Give each disposable Windows container a fresh Cargo cache. The profile
+# cache baked into the builder by `cargo install cbindgen` fails to unpack
+# additional crates with ERROR_BAD_PATHNAME (161).
+# Keep the image's PATH so its installed cargo/cbindgen binaries remain usable.
 .IIS_build:
   stage: build
   tags: ["windows-v2:2022"]
@@ -36,6 +40,7 @@ variables:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
+      -e CARGO_HOME=c:\cargo
       -e BUILD_OUTDIR="c:\mnt\build-out\${CI_JOB_ID}"
       -e BUILD_CONFIGURATION=$BUILD_CONFIGURATION
       -e ARCH=$ARCH
@@ -102,6 +107,7 @@ injector_IIS_unit_test:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
+      -e CARGO_HOME=c:\cargo
       ${WINDOWS_DEFAULT_IMAGE}
       powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
     - If ($lastExitCode -ne 0) { exit $lastExitCode }
@@ -117,6 +123,7 @@ injector_IIS_unit_test_asan:
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
+      -e CARGO_HOME=c:\cargo
       ${WINDOWS_DEFAULT_IMAGE}
       powershell -ExecutionPolicy Bypass -File c:\mnt\injector_IIS\scripts\ci\injector_IIS_unit_test.ps1
       -Preset ci-native-asan -BuildDir build-asan -BuildType Debug
@@ -193,7 +200,7 @@ injector_IIS_integration_test_msi:
         # GOPATH=$HOME/go. Go version comes from go.mod.
         go_version=$(awk '$1=="go" && $2 ~ /^[0-9]/ {print $2; exit}' injector_IIS/test/e2e_tests/go.mod)
         mkdir -p "$HOME/sdk"
-        curl -fsSL "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz" | tar -x -C "$HOME/sdk"
+        curl -fsSL "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz" | tar -xz -C "$HOME/sdk"
         export PATH="$HOME/sdk/go/bin:$PATH"
         curl -fsSL https://get.pulumi.com | sh -s -- --version "$PULUMI_VERSION"
         export PATH="$HOME/.pulumi/bin:$PATH"

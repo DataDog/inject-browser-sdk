@@ -92,6 +92,60 @@ Enum read_enum_property(IAppHostElement& element, std::wstring_view name, Enum f
   return static_cast<Enum>(raw);
 }
 
+std::optional<std::unordered_map<std::string, std::string>> read_sdk_options(
+    IAppHostElement& element, Logger& logger) {
+  std::unordered_map<std::string, std::string> rum_sdk_opts;
+
+  IAppHostElementCollection* col = nullptr;
+  HRESULT const hr_col = element.get_Collection(&col);
+  if (FAILED(hr_col)) {
+    logger.error(std::format("Failed to read SDK options collection: {}",
+                             std::system_category().message(hr_col)));
+    return std::nullopt;
+  }
+  if (col == nullptr) {
+    return rum_sdk_opts;
+  }
+  const auto defer_col = defer([&] { col->Release(); });
+
+  DWORD n_elem = 0;
+  HRESULT const hr_count = col->get_Count(&n_elem);
+  if (FAILED(hr_count)) {
+    logger.error(std::format("Failed to read SDK option count: {}",
+                             std::system_category().message(hr_count)));
+    return std::nullopt;
+  }
+
+  VARIANT item_idx;
+  item_idx.vt = VT_UI4;
+
+  for (DWORD i = 0; i < n_elem; ++i) {
+    item_idx.ulVal = i;
+
+    IAppHostElement* option_element = nullptr;
+    HRESULT const hr_item = col->get_Item(item_idx, &option_element);
+    if (FAILED(hr_item) || option_element == nullptr) {
+      logger.debug(
+          std::format("Skipping config option at index {}: "
+                      "failed to read element",
+                      i));
+      continue;
+    }
+
+    const auto option_element_guard = defer([&] { option_element->Release(); });
+
+    auto name = read_string_property(*option_element, L"name", logger);
+    if (!name.has_value()) {
+      continue;
+    }
+    auto value = read_string_property(*option_element, L"value", logger);
+    if (value.has_value()) {
+      rum_sdk_opts.emplace(std::move(*name), std::move(*value));
+    }
+  }
+  return rum_sdk_opts;
+}
+
 StableConfigReader g_stable_config_reader = stable_config_read;
 
 }  // namespace
@@ -120,21 +174,19 @@ std::string make_config_json(std::optional<int> major_version,
     if (key == "majorVersion") {
       continue;
     }
+    rapidjson::Value encoded;
     if (key == "sessionSampleRate" || key == "sessionReplaySampleRate") {
       try {
-        rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
-                      rapidjson::Value(std::stod(value)).Move(), allocator);
+        encoded.SetDouble(std::stod(value));
       } catch (const std::exception&) {
         logger.error(std::format("Invalid numeric value '{}' for config key '{}'", value, key));
         continue;
       }
     } else if (key == "trackResources" || key == "trackLongTasks" ||
                key == "trackUserInteractions") {
-      auto b = (value == "true");
-      rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(), rapidjson::Value(b).Move(),
-                    allocator);
+      encoded.SetBool(value == "true");
     } else if (key == "allowedTracingUrls") {
-      rapidjson::Value urlArray(rapidjson::kArrayType);
+      encoded.SetArray();
       std::stringstream ss(value);
       std::string url;
 
@@ -144,17 +196,17 @@ std::string make_config_json(std::optional<int> major_version,
           auto end = url.find_last_not_of(" \t");
           url = url.substr(start, end - start + 1);
 
-          urlArray.PushBack(rapidjson::Value(url.c_str(), allocator).Move(), allocator);
+          encoded.PushBack(rapidjson::Value(url.c_str(), allocator).Move(), allocator);
         }
       }
 
-      if (!urlArray.Empty()) {
-        rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(), urlArray.Move(), allocator);
+      if (encoded.Empty()) {
+        continue;
       }
     } else {
-      rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(),
-                    rapidjson::Value(value.c_str(), allocator).Move(), allocator);
+      encoded.SetString(value.c_str(), allocator);
     }
+    rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(), encoded, allocator);
   }
 
   // Always present, even when empty: the overlay's `rum` member is what carries
@@ -203,28 +255,8 @@ std::optional<ServerConfig> read_server_conf(const IHttpServer& server, Logger& 
 
   const auto defer_root = defer([&] { cfg_root_elem->Release(); });
 
-  LogLevel log_level = LogLevel::Info;
-  auto* log_level_prop = get_property(*cfg_root_elem, L"logLevel");
-  if (log_level_prop != nullptr) {
-    const auto defer_log_level_prop = defer([&] { log_level_prop->Release(); });
-    auto log_level_val = get_property_value(*log_level_prop);
-    const auto defer_log_level_val = defer([&] { VariantClear(&log_level_val); });
-    if (log_level_val.vt == VT_I4 || log_level_val.vt == VT_I2) {
-      int const log_level_int =
-          (log_level_val.vt == VT_I4) ? log_level_val.lVal : log_level_val.iVal;
-      if (log_level_int <= static_cast<int>(LogLevel::Debug) &&
-          log_level_int >= static_cast<int>(LogLevel::Error)) {
-        log_level = static_cast<LogLevel>(log_level_int);
-      }
-    } else {
-      logger.info(
-          std::format("Unexpected logLevel type (vt={}), "
-                      "using default Info level",
-                      log_level_val.vt));
-    }
-  }
-
-  return ServerConfig{log_level};
+  return ServerConfig{read_enum_property(*cfg_root_elem, L"logLevel", LogLevel::Info,
+                                         static_cast<int>(LogLevel::Debug), logger)};
 }
 
 ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& logger) {
@@ -306,57 +338,12 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
       *cfg_root_elem, L"injectionStrategy", InjectionStrategy::HeadCloseTag,
       static_cast<int>(InjectionStrategy::HeadOpenTagWithCloseTagFallback), logger);
 
-  // Iterate on the SDK configuration
-  std::unordered_map<std::string, std::string> rum_sdk_opts;
-
-  IAppHostElementCollection* col = nullptr;
-  HRESULT const hr_col = cfg_root_elem->get_Collection(&col);
-  if (FAILED(hr_col)) {
-    logger.error(std::format("Failed to read SDK options collection: {}",
-                             std::system_category().message(hr_col)));
+  auto rum_sdk_opts = read_sdk_options(*cfg_root_elem, logger);
+  if (!rum_sdk_opts.has_value()) {
     return {ReadConfStatus::Error};
   }
-  if (col != nullptr) {
-    const auto defer_col = defer([&] { col->Release(); });
 
-    DWORD n_elem = 0;
-    HRESULT const hr_count = col->get_Count(&n_elem);
-    if (FAILED(hr_count)) {
-      logger.error(std::format("Failed to read SDK option count: {}",
-                               std::system_category().message(hr_count)));
-      return {ReadConfStatus::Error};
-    }
-
-    VARIANT item_idx;
-    item_idx.vt = VT_UI4;
-
-    for (DWORD i = 0; i < n_elem; ++i) {
-      item_idx.ulVal = i;
-
-      IAppHostElement* option_element = nullptr;
-      HRESULT const hr_item = col->get_Item(item_idx, &option_element);
-      if (FAILED(hr_item) || option_element == nullptr) {
-        logger.debug(
-            std::format("Skipping config option at index {}: "
-                        "failed to read element",
-                        i));
-        continue;
-      }
-
-      const auto option_element_guard = defer([&] { option_element->Release(); });
-
-      auto name = read_string_property(*option_element, L"name", logger);
-      if (!name.has_value()) {
-        continue;
-      }
-      auto value = read_string_property(*option_element, L"value", logger);
-      if (value.has_value()) {
-        rum_sdk_opts.emplace(std::move(*name), std::move(*value));
-      }
-    }
-  }
-
-  RumConfig config{cfg_version, std::move(rum_sdk_opts), injection_strategy};
+  RumConfig config{cfg_version, std::move(*rum_sdk_opts), injection_strategy};
   if (config.sdk_options.empty()) {
     // IIS hands back the schema-defaulted section for every site once
     // datadogRum is registered in configSections, so "the section resolved" is

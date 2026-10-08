@@ -94,43 +94,23 @@ pub(crate) struct SnippetInternal {
 
 impl SnippetInternal {
     pub(crate) fn new(result: Result<Vec<u8>, Error>) -> Self {
-        match result {
-            Ok(content) => {
-                return Self {
-                    error_message: null(),
-                    error_code: 0,
-                    length: content.len() as u32,
-                    rum_enabled: RUM_ENABLED_UNSET,
-                    application_id: null(),
-                    remote_configuration_id: null(),
-                    inner: Ok(content),
-                    owned_ids: [None, None],
-                }
-            }
-            Err(error) => {
-                // Error messages can embed user-controlled strings (e.g. raw bytes
-                // from libdd-library-config). Scrub NUL bytes so CString::new
-                // cannot fail; fall back to a static message if it still does,
-                // because panicking here brings down the host web server.
-                let error_string = error.to_string().replace('\0', "\\0");
-                let error_message = CString::new(error_string).unwrap_or_else(|_| {
-                    return CString::new(
-                        "internal error: error message contained unrepresentable bytes",
-                    )
-                    .expect("static message has no NUL bytes");
-                });
-                return Self {
-                    error_message: error_message.as_ptr(),
-                    error_code: error.code(),
-                    length: 0,
-                    rum_enabled: RUM_ENABLED_UNSET,
-                    application_id: null(),
-                    remote_configuration_id: null(),
-                    inner: Err(error_message),
-                    owned_ids: [None, None],
-                };
-            }
-        }
+        let error_code = result.as_ref().err().map_or(0, Error::code);
+        let inner = result.map_err(|error| return error_message(&error));
+        return Self {
+            error_message: inner
+                .as_ref()
+                .err()
+                .map_or(null(), |message| return message.as_ptr()),
+            error_code,
+            length: inner
+                .as_ref()
+                .map_or(0, |content| return content.len() as u32),
+            rum_enabled: RUM_ENABLED_UNSET,
+            application_id: null(),
+            remote_configuration_id: null(),
+            inner,
+            owned_ids: [None, None],
+        };
     }
 
     pub(crate) fn new_from_stable_config(result: Result<StableConfigSnippet, Error>) -> Self {
@@ -164,13 +144,21 @@ impl SnippetInternal {
         return Box::into_raw(Box::new(self)) as *mut Snippet;
     }
 
-    unsafe fn from_public_ptr(snippet: *const Snippet) -> Box<Self> {
+    pub(crate) unsafe fn from_public_ptr(snippet: *const Snippet) -> Box<Self> {
         return Box::from_raw(snippet as *mut SnippetInternal);
     }
 
     pub unsafe fn borrow_public_ptr(snippet: *const Snippet) -> &'static Self {
         return &*(snippet as *mut SnippetInternal);
     }
+}
+
+// Scrub user-controlled NUL bytes before exposing an error to C callers.
+pub(crate) fn error_message(error: &Error) -> CString {
+    return CString::new(error.to_string().replace('\0', "\\0")).unwrap_or_else(|_| {
+        return CString::new("internal error: error message contained unrepresentable bytes")
+            .expect("static message has no NUL bytes");
+    });
 }
 
 /// Create a snippet from a C string representing a JSON-encoded object.

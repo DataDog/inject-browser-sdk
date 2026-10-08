@@ -48,23 +48,22 @@ impl StableConfig {
         overlay: Option<&ConfigurationOverlay>,
         enabled: Option<bool>,
     ) -> StableConfigSnippet {
-        let application_id = overlay
-            .and_then(|value| return value.rum.application_id.clone())
-            .or_else(|| {
-                return self.lookup("DD_RUM_APPLICATION_ID").map(String::from);
-            });
-        let remote_configuration_id = overlay
-            .and_then(|value| return value.rum.remote_configuration_id.clone())
-            .or_else(|| {
-                return self
-                    .lookup("DD_RUM_REMOTE_CONFIGURATION_ID")
-                    .map(String::from);
-            });
+        let resolve_id = |key, value: Option<&String>| {
+            return value
+                .cloned()
+                .or_else(|| return self.lookup(key).map(String::from));
+        };
         return StableConfigSnippet {
             bytes: Vec::new(),
             enabled,
-            application_id,
-            remote_configuration_id,
+            application_id: resolve_id(
+                "DD_RUM_APPLICATION_ID",
+                overlay.and_then(|value| return value.rum.application_id.as_ref()),
+            ),
+            remote_configuration_id: resolve_id(
+                "DD_RUM_REMOTE_CONFIGURATION_ID",
+                overlay.and_then(|value| return value.rum.remote_configuration_id.as_ref()),
+            ),
         };
     }
 
@@ -198,25 +197,6 @@ pub fn read_stable_config_from_contents(
         &ContentsReader { local, fleet },
         language,
         debug_logs,
-    )
-    .map_err(Error::StableConfig)?;
-    return stable_config_from_read(read);
-}
-
-// Real filesystem overrides exist only in Rust unit tests.
-#[cfg(test)]
-fn read_stable_config_from_paths(
-    language: &str,
-    debug_logs: bool,
-    local_path: &str,
-    fleet_path: &str,
-) -> Result<StableConfig, Error> {
-    let read = crate::platform::read_stable_configs_with_paths(
-        &crate::platform::PlatformConfigRead,
-        language,
-        debug_logs,
-        local_path,
-        fleet_path,
     )
     .map_err(Error::StableConfig)?;
     return stable_config_from_read(read);
@@ -663,23 +643,46 @@ mod tests {
         use super::*;
         use pretty_assertions::assert_eq;
         use std::fs;
-        use std::path::{Path, PathBuf};
+        use std::path::PathBuf;
 
-        fn tmp_dir(name: &str) -> PathBuf {
-            let mut dir = std::env::temp_dir();
-            dir.push(alloc::format!(
-                "inject-browser-sdk-stable-config-{}-{}",
-                std::process::id(),
-                name
-            ));
-            fs::create_dir_all(&dir).expect("temp dir");
-            return dir;
+        struct Files(PathBuf);
+
+        impl Files {
+            fn new(name: &str, local: Option<&[u8]>, fleet: Option<&[u8]>) -> Self {
+                let dir = std::env::temp_dir().join(alloc::format!(
+                    "inject-browser-sdk-stable-config-{}-{name}",
+                    std::process::id()
+                ));
+                fs::create_dir_all(&dir).expect("temp dir");
+                let files = Self(dir);
+                for (name, contents) in [("local.yaml", local), ("fleet.yaml", fleet)] {
+                    if let Some(contents) = contents {
+                        fs::write(files.0.join(name), contents).expect("write config");
+                    }
+                }
+                return files;
+            }
+
+            fn read(&self) -> Result<StableConfig, Error> {
+                let local = self.0.join("local.yaml");
+                let fleet = self.0.join("fleet.yaml");
+                return stable_config_from_read(
+                    crate::platform::read_stable_configs_with_paths(
+                        &crate::platform::PlatformConfigRead,
+                        "browser-sdk",
+                        false,
+                        local.to_str().expect("UTF-8 temp path"),
+                        fleet.to_str().expect("UTF-8 temp path"),
+                    )
+                    .map_err(Error::StableConfig)?,
+                );
+            }
         }
 
-        fn write(dir: &Path, name: &str, contents: &str) -> String {
-            let path = dir.join(name);
-            fs::write(&path, contents).expect("write config");
-            return String::from(path.to_str().expect("UTF-8 temp path"));
+        impl Drop for Files {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
         }
 
         #[test]
@@ -688,8 +691,6 @@ mod tests {
             // PowerShell 5.1's `Set-Content -Encoding UTF8` always emits a BOM.
             // Read through the real PlatformConfigRead so this covers the file
             // path the module actually takes, not just an injected reader.
-            let dir = tmp_dir("bom");
-            let path = dir.join("local.yaml");
             let mut bytes = alloc::vec![0xEFu8, 0xBB, 0xBF];
             bytes.extend_from_slice(
                 br#"rules:
@@ -703,13 +704,10 @@ mod tests {
     DD_RUM_MAJOR_VERSION: 6
 "#,
             );
-            fs::write(&path, &bytes).expect("write config");
-            let local = String::from(path.to_str().expect("UTF-8 temp path"));
-            let missing = String::from(dir.join("absent.yaml").to_str().expect("UTF-8 temp path"));
-
-            let config = read_stable_config_from_paths("browser-sdk", false, &local, &missing)
+            let files = Files::new("bom", Some(&bytes), None);
+            let config = files
+                .read()
                 .expect("a BOM must not make a valid file unreadable");
-            let _ = fs::remove_dir_all(&dir);
 
             assert!(!config.is_empty(), "the BOM must not hide the entries");
             let snippet = config.build_snippet(None).expect("snippet should build");
@@ -725,17 +723,10 @@ mod tests {
 
         #[test]
         fn reads_a_real_local_file() {
-            let dir = tmp_dir("local");
-            let local = write(
-                &dir,
-                "local.yaml",
-                "apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-file\n  DD_RUM_CLIENT_TOKEN: tok-file\n",
-            );
-            let missing = String::from(dir.join("absent.yaml").to_str().expect("UTF-8 temp path"));
-
-            let config = read_stable_config_from_paths("browser-sdk", false, &local, &missing)
-                .expect("a readable local file must not error");
-            let _ = fs::remove_dir_all(&dir);
+            let files = Files::new("local", Some(
+                b"apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-file\n  DD_RUM_CLIENT_TOKEN: tok-file\n",
+            ), None);
+            let config = files.read().expect("a readable local file must not error");
 
             assert!(!config.is_empty());
             let snippet = config.build_snippet(None).expect("snippet should build");
@@ -746,21 +737,12 @@ mod tests {
 
         #[test]
         fn fleet_file_overrides_the_local_one() {
-            let dir = tmp_dir("fleet");
-            let local = write(
-                &dir,
-                "local.yaml",
-                "apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-local\n  DD_RUM_CLIENT_TOKEN: tok-local\n",
-            );
-            let fleet = write(
-                &dir,
-                "fleet.yaml",
-                "apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-fleet\n  DD_RUM_CLIENT_TOKEN: tok-fleet\n",
-            );
-
-            let config = read_stable_config_from_paths("browser-sdk", false, &local, &fleet)
-                .expect("both files readable");
-            let _ = fs::remove_dir_all(&dir);
+            let files = Files::new("fleet", Some(
+                b"apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-local\n  DD_RUM_CLIENT_TOKEN: tok-local\n",
+            ), Some(
+                b"apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-fleet\n  DD_RUM_CLIENT_TOKEN: tok-fleet\n",
+            ));
+            let config = files.read().expect("both files readable");
 
             let snippet = config.build_snippet(None).expect("snippet should build");
             let init = extract_init_json(&snippet.bytes);
@@ -769,21 +751,10 @@ mod tests {
 
         #[test]
         fn absent_paths_yield_an_empty_config_not_an_error() {
-            let dir = tmp_dir("absent");
-            let local = String::from(
-                dir.join("nope-local.yaml")
-                    .to_str()
-                    .expect("UTF-8 temp path"),
-            );
-            let fleet = String::from(
-                dir.join("nope-fleet.yaml")
-                    .to_str()
-                    .expect("UTF-8 temp path"),
-            );
-
-            let config = read_stable_config_from_paths("browser-sdk", false, &local, &fleet)
+            let files = Files::new("absent", None, None);
+            let config = files
+                .read()
                 .expect("missing files are ordinary absence, not a failure");
-            let _ = fs::remove_dir_all(&dir);
 
             assert!(config.is_empty());
             assert_eq!(
@@ -795,12 +766,8 @@ mod tests {
 
         #[test]
         fn broken_yaml_surfaces_as_a_read_error() {
-            let dir = tmp_dir("broken");
-            let local = write(&dir, "local.yaml", "::: not : yaml :::");
-            let fleet = String::from(dir.join("absent.yaml").to_str().expect("UTF-8 temp path"));
-
-            let result = read_stable_config_from_paths("browser-sdk", false, &local, &fleet);
-            let _ = fs::remove_dir_all(&dir);
+            let files = Files::new("broken", Some(b"::: not : yaml :::"), None);
+            let result = files.read();
 
             let error = match result {
                 Err(error) => error,

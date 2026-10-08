@@ -94,6 +94,7 @@ pub struct ConfigurationOverlay {
     pub rum: RumConfiguration,
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl ConfigurationOverlay {
     /// Whether this overlay replaces a stable-config field. Check before parsing
     /// the lower-priority value so an invalid value cannot defeat its override.

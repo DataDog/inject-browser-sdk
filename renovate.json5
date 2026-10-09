@@ -1,0 +1,43 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  // This file is for the repo-config run; ADMS Cargo runs use central config.
+  enabledManagers: ['custom.regex'],
+  // Adapted from dd-repo-tools' shared/windows-image/renovate.json5. Keep the
+  // manager local so the existing updater need not read another private repo.
+  customManagers: [
+    {
+      customType: 'regex',
+      managerFilePatterns: ['.gitlab/windows-default-image.yml'],
+      matchStrings: [
+        'WINDOWS_DEFAULT_IMAGE:\\s*"?(?<depName>[^:\\s"]+):(?<currentValue>[^@\\s"]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?"?',
+      ],
+      datasourceTemplate: 'docker',
+    },
+  ],
+  packageRules: [
+    {
+      matchManagers: ['custom.regex'],
+      matchDepNames: [
+        'registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64',
+      ],
+      versioning: 'loose',
+      // Loose versioning reads the pipeline ID in v<pipeline>-<sha> as the
+      // major version, so the default limit of 500 would skip every bump.
+      maxMajorIncrement: 0,
+      pinDigests: true,
+      // Every bump is "major"; keep one branch so new builds update the PR.
+      branchTopic: 'windows-build-image',
+      commitMessageTopic: 'Windows build image',
+      labels: ['dependencies', 'windows-image'],
+    },
+    {
+      matchManagers: ['custom.regex'],
+      matchDepNames: [
+        'registry.ddbuild.io/ci/dd-repo-tools/windows_ltsc2022_x64',
+      ],
+      pinDigests: true,
+      commitMessageTopic: 'default Windows image',
+      labels: ['dependencies', 'windows-image'],
+    },
+  ],
+}

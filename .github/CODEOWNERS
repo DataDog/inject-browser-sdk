@@ -1,7 +1,8 @@
-# Automatically assign the team as a reviewer.
+# Automatically request reviews from the owners.
 # https://help.github.com/en/articles/about-code-owners
 
 # Default owners, overridden by file/directory specific owners below
-* @DataDog/squad-rum-injection
+# Primary team first, followed by secondary owners for additional review coverage.
+* @DataDog/squad-rum-injection @DataDog/client-observability-and-onboarding-platform-instrument @BenoitZugmeyer
 
 /.adms/ @DataDog/dependency-management

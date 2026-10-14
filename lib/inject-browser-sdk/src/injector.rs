@@ -114,7 +114,8 @@ pub struct Injector<'snippet> {
     incomplete_data_public_ref: Vec<u8>,
 
     /// Spaces standing in for the snippet when no injection point was found, so that the response
-    /// keeps the length it would have had.
+    /// keeps the length it would have had. Filled by [`Injector::end`] only, and emitted at the end
+    /// of the document; empty otherwise.
     padding_spaces: Vec<u8>,
 }
 
@@ -181,7 +182,25 @@ impl<'snippet> Injector<'snippet> {
         }
     }
 
+    /// Ends the document. When no injection point was found, the output is padded with spaces to
+    /// the length it would have had with the snippet.
     pub fn end(&mut self) -> Result<'_> {
+        return self.finish(true);
+    }
+
+    /// Ends the document like [`Injector::end`], but never pads the output. For consumers that do
+    /// not announce the response length up front.
+    pub fn end_without_padding(&mut self) -> Result<'_> {
+        return self.finish(false);
+    }
+
+    fn finish(&mut self, padded: bool) -> Result<'_> {
+        if padded && !self.injected {
+            self.padding_spaces = vec![b' '; self.snippet.len()];
+        } else {
+            self.padding_spaces.clear();
+        }
+
         match self.injector_state {
             InjectorState::BufferingHeadWindow => {
                 return self.scan_head_window(HeadWindow::Buffered { tail: b"" }, true);
@@ -190,9 +209,6 @@ impl<'snippet> Injector<'snippet> {
             InjectorState::ScanningForHeadCloseTag | InjectorState::PassingThrough => {
                 self.injector_state = InjectorState::Ended;
                 self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                if !self.injected {
-                    self.padding_spaces = vec![b' '; self.snippet.len()];
-                }
                 return self.create_result(&[
                     BytesSlice::new(&self.incomplete_data_public_ref, false),
                     BytesSlice::new(&self.padding_spaces, false),
@@ -313,7 +329,6 @@ impl<'snippet> Injector<'snippet> {
 
         if eof {
             self.injector_state = InjectorState::Ended;
-            self.padding_spaces = vec![b' '; self.snippet.len()];
             return self.create_result(&[
                 BytesSlice::new(window, from_incoming_chunk),
                 BytesSlice::new(tail, true),
@@ -718,6 +733,29 @@ mod tests {
         }
 
         #[test]
+        fn ending_again_after_injecting_at_eof_emits_nothing() {
+            for padded in [true, false] {
+                let mut injector = Injector::with_strategy(
+                    b"{{SNIPPET}}",
+                    InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+                );
+                injector.write(b"<head>abc");
+                assert!(injector.end().injected);
+
+                let second_end = match padded {
+                    true => injector.end(),
+                    false => injector.end_without_padding(),
+                };
+                pretty_assertions::assert_eq!(second_end.length, 0);
+            }
+        }
+
+        #[test]
+        fn partial_head_close_tag_in_the_window_at_eof() {
+            test_injector(["abc</hea"], "abc</hea           ");
+        }
+
+        #[test]
         fn head_close_tag_without_open_head() {
             // No open `<head>` to inject after, so fall back to injecting before `</head>`.
             test_injector(["abc</head>def"], "abc{{SNIPPET}}</head>def");
@@ -1029,7 +1067,7 @@ mod tests {
         expected: &str,
     ) {
         return run_injector(
-            Injector::with_strategy(b"{{SNIPPET}}", strategy),
+            || return Injector::with_strategy(b"{{SNIPPET}}", strategy),
             input_chunks,
             expected,
         );
@@ -1041,17 +1079,40 @@ mod tests {
         input_chunks: impl IntoIterator<Item = T>,
         expected: &str,
     ) {
-        return run_injector(Injector::new(b"{{SNIPPET}}"), input_chunks, expected);
+        return run_injector(
+            || return Injector::new(b"{{SNIPPET}}"),
+            input_chunks,
+            expected,
+        );
     }
 
+    /// Checks both ways to end the document: [`Injector::end_without_padding`] must give the same
+    /// output as [`Injector::end`], minus the padding.
     fn run_injector<T: AsRef<[u8]> + core::fmt::Debug>(
-        mut injector: Injector<'_>,
+        make_injector: impl Fn() -> Injector<'static>,
         input_chunks: impl IntoIterator<Item = T>,
         expected: &str,
     ) {
-        let snippet = b"{{SNIPPET}}";
-
         let input_chunks: Vec<T> = input_chunks.into_iter().collect();
+        check_output(make_injector(), &input_chunks, true, expected);
+
+        let padding = " ".repeat(b"{{SNIPPET}}".len());
+        let unpadded = match expected.contains("{{SNIPPET}}") {
+            true => expected,
+            false => expected
+                .strip_suffix(padding.as_str())
+                .expect("output without injection ends with padding"),
+        };
+        check_output(make_injector(), &input_chunks, false, unpadded);
+    }
+
+    fn check_output<T: AsRef<[u8]> + core::fmt::Debug>(
+        mut injector: Injector<'_>,
+        input_chunks: &[T],
+        padded: bool,
+        expected: &str,
+    ) {
+        let snippet = b"{{SNIPPET}}";
 
         let mut output_slices = Vec::new();
         let mut injected = false;
@@ -1063,7 +1124,8 @@ mod tests {
         {
             let result = match incoming_chunk {
                 Some(chunk) => injector.write(chunk),
-                None => injector.end(),
+                None if padded => injector.end(),
+                None => injector.end_without_padding(),
             };
             for slice in result.iter() {
                 {
@@ -1100,8 +1162,9 @@ mod tests {
         assert_eq!(
             String::from_utf8(output_slices).unwrap(),
             expected,
-            "with chunks {:?}",
-            input_chunks
+            "with chunks {:?}, padded: {}",
+            input_chunks,
+            padded
         );
     }
 }

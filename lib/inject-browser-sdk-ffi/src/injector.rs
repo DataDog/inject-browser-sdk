@@ -224,14 +224,42 @@ pub unsafe extern "C" fn injector_end(ffi_injector: *mut Injector) -> InjectorRe
     );
 }
 
-/// The result of a call to [`injector_write`] or [`injector_end`]. It represents a list of binary
-/// slices to be written to the outgoing stream.
+/// Same as [`injector_end`], but never returns padding: when the injection did not happen, only
+/// the data still held back by the [`Injector`] is returned.
+///
+/// Use it when the response length is not announced up front (for example, when the
+/// `content-length` header is removed), so padding is not needed.
+///
+/// This function should not be called while another [`InjectorResult`] from the same `Injector` is
+/// still being processed.
+///
+/// # Memory ownership
+///
+/// See [`InjectorResult`] documentation for details about the returned value memory ownership.
+#[no_mangle]
+pub unsafe extern "C" fn injector_end_without_padding(
+    ffi_injector: *mut Injector,
+) -> InjectorResult {
+    if ffi_injector.is_null() {
+        return InjectorResult::empty();
+    }
+    let ffi_injector = &mut *ffi_injector;
+    return InjectorResult::new(
+        ffi_injector.inner.end_without_padding(),
+        &mut ffi_injector.slices_memory_storage,
+    );
+}
+
+/// The result of a call to [`injector_write`], [`injector_end`] or
+/// [`injector_end_without_padding`]. It represents a list of binary slices to be written to the
+/// outgoing stream.
 ///
 /// In its current implementation, at most 4 slices can be returned. While rare, it is possible
 /// that 0 slices are returned.
 ///
 /// [`InjectorResult`] instances (and the memory they point to) should *not* be used anymore once
-/// `injector_write` or `injector_end` are called with the same `Injector` instance.
+/// `injector_write`, `injector_end` or `injector_end_without_padding` are called with the same
+/// `Injector` instance.
 ///
 /// # Memory ownership
 ///
@@ -265,8 +293,8 @@ impl InjectorResult {
         };
     }
 
-    /// Defensive default returned when a NULL injector is passed to
-    /// [`injector_write`] or [`injector_end`]. No slices, nothing injected.
+    /// Defensive default returned when a NULL injector is passed to [`injector_write`],
+    /// [`injector_end`] or [`injector_end_without_padding`]. No slices, nothing injected.
     fn empty() -> Self {
         return Self {
             slices_length: 0,
@@ -381,6 +409,20 @@ mod tests {
     }
 
     #[test]
+    fn injector_end_without_padding_null_injector_returns_empty() {
+        let result = unsafe { injector_end_without_padding(null_mut()) };
+        assert_eq!(result.slices_length, 0);
+        assert!(result.slices.is_null());
+        assert!(!result.injected);
+    }
+
+    /// Without padding, the end returns only the data still held back: here a partial `</hea`.
+    #[test]
+    fn injector_end_without_padding_returns_held_data_only() {
+        assert_eq!(inject(None, b"abc</hea", false), "abc</hea");
+    }
+
+    #[test]
     fn injector_create_with_strategy_null_snippet_returns_null() {
         for strategy in [
             InjectionStrategy::HeadCloseTag,
@@ -397,7 +439,7 @@ mod tests {
     #[test]
     fn injector_create_defaults_to_head_close_tag() {
         assert_eq!(
-            inject(None, b"<head>abc</head>def"),
+            inject(None, b"<head>abc</head>def", true),
             "<head>abc<SNIPPET></head>def"
         );
     }
@@ -405,13 +447,17 @@ mod tests {
     #[test]
     fn injector_create_with_strategy_head_open_tag() {
         assert_eq!(
-            inject(Some(InjectionStrategy::HeadOpenTag), b"<head>abc</head>def"),
+            inject(
+                Some(InjectionStrategy::HeadOpenTag),
+                b"<head>abc</head>def",
+                true
+            ),
             "<head><SNIPPET>abc</head>def"
         );
         // No `<head>` to inject after, and this strategy has no fallback: the document is padded
         // to the length it would have had, and left otherwise untouched.
         let html = "abc</head>def";
-        let output = inject(Some(InjectionStrategy::HeadOpenTag), html.as_bytes());
+        let output = inject(Some(InjectionStrategy::HeadOpenTag), html.as_bytes(), true);
         let mut expected = String::from(html);
         expected.extend(core::iter::repeat_n(' ', snippet_len()));
         assert_eq!(output, expected);
@@ -422,7 +468,8 @@ mod tests {
         assert_eq!(
             inject(
                 Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback),
-                b"<head>abc</head>def"
+                b"<head>abc</head>def",
+                true
             ),
             "<head><SNIPPET>abc</head>def"
         );
@@ -430,7 +477,8 @@ mod tests {
         assert_eq!(
             inject(
                 Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback),
-                b"abc</head>def"
+                b"abc</head>def",
+                true
             ),
             "abc<SNIPPET></head>def"
         );
@@ -449,8 +497,9 @@ mod tests {
     }
 
     /// Drives a full injection through the C API and returns the concatenated output, with the
-    /// snippet itself replaced by `<SNIPPET>` so assertions stay readable.
-    fn inject(strategy: Option<InjectionStrategy>, html: &[u8]) -> String {
+    /// snippet itself replaced by `<SNIPPET>` so assertions stay readable. `padded` selects
+    /// [`injector_end`] over [`injector_end_without_padding`].
+    fn inject(strategy: Option<InjectionStrategy>, html: &[u8], padded: bool) -> String {
         let snippet = test_snippet();
         let injector = match strategy {
             Some(strategy) => unsafe { injector_create_with_strategy(snippet, strategy) },
@@ -475,7 +524,10 @@ mod tests {
             }
         };
         append(unsafe { injector_write(injector, html.as_ptr(), html.len() as u32) });
-        append(unsafe { injector_end(injector) });
+        append(match padded {
+            true => unsafe { injector_end(injector) },
+            false => unsafe { injector_end_without_padding(injector) },
+        });
 
         unsafe { injector_cleanup(injector) };
         unsafe { snippet_cleanup(snippet) };

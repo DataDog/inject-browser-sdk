@@ -25,18 +25,19 @@ fuzz_target!(|data: &[u8]| {
         },
     };
 
-    // Spend the first byte on the strategy, so every strategy gets fuzzed. They differ in how much
-    // data they hold back, so they exercise quite different buffering paths.
-    let (strategy, data) = match data.split_first() {
+    // Spend the first byte on the strategy and on how the document ends, so every combination gets
+    // fuzzed. Strategies differ in how much data they hold back, so they exercise quite different
+    // buffering paths.
+    let (strategy, padded, data) = match data.split_first() {
         Some((selector, rest)) => {
             let strategy = match selector % 3 {
                 0 => InjectionStrategy::HeadCloseTag,
                 1 => InjectionStrategy::HeadOpenTag,
                 _ => InjectionStrategy::HeadOpenTagWithCloseTagFallback,
             };
-            (strategy, rest)
+            (strategy, (selector / 3) % 2 == 0, rest)
         }
-        None => (InjectionStrategy::default(), data),
+        None => (InjectionStrategy::default(), true, data),
     };
 
     let snippet = generate_snippet(&conf).unwrap();
@@ -48,17 +49,25 @@ fuzz_target!(|data: &[u8]| {
         .iter()
         .map(|slice| slice.bytes.len())
         .sum::<usize>();
-    let result = injector.end();
+    let result = match padded {
+        true => injector.end(),
+        false => injector.end_without_padding(),
+    };
     emitted += result.slices[..result.length]
         .iter()
         .map(|slice| slice.bytes.len())
         .sum::<usize>();
 
     // Whatever happens, the injector emits every input byte exactly once, plus either the snippet
-    // or the padding that stands in for it. This catches any arithmetic mistake in the slicing.
+    // or the padding that stands in for it (no padding with `end_without_padding`). This catches
+    // any arithmetic mistake in the slicing.
+    let added = match padded || result.injected {
+        true => snippet.len(),
+        false => 0,
+    };
     assert_eq!(
         emitted,
-        data.len() + snippet.len(),
-        "emitted length must be the input length plus the snippet length"
+        data.len() + added,
+        "emitted length must be the input length plus the snippet or padding length"
     );
 });

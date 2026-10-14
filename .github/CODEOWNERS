@@ -3,6 +3,6 @@
 
 # Default owners, overridden by file/directory specific owners below
 # Primary team first, followed by secondary owners for additional review coverage.
-* @DataDog/squad-rum-injection @DataDog/client-observability-and-onboarding-platform-instrument @BenoitZugmeyer
+* @DataDog/squad-rum-injection @DataDog/injection-platform @DataDog/client-observability-and-onboarding-platform-instrument @BenoitZugmeyer
 
 /.adms/ @DataDog/dependency-management

@@ -68,7 +68,9 @@
 //!            HTTP response chunk to the outgoing stream.
 //!
 //!     7. If [`InjectorResult::injected`] was never `true`, call [`injector_end`] and write the
-//!        returned slices to the outgoing stream.
+//!        returned slices to the outgoing stream. If the `content-length` header was removed
+//!        instead of updated, call [`injector_end_without_padding`]: it returns the same slices
+//!        without the padding.
 //!
 //!     8. Call [`injector_cleanup`] to free the `Injector` instance.
 //!

@@ -197,6 +197,8 @@ impl<'snippet> Injector<'snippet> {
     fn finish(&mut self, padded: bool) -> Result<'_> {
         if padded && !self.injected {
             self.padding_spaces = vec![b' '; self.snippet.len()];
+        } else {
+            self.padding_spaces.clear();
         }
 
         match self.injector_state {
@@ -728,6 +730,24 @@ mod tests {
         #[test]
         fn no_head_or_meta() {
             test_injector(["<html></html>"], "<html></html>           ");
+        }
+
+        #[test]
+        fn ending_again_after_injecting_at_eof_emits_nothing() {
+            for padded in [true, false] {
+                let mut injector = Injector::with_strategy(
+                    b"{{SNIPPET}}",
+                    InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+                );
+                injector.write(b"<head>abc");
+                assert!(injector.end().injected);
+
+                let second_end = match padded {
+                    true => injector.end(),
+                    false => injector.end_without_padding(),
+                };
+                pretty_assertions::assert_eq!(second_end.length, 0);
+            }
         }
 
         #[test]

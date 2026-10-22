@@ -2,12 +2,12 @@ variables:
   WINDOWS_BUILD_IMAGE_REPO: registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64
 
 # Keep WINDOWS_DEFAULT_IMAGE on the build image the Windows runner AMI
-# pre-pulls, so IIS jobs skip a ~12 minute pull. Runs from a GitLab pipeline
-# schedule on main (Build > Pipeline schedules); the schedule is not
-# version-controlled.
+# pre-pulls, so IIS jobs skip a ~12 minute pull. Runs from the pipeline
+# schedule that sets WINDOWS_BUILD_IMAGE_BUMP=1 on main, managed in Terraform:
+# ddoghq/gitlab-config gitlab/projects/inject-browser-sdk/schedule_pipelines.tf.
 .windows_build_image_schedule:
   rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $WINDOWS_BUILD_IMAGE_BUMP == "1"
 
 windows_build_image_survey:
   stage: build

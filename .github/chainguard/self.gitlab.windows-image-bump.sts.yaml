@@ -1,0 +1,17 @@
+# Policy for: .gitlab/images.yml `windows_build_image_bump` job in DataDog/inject-browser-sdk.
+# Lets the scheduled main pipeline push the bump branch through the GitHub API
+# (signed commits) and open or refresh its PR. Push and branch pipelines cannot
+# mint it.
+issuer: https://gitlab.ddbuild.io
+subject: project_path:DataDog/inject-browser-sdk:ref_type:branch:ref:main
+
+claim_pattern:
+  ci_config_ref_uri: gitlab\.ddbuild\.io/DataDog/inject-browser-sdk//\.gitlab-ci\.yml@refs/heads/main
+  pipeline_source: schedule
+  project_path: DataDog/inject-browser-sdk
+  ref_path: refs/heads/main
+  ref_protected: "true"
+
+permissions:
+  contents: write
+  pull_requests: write

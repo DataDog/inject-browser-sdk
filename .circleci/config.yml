@@ -1,0 +1,18 @@
+# Placeholder: CI runs on GitLab and GitHub Actions, not CircleCI. The CircleCI
+# project is still enabled for this repository, so without a config every
+# commit gets a failing "CircleCI Pipeline" check ("No configuration was found").
+# Remove this file once an admin removes the CircleCI project.
+version: 2.1
+
+jobs:
+  noop:
+    docker:
+      - image: cimg/base:current
+    resource_class: small
+    steps:
+      - run: echo "CI runs on GitLab and GitHub Actions"
+
+workflows:
+  noop:
+    jobs:
+      - noop

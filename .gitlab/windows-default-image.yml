@@ -2,4 +2,4 @@
 # moving this pin, by digest, to the newest build image the Windows runners
 # pre-pull. Keep the line format: the job rewrites it with sed.
 variables:
-  WINDOWS_DEFAULT_IMAGE: "registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64:v137515717-cbd951c9@sha256:e22152453c52f3b1edc8935a8974397b086a043b081e9759ccec0b018120729f"
+  WINDOWS_DEFAULT_IMAGE: "registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64:v146754649-b7d198ce@sha256:bea4c039c949dc13178c4507a4f3d8c9a7fa4cd36eb4a5d63a216e4a7ef22e23"

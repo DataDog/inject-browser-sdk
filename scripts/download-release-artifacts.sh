@@ -12,6 +12,10 @@ if [ $# -ne 2 ]; then
     exit 1
 fi
 
+# TODO(ddci-run migration, CIEXE-2696): this reads GitLab Releases (and their asset
+# links) through the GitLab API with a job token. Under DDCI Run the job token is a
+# ddci- token and GitLab rejects it. Needs an owner decision: publish release assets
+# somewhere DDCI jobs can read (e.g. S3/artifact store) or use a non-job GitLab token.
 GITLAB_TOKEN=${CI_JOB_TOKEN:-$GITLAB_TOKEN}
 
 RELEASE_TAG="$1"

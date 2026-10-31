@@ -31,3 +31,4 @@ pub use configuration::*;
 pub use snippet::*;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use stable_config::*;
+// DDCI shadow parity probe (no code change; PR will be closed unmerged)

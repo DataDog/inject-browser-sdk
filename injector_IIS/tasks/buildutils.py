@@ -13,18 +13,21 @@ import datetime
 import os
 
 from invoke.exceptions import Exit
-from .utils import parse_version
+from .utils import build_version
 
 
 def do_get_build_env(ctx, vstudio_root=None):
-    numeric, pre = parse_version()
-    build_maj, build_min, build_patch = numeric.split(".")
+    try:
+        build_maj, build_min, build_build, pre = build_version()
+    except ValueError as error:
+        raise Exit(str(error), code=2) from error
+    numeric = f"{build_maj}.{build_min}.{build_build}"
     fullver = f"{numeric}-{pre}" if pre else numeric
 
     env = {
         "MAJ_VER": build_maj,
         "MIN_VER": build_min,
-        "PATCH_VER": build_patch,
+        "BUILD_VER": build_build,
         "VERSION_PRE": pre,
     }
 

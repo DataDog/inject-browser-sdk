@@ -28,6 +28,8 @@ jobs:
       RUSTFLAGS: "-Lnative=/xwin/crt/lib/x86_64 -Lnative=/xwin/sdk/lib/ucrt/x86_64 -Lnative=/xwin/sdk/lib/um/x86_64"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check version contract
+        run: python3 -m unittest discover -s injector_IIS/test/version_tests
       - name: Build
         working-directory: injector_IIS
         run: |
@@ -79,4 +81,9 @@ jobs:
       - name: Run End-to-End Tests
         # --isolation=hyperv allows running Windows images built on a different Windows Server
         # version than the runner (e.g. ltsc2019 image on windows-2022 host).
-        run: docker run --isolation=hyperv -e WEBSERVER-FLAVOR=iis -v ${pwd}:C:\inject-browser-sdk datadog/docker-library:rum-auto-instrumentation-windows-iis-latest powershell -Command "C:\inject-browser-sdk\injector_IIS\scripts\SetupIntegrationTestEnvironment.ps1; pytest C:\inject-browser-sdk\tests\integration_tests\scenario -v"
+        run: >-
+          docker run --isolation=hyperv --entrypoint powershell
+          -e WEBSERVER-FLAVOR=iis -v ${pwd}:C:\inject-browser-sdk
+          datadog/docker-library:rum-auto-instrumentation-windows-iis-latest
+          -NoProfile -ExecutionPolicy Bypass -File
+          C:\inject-browser-sdk\injector_IIS\scripts\ci\run-container-integration-tests.ps1

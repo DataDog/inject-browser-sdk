@@ -261,7 +261,9 @@ func (v *rumvmSuite) testInstall() {
   vm.CopyFile(iname, remoteFilePath)
   // The build verifies MSI/DLL metadata against the pipeline IID and writes
   // this expectation alongside the artifacts (not from the installed DLL).
-  v.doTestInstall(remoteFilePath, v.expectedVersion(), false)
+  // Builds under test are unsigned: only the release tag pipeline signs, and
+  // it checks the signatures (scripts/release/Assert-IISSignedRelease.ps1).
+  v.doTestInstall(remoteFilePath, v.expectedVersion(), true)
 }
 
 // expectedVersion is the MAJ.MIN.BUILD the build recorded for its artifacts.

@@ -5,14 +5,18 @@
 #    from Conventional Commit titles merged to main.
 # 2. That branch's pipeline builds the MSI in release mode (IIS_RELEASE_BUILD,
 #    set in .gitlab-ci.yml), runs every IIS test against it, and stages the
-#    tested bytes in MASS keyed by git tree (stage_injector_IIS_candidate).
+#    tested, unsigned bytes in MASS keyed by git tree
+#    (stage_injector_IIS_candidate).
 # 3. Merging the release PR authorizes the release: release_please tags
 #    iis-X.Y.Z and creates a draft GitHub release.
-# 4. The tag pipeline publishes the staged candidate for its tree without
-#    rebuilding: S3 iis/X.Y.Z/ and iis/latest/, then the GitHub release.
+# 4. The tag pipeline never recompiles. It signs the staged DLL, repackages
+#    and signs the MSI with the candidate's version, installs the signed MSI on
+#    a Windows runner and runs the integration tests, then publishes it: S3
+#    iis/X.Y.Z/ and iis/latest/, then the GitHub release.
 #
-# Pull requests that change this path rehearse steps 2 and 4 against scratch
-# locations, and dry-run step 1, so they are tested before any release.
+# Only step 4 signs; nothing before the merge touches the signing key.
+# Pull requests that change this path rehearse steps 2 and 4 (without
+# signing) against scratch locations, and dry-run step 1.
 variables:
   IIS_RELEASE_BRANCH: release-please--branches--main--components--iis
   RELEASE_TOOLS_IMAGE_NAME: registry.ddbuild.io/ci/inject-browser-sdk/release-tools
@@ -295,25 +299,76 @@ fetch_injector_IIS_release:
     paths:
       - dist/
 
+# Sign the candidate's DLL, repackage it with the candidate's version and sign
+# the MSI (tasks/iis.py sign_candidate). Release mode signs with this job's CI
+# Identity; rehearsals repackage and verify without signing.
+sign_injector_IIS_release:
+  extends: .publish_injector_IIS
+  tags: ["windows-v2:2022"]
+  needs: ["fetch_injector_IIS_release"]
+  id_tokens:
+    CI_IDENTITIES_GITLAB_ID_TOKEN:
+      aud: ci-identities
+  script:
+    - docker pull $env:WINDOWS_DEFAULT_IMAGE
+    - if (Test-Path signed) { Remove-Item -Recurse -Force signed }
+    - |
+      $run = @('run', '--rm', '-m', '4096M', '-v', "$(Get-Location):c:\mnt",
+        '-e', 'CARGO_HOME=c:\cargo', '-e', 'CI=true', '-e', 'WINDOWS_BUILDER=true',
+        '-e', "IIS_RELEASE_BUILD=$env:IIS_RELEASE_BUILD")
+      if ($env:RELEASE_MODE -eq 'release') {
+        # windows-code-signer.exe signs with the CI Identity AWS credentials.
+        $run += @('-e', 'SIGN_WINDOWS_DD_WCS=true', '-e', 'AWS_NETWORKING=true',
+          '-e', 'AWS_ACCESS_KEY_ID', '-e', 'AWS_SECRET_ACCESS_KEY', '-e', 'AWS_SESSION_TOKEN',
+          '-e', 'AWS_DEFAULT_REGION', '-e', "CI_JOB_NAME_SLUG=$env:CI_JOB_NAME_SLUG")
+        $run += @($env:WINDOWS_DEFAULT_IMAGE, 'c:\mnt\injector_IIS\scripts\release\sign_candidate.bat')
+        & C:\ci-identities-gitlab-job-client.exe assume-role -- docker @run
+      } else {
+        $run += @($env:WINDOWS_DEFAULT_IMAGE, 'c:\mnt\injector_IIS\scripts\release\sign_candidate.bat')
+        & docker @run
+      }
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  artifacts:
+    expire_in: 2 weeks
+    paths:
+      - signed/
+
+# Install the final, signed MSI on a Windows CI runner and run the integration
+# tests against it before anything is published.
+verify_injector_IIS_signed_install:
+  extends: .publish_injector_IIS
+  tags: ["windows-v2:2022"]
+  needs: ["sign_injector_IIS_release"]
+  script:
+    - .\injector_IIS\scripts\setup-integration-test-env.ps1 -MsiPath ".\signed\injector_IIS_installer.msi" -RepoRoot "."
+    - .\injector_IIS\scripts\run-integration-tests.ps1
+
 publish_injector_IIS_s3:
   extends: .publish_injector_IIS
   image: $IIS_AGENT_DEPLOY_IMAGE
   tags: ["arch:amd64"]
-  needs: ["fetch_injector_IIS_release"]
+  needs:
+    - fetch_injector_IIS_release
+    - sign_injector_IIS_release
+    - job: verify_injector_IIS_signed_install
+      artifacts: false
   variables:
     S3_BUCKET: rum-auto-instrumentation
     ARCH: x64
   script:
+    - injector_IIS/scripts/release/finalize-signed.sh dist signed
     - injector_IIS/scripts/release/publish-s3.sh "$RELEASE_MODE" dist
+  artifacts:
+    expire_in: 2 weeks
+    paths:
+      - dist/
 
 # GitHub is last: a public release means the S3 copies are already live.
 publish_injector_IIS_github:
   extends: [.publish_injector_IIS, .release_tools, .octo_sts]
   needs:
     - release_tools_image
-    - fetch_injector_IIS_release
-    - job: publish_injector_IIS_s3
-      artifacts: false
+    - publish_injector_IIS_s3
   rules:
     - <<: *iis_release_tag
       variables:

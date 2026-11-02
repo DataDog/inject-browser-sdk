@@ -14,6 +14,8 @@ bucket="${S3_BUCKET:?S3_BUCKET must be set}"
 arch="${ARCH:-x64}"
 msi="$dir/injector_IIS.msi"
 sha="$(sha256_of "$msi")"
+# Only the MSI that finalize-signed.sh installed from the sign job is published.
+[ "$sha" = "$(manifest_get "$dir/injector_IIS.manifest" signed_msi_sha256)" ] || die "$msi is not the signed MSI recorded by finalize-signed.sh"
 display="$(manifest_get "$dir/injector_IIS.manifest" display_version)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

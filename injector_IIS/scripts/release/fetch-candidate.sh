@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fetch the tested IIS build staged for the tree of HEAD and verify it before
-# anything is published. Writes injector_IIS.msi, the versioned GitHub asset,
-# SHA256SUMS and injector_IIS.manifest to <out-dir>.
+# it is signed and published. Writes the unsigned injector_IIS.msi and
+# injector_IIS.dll and injector_IIS.manifest to <out-dir>.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -27,9 +27,11 @@ manifest="$out/injector_IIS.manifest"
 cat "$manifest"
 
 [ "$(manifest_get "$manifest" tree)" = "$tree" ] || die "manifest is for tree $(manifest_get "$manifest" tree), expected $tree"
-curl -fsSL "$base/$(manifest_get "$manifest" mass_version)/injector_IIS.msi" -o "$out/injector_IIS.msi"
-actual="$(sha256_of "$out/injector_IIS.msi")"
-[ "$actual" = "$(manifest_get "$manifest" msi_sha256)" ] || die "MSI sha256 $actual differs from the staged $(manifest_get "$manifest" msi_sha256)"
+for f in msi dll; do
+  curl -fsSL "$base/$(manifest_get "$manifest" mass_version)/injector_IIS.$f" -o "$out/injector_IIS.$f"
+  actual="$(sha256_of "$out/injector_IIS.$f")"
+  [ "$actual" = "$(manifest_get "$manifest" ${f}_sha256)" ] || die "$f sha256 $actual differs from the staged $(manifest_get "$manifest" ${f}_sha256)"
+done
 
 display="$(manifest_get "$manifest" display_version)"
 product="$(manifest_get "$manifest" product_version)"
@@ -39,8 +41,4 @@ else
   case "$display" in "$version" | "$version"-*) ;; *) die "rehearsal display version $display does not start with $version" ;; esac
 fi
 [[ "$product" =~ ^${version%.*}\.[0-9]+$ ]] || die "candidate product version $product does not match $version"
-
-asset="injector_IIS-$display-x64.msi"
-cp "$out/injector_IIS.msi" "$out/$asset"
-(cd "$out" && sha256sum "$asset" > SHA256SUMS)
-echo "Verified $asset ($product) from $(manifest_get "$manifest" pipeline_url)"
+echo "Verified $display ($product) from $(manifest_get "$manifest" pipeline_url)"

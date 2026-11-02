@@ -108,6 +108,7 @@ cd "$repo"
 artifacts() { # <dir> <display>
   mkdir -p "$1"
   echo "msi built for $2" > "$1/injector_IIS_installer.msi"
+  echo "dll built for $2" > "$1/injector_IIS.dll"
   echo 1.3.4242 > "$1/injector_IIS.version"
   echo "$2" > "$1/injector_IIS.release"
 }
@@ -123,8 +124,25 @@ run "stage the release-mode build" "$SCRIPTS/stage-candidate.sh" release "$WORK/
 git commit -q --amend -m "chore(main): release iis 1.3.1 (#200)"
 export CI_COMMIT_TAG=iis-1.3.1
 run "fetch the candidate after a squash merge" "$SCRIPTS/fetch-candidate.sh" release "$WORK/dist"
-[ -f "$WORK/dist/injector_IIS-1.3.1-x64.msi" ] && (cd "$WORK/dist" && sha256sum -c --quiet SHA256SUMS) \
-  && pass "versioned asset and SHA256SUMS" || fail "versioned asset and SHA256SUMS"
+cmp -s "$WORK/dist/injector_IIS.dll" "$WORK/release-build/injector_IIS.dll" \
+  && pass "the unsigned DLL is fetched for signing" || fail "the unsigned DLL is fetched for signing"
+expect_fail "an unsigned candidate is never published" "is not the signed MSI" \
+  "$SCRIPTS/publish-s3.sh" release "$WORK/dist"
+
+# What sign-candidate leaves for finalize-signed.sh (signing runs on Windows).
+signed() { # <dir> <product> <display>
+  mkdir -p "$1"
+  echo "signed msi for $3" > "$1/injector_IIS_installer.msi"
+  echo "$2" > "$1/injector_IIS.version"
+  echo "$3" > "$1/injector_IIS.release"
+}
+signed "$WORK/bad-signed" 1.3.4243 1.3.1
+expect_fail "a repackaged MSI with another BUILD is refused" "signed product_version 1.3.4243" \
+  "$SCRIPTS/finalize-signed.sh" "$WORK/dist" "$WORK/bad-signed"
+signed "$WORK/signed" 1.3.4242 1.3.1
+run "finalize the signed MSI" "$SCRIPTS/finalize-signed.sh" "$WORK/dist" "$WORK/signed"
+cmp -s "$WORK/dist/injector_IIS-1.3.1-x64.msi" "$WORK/signed/injector_IIS_installer.msi" && (cd "$WORK/dist" && sha256sum -c --quiet SHA256SUMS) \
+  && pass "versioned asset and SHA256SUMS are the signed MSI" || fail "versioned asset and SHA256SUMS are the signed MSI"
 
 expect_fail "the tag must match VERSION" "does not match injector_IIS/VERSION" \
   env CI_COMMIT_TAG=iis-1.3.2 "$SCRIPTS/fetch-candidate.sh" release "$WORK/x"
@@ -136,8 +154,13 @@ expect_fail "the release mode does not accept rehearsals" "no tested candidates"
 tree="$(git rev-parse 'HEAD^{tree}')"
 cp "$FAKE/mass/inject-browser-sdk/iis/candidates/$tree/100/injector_IIS.msi" "$WORK/good.msi"
 echo tampered > "$FAKE/mass/inject-browser-sdk/iis/candidates/$tree/100/injector_IIS.msi"
-expect_fail "a changed MSI is rejected" "differs from the staged" "$SCRIPTS/fetch-candidate.sh" release "$WORK/x"
+expect_fail "a changed MSI is rejected" "msi sha256" "$SCRIPTS/fetch-candidate.sh" release "$WORK/x"
 cp "$WORK/good.msi" "$FAKE/mass/inject-browser-sdk/iis/candidates/$tree/100/injector_IIS.msi"
+cp "$FAKE/mass/inject-browser-sdk/iis/candidates/$tree/100/injector_IIS.dll" "$WORK/good.dll"
+echo tampered > "$FAKE/mass/inject-browser-sdk/iis/candidates/$tree/100/injector_IIS.dll"
+expect_fail "a changed DLL is rejected" "dll sha256" "$SCRIPTS/fetch-candidate.sh" release "$WORK/x"
+cp "$WORK/good.dll" "$FAKE/mass/inject-browser-sdk/iis/candidates/$tree/100/injector_IIS.dll"
+cp "$WORK/signed/injector_IIS_installer.msi" "$WORK/good.msi"
 
 run "publish to S3" "$SCRIPTS/publish-s3.sh" release "$WORK/dist"
 cmp -s "$FAKE/s3/iis/1.3.1/x64/injector_IIS.msi" "$WORK/good.msi" && cmp -s "$FAKE/s3/iis/latest/x64/injector_IIS.msi" "$WORK/good.msi" \
@@ -166,6 +189,8 @@ export CI_PIPELINE_ID=101
 echo false > "$FAKE/gh/iis-1.3.0"
 run "stage a rehearsal" "$SCRIPTS/stage-candidate.sh" rehearsal "$WORK/dev-build"
 run "fetch the rehearsal" "$SCRIPTS/fetch-candidate.sh" rehearsal "$WORK/rehearsal"
+signed "$WORK/rehearsal-signed" 1.3.4242 1.3.1-dev.4242
+run "finalize the rehearsal" "$SCRIPTS/finalize-signed.sh" "$WORK/rehearsal" "$WORK/rehearsal-signed"
 latest_before="$(sha256sum "$FAKE/s3/iis/latest/x64/injector_IIS.msi")"
 run "publish the rehearsal to S3" "$SCRIPTS/publish-s3.sh" rehearsal "$WORK/rehearsal"
 [ -f "$FAKE/s3/iis/rehearsal/101/x64/injector_IIS.msi" ] && [ ! -e "$FAKE/s3/iis/1.3.1-dev.4242" ] \

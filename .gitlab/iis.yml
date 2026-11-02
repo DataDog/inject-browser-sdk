@@ -36,7 +36,10 @@ variables:
       }
       docker pull $image
     - if (Test-Path build-out) { remove-item -recurse -force build-out }
+    # Inject the job's CI Identity AWS credentials, which windows-code-signer.exe
+    # uses to sign the DLL, PowerShell modules and MSI with AWS KMS.
     - >
+      C:\ci-identities-gitlab-job-client.exe assume-role --
       docker run --rm
       -m 4096M
       -v "$(Get-Location):c:\mnt"
@@ -48,9 +51,14 @@ variables:
       -e WINDOWS_BUILDER=true
       -e SIGN_WINDOWS_DD_WCS=true
       -e AWS_NETWORKING=true
+      -e AWS_ACCESS_KEY_ID
+      -e AWS_SECRET_ACCESS_KEY
+      -e AWS_SESSION_TOKEN
+      -e AWS_DEFAULT_REGION
       -e CI=true
       -e CI_JOB_ID=${CI_JOB_ID}
       -e CI_PROJECT_NAME=${CI_PROJECT_NAME}
+      -e CI_JOB_NAME_SLUG=${CI_JOB_NAME_SLUG}
       -e CI_PIPELINE_IID=${CI_PIPELINE_IID}
       -e IIS_RELEASE_BUILD=${IIS_RELEASE_BUILD}
       ${WINDOWS_DEFAULT_IMAGE}
@@ -63,6 +71,9 @@ variables:
     expire_in: 2 weeks
     paths:
       - $ARTIFACTS_DIR
+  id_tokens:
+    CI_IDENTITIES_GITLAB_ID_TOKEN:
+      aud: ci-identities
 
 .IIS_build_when:
   rules:

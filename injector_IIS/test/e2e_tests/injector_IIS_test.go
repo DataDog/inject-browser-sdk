@@ -249,7 +249,13 @@ func (v *rumvmSuite) testInstall() {
     v.T().Logf("Found %s", iname)
   }
   vm.CopyFile(iname, remoteFilePath)
-  v.doTestInstall(remoteFilePath, "1.2.1", false)
+  // The build verifies MSI/DLL metadata against the pipeline IID and writes
+  // this expectation alongside the artifacts (not from the installed DLL).
+  version, err := runneros.ReadFile(filepath.Join(assetDir, "injector_IIS.version"))
+  v.Require().NoError(err)
+  expectedVersion := strings.TrimSpace(string(version))
+  v.Require().Regexp(`^[0-9]+\.[0-9]+\.[0-9]+$`, expectedVersion)
+  v.doTestInstall(remoteFilePath, expectedVersion, false)
 }
 
 func (v *rumvmSuite) installOldVersionForUpgrade() {

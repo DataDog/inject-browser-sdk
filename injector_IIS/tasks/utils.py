@@ -20,15 +20,50 @@ _VERSION_FILE = os.path.join(
 
 
 def parse_version(version_file=_VERSION_FILE):
+    """Return the effective numeric version and prerelease suffix.
+
+    Preserve the two-value API used by package versions and module stamps.
+    The numeric version is MAJ.MIN.BUILD, including the pipeline IID (or 0
+    locally), so those consumers agree with the DLL and MSI metadata.
+    """
+    major, minor, build, pre = build_version(version_file)
+    return f"{major}.{minor}.{build}", pre
+
+
+def _parse_marketing_version(version_file):
     """Parse the IIS injector version from its VERSION file.
 
-    Returns (numeric_version, prerelease) where:
-      - numeric_version is "X.Y.Z"
-      - prerelease is the suffix after the hyphen (e.g., "dev") or "" if none
+    The VERSION file holds the marketing version as ``MAJ.MIN`` (optionally
+    suffixed with ``-prerelease``). The MSI ProductVersion BUILD slot is
+    populated separately from ``CI_PIPELINE_IID`` so dev builds upgrade
+    cleanly over each other.
+
+    Returns ``(major, minor, prerelease)`` as strings. ``prerelease`` is the
+    suffix after the hyphen (e.g., ``"dev"``) or ``""`` if absent.
     """
     with open(version_file) as f:
         raw = f.read().strip()
-    m = re.match(r'^(\d+\.\d+\.\d+)(?:-(.+))?$', raw)
+    m = re.fullmatch(r'([0-9]+)\.([0-9]+)(?:-(.+))?', raw)
     if m:
-        return m.group(1), m.group(2) or ""
+        return m.group(1), m.group(2), m.group(3) or ""
     raise Exception(f"Could not parse version from {version_file}: '{raw}'")
+
+
+def version_field(value, name, maximum):
+    """Validate and normalize a decimal Windows Installer version field."""
+    if not re.fullmatch(r"[0-9]+", value):
+        raise ValueError(f"{name} must contain decimal digits, got {value!r}")
+    value = value.lstrip("0") or "0"
+    if len(value) > len(str(maximum)) or int(value) > maximum:
+        raise ValueError(f"{name}={value} exceeds the Windows Installer limit ({maximum})")
+    return value
+
+
+def build_version(version_file=_VERSION_FILE):
+    major, minor, pre = _parse_marketing_version(version_file)
+    major = version_field(major, "MAJ_VER", 255)
+    minor = version_field(minor, "MIN_VER", 255)
+    build = version_field(os.environ.get("CI_PIPELINE_IID") or "0", "CI_PIPELINE_IID", 65535)
+    if os.environ.get("IIS_RELEASE_BUILD") == "1":
+        pre = ""
+    return major, minor, build, pre

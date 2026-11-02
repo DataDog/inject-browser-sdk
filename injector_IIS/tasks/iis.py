@@ -140,6 +140,19 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
         print("Missing installer")
         raise Exit(code=1)
 
+    # Check the actual Windows artifacts before signing/publishing them. The
+    # sidecar supplies the build expectation to both install and upgrade E2E.
+    verifier = os.path.join(PROJECT_DIR, "scripts", "Assert-IISArtifactVersion.ps1")
+    ctx.run(
+        f'powershell -NoProfile -ExecutionPolicy Bypass -File "{verifier}" '
+        f'-DllPath "{dllpath}" -MsiPath "{msipath}"',
+        env=env,
+        hide=False,
+        pty=False,
+    )
+    with open(os.path.join(out_dir, "injector_IIS.version"), "w") as version_file:
+        version_file.write(f"{env['MAJ_VER']}.{env['MIN_VER']}.{env['BUILD_VER']}\n")
+
     sign_binary(ctx, msipath)
 
     ## copy the newly built file into the target directory

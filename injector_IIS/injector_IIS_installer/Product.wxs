@@ -10,24 +10,26 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
 	 xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
 
-	 <!-- Version is derived from injector_IIS/VERSION via the build system.
-	      MAJ_VER, MIN_VER, PATCH_VER, VERSION_PRE are passed from MSBuild. -->
-	<?if $(var.MAJ_VER) and $(var.MAJ_VER) != "" ?>
+	 <!-- Version is assembled by the build system. MAJ_VER, MIN_VER come from
+	      injector_IIS/VERSION; BUILD_VER is CI_PIPELINE_IID (0 locally) so
+	      dev builds upgrade cleanly. VERSION_PRE is "dev" except when
+	      IIS_RELEASE_BUILD=1 strips it. All four are passed from MSBuild. -->
+	<?if $(var.MAJ_VER) != "" ?>
 		<?define VERSION_MAJOR = $(var.MAJ_VER) ?>
 		<?define VERSION_MINOR = $(var.MIN_VER) ?>
-		<?define VERSION_PATCH = $(var.PATCH_VER) ?>
-		<?define VERSION_NUMBER = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH).0 ?>
+		<?define VERSION_BUILD = $(var.BUILD_VER) ?>
+		<?define VERSION_NUMBER = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_BUILD).0 ?>
 	<?else ?>
 		<?define VERSION_MAJOR = 0 ?>
 		<?define VERSION_MINOR = 0 ?>
-		<?define VERSION_PATCH = 0 ?>
+		<?define VERSION_BUILD = 0 ?>
 		<?define VERSION_NUMBER = 0.0.0.0 ?>
 	<?endif ?>
 
 	<?if $(var.VERSION_PRE) and $(var.VERSION_PRE) != "" ?>
-		<?define VERSION_DISPLAY = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH)-$(var.VERSION_PRE) ?>
+		<?define VERSION_DISPLAY = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_BUILD)-$(var.VERSION_PRE) ?>
 	<?else ?>
-		<?define VERSION_DISPLAY = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH) ?>
+		<?define VERSION_DISPLAY = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_BUILD) ?>
 	<?endif ?>
 
 	<?define UPGRADE_CODE=A5E2C93A-4340-4D15-BA17-F3CA858D09CA?>

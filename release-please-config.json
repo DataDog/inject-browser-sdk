@@ -1,0 +1,36 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "last-release-sha": "c5e11442bc483df194de8df4e59763c347dee106",
+  "draft": true,
+  "force-tag-creation": true,
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "component": "iis",
+      "package-name": "iis",
+      "include-component-in-tag": true,
+      "include-v-in-tag": false,
+      "tag-separator": "-",
+      "version-file": "injector_IIS/VERSION",
+      "changelog-path": "injector_IIS/CHANGELOG.md",
+      "exclude-paths": [
+        "installer",
+        "cmd",
+        "fuzz"
+      ],
+      "changelog-sections": [
+        { "type": "feat", "section": "Features" },
+        { "type": "fix", "section": "Bug Fixes" },
+        { "type": "perf", "section": "Performance" },
+        { "type": "deps", "section": "Dependencies" },
+        { "type": "docs", "section": "Documentation", "hidden": true },
+        { "type": "refactor", "section": "Refactoring", "hidden": true },
+        { "type": "test", "section": "Tests", "hidden": true },
+        { "type": "build", "section": "Build", "hidden": true },
+        { "type": "ci", "section": "Continuous Integration", "hidden": true },
+        { "type": "chore", "section": "Maintenance", "hidden": true },
+        { "type": "revert", "section": "Reverts" }
+      ]
+    }
+  }
+}

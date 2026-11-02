@@ -57,18 +57,59 @@ Build locally with Visual Studio C++ tools, CMake, Rust and WiX 3.x installed:
 .\injector_IIS\scripts\build-msi.ps1 -BuildVer 123
 ```
 
-`VERSION` holds the marketing version (`1.3-dev`). The MSI ProductVersion and
-DLL file version are `MAJ.MIN.BUILD.0`, where BUILD is `CI_PIPELINE_IID`, or `0`
-when unset or empty. Major/minor must be decimal values from 0 to 255; BUILD
-must be from 0 to 65535. Invalid values fail before building. Each new GitLab
-pipeline gets a greater IID, allowing upgrades within the same marketing
-version; retrying a job in the same pipeline keeps the same ProductVersion.
-Plan a bounded BUILD counter before the project's pipeline IID exceeds 65535.
+`VERSION` holds the release version (`1.3.0`), which release-please updates in
+its release PR; don't edit it by hand. The MSI ProductVersion and DLL file
+version are `MAJ.MIN.BUILD.0`, where BUILD is `CI_PIPELINE_IID`, or `0` when
+unset or empty. Windows Installer has no room for PATCH next to BUILD, so PATCH
+only appears in the display version. Major/minor must be decimal values from 0
+to 255; PATCH and BUILD must be from 0 to 65535. Invalid values fail before
+building. Each new GitLab pipeline gets a greater IID, allowing upgrades within
+the same release; retrying a job in the same pipeline keeps the same
+ProductVersion. The build warns once the IID passes 60000: plan a bounded BUILD
+counter before it exceeds 65535.
 
-The installer display name retains `-dev`; setting `IIS_RELEASE_BUILD=1`
-removes the suffix without changing the numeric version. The build checks the
-actual MSI ProductVersion and DLL metadata for equality before publishing
-artifacts, and exports `injector_IIS.version` for install/upgrade E2E checks.
+The installer display name is `MAJ.MIN.PATCH-dev.BUILD` for development builds.
+CI sets `IIS_RELEASE_BUILD=1` on the release-please branch and `iis-*` tags,
+which drops the suffix (`MAJ.MIN.PATCH`) without changing the numeric version.
+The build checks the actual MSI ProductVersion, ProductName and DLL metadata
+before publishing artifacts, and exports `injector_IIS.version` (numeric) and
+`injector_IIS.release` (display) for E2E and release checks.
+
+## Releases
+
+Releases are cut by [release-please](https://github.com/googleapis/release-please)
+from Conventional Commit PR titles (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+The jobs live in [`.gitlab/release.yml`](../.gitlab/release.yml):
+
+1. Every main push updates the release PR on
+   `release-please--branches--main--components--iis`, with the next version in
+   `VERSION` and the changelog in `CHANGELOG.md`.
+2. That branch's pipeline builds the MSI in release mode, runs all IIS unit,
+   integration and E2E tests on it, and stages the tested MSI in MASS under
+   `inject-browser-sdk/iis/candidates/<git tree>/`. **A green release PR means
+   the artifact is ready.**
+3. Merging the release PR authorizes the release: main tags `iis-X.Y.Z` and
+   creates a draft GitHub release.
+4. The tag pipeline does not rebuild. It fetches the candidate for its tree,
+   verifies the checksum, tag and version, publishes it to
+   `s3://rum-auto-instrumentation/iis/X.Y.Z/x64/` and `iis/latest/x64/`, reads
+   both back over the public URL, then attaches the MSI and `SHA256SUMS` to the
+   GitHub release and publishes it.
+
+Merge the release PR only once its pipeline has passed for its latest commit,
+with the branch up to date with main. Otherwise the merged tree has no tested
+candidate and the tag pipeline stops before publishing anything. To recover,
+push the tag's commit to the release branch
+(`git push -f origin iis-X.Y.Z:refs/heads/release-please--branches--main--components--iis`),
+wait for that pipeline to stage a candidate, then retry the tag pipeline's
+`fetch_injector_IIS_release` job.
+
+Pull requests that change the release path rehearse it without releasing. They
+stage their tested build under `iis/rehearsals/`, build once more in release
+mode, publish to `s3://rum-auto-instrumentation/iis/rehearsal/<pipeline>/`,
+check the GitHub release lookup read-only, and dry-run release-please against
+the PR branch. `injector_IIS/test/release_tests/test_release_scripts.sh` covers
+the release scripts locally with stubs.
 
 # Powershell Module
 

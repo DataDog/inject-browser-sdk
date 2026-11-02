@@ -152,6 +152,9 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
     )
     with open(os.path.join(out_dir, "injector_IIS.version"), "w") as version_file:
         version_file.write(f"{env['MAJ_VER']}.{env['MIN_VER']}.{env['BUILD_VER']}\n")
+    # The display version, which the release job matches against the tag.
+    with open(os.path.join(out_dir, "injector_IIS.release"), "w") as release_file:
+        release_file.write(f"{fullver}\n")
 
     sign_binary(ctx, msipath)
 

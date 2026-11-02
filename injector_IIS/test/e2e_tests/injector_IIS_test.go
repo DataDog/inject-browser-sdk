@@ -12,6 +12,7 @@ import (
   "path"
   "path/filepath"
   "runtime"
+  "strconv"
   "strings"
   "testing"
 
@@ -33,6 +34,7 @@ var (
 type rumvmSuite struct {
   e2e.BaseSuite[environments.WindowsHost]
   isUpgradeSuite bool
+  latestVersion []string
 }
 
 type rumInstallSuite struct {
@@ -47,6 +49,8 @@ var (
   // dynamically pick up the "last known good" version.
   oldVersionForUpgrade = "https://s3.amazonaws.com/ddagent-windows-unstable/inject-browser-sdk/upgrade/injector_iis-0.0.2.msi"
   oldVersionValidation = "0.0.2"
+  // What customers download today: the last release promoted by .gitlab/release.yml.
+  latestReleaseMSI = "https://rum-auto-instrumentation.s3.amazonaws.com/iis/latest/x64/injector_IIS.msi"
 )
 var sitesToTest = []windows.IISSiteDefinition{
   {
@@ -223,8 +227,14 @@ func (v *rumvmSuite) createTestOutputDir() (string, error) {
 }
 func (v *rumInstallSuite) TestInjectorIISInstall() {
 
+  v.requireRun("Install latest release", v.installLatestRelease)
+  v.requireRun("Upgrade from latest release", v.testInstall)
+  v.requireRun("Test injection after upgrade", v.testSuccessfulInjectionAll)
+  v.requireRun("Uninstall upgraded", v.testUninstall)
+
   v.requireRun("Install", v.testInstall)
   v.requireRun("Test injection", v.testSuccessfulInjectionAll)
+  v.requireRun("Downgrade to latest release is refused", v.testDowngradeRefused)
   v.requireRun("Uninstall", v.testUninstall)
 
 }
@@ -251,11 +261,74 @@ func (v *rumvmSuite) testInstall() {
   vm.CopyFile(iname, remoteFilePath)
   // The build verifies MSI/DLL metadata against the pipeline IID and writes
   // this expectation alongside the artifacts (not from the installed DLL).
+  v.doTestInstall(remoteFilePath, v.expectedVersion(), false)
+}
+
+// expectedVersion is the MAJ.MIN.BUILD the build recorded for its artifacts.
+func (v *rumvmSuite) expectedVersion() string {
   version, err := runneros.ReadFile(filepath.Join(assetDir, "injector_IIS.version"))
   v.Require().NoError(err)
   expectedVersion := strings.TrimSpace(string(version))
   v.Require().Regexp(`^[0-9]+\.[0-9]+\.[0-9]+$`, expectedVersion)
-  v.doTestInstall(remoteFilePath, expectedVersion, false)
+  return expectedVersion
+}
+
+// newerThan reports whether MAJ.MIN.BUILD a sorts after b, comparing the three
+// fields Windows Installer uses for upgrades.
+func newerThan(a, b []string) bool {
+  for i := 0; i < 3; i++ {
+    x, errX := strconv.Atoi(a[i])
+    y, errY := strconv.Atoi(b[i])
+    if errX != nil || errY != nil || x == y {
+      continue
+    }
+    return x > y
+  }
+  return false
+}
+
+// candidateIsNewerThanLatest is false only for local builds (BUILD 0), which
+// cannot upgrade a released MSI; in CI every pipeline IID is larger.
+func (v *rumvmSuite) candidateIsNewerThanLatest(latest []string) bool {
+  if newerThan(strings.Split(v.expectedVersion(), "."), latest) {
+    return true
+  }
+  v.Require().Empty(runneros.Getenv("CI"), "build %s is not newer than the latest release %v", v.expectedVersion(), latest)
+  return false
+}
+
+// installLatestRelease installs the MSI customers get today, so the following
+// install step tests the upgrade they will run.
+func (v *rumvmSuite) installLatestRelease() {
+  vm := v.Env().RemoteHost
+  outputDir, err := v.createTestOutputDir()
+  v.Require().NoError(err)
+  err = windowsCommon.InstallMSI(vm, latestReleaseMSI, "IISRESTART=true", filepath.Join(outputDir, "install.log"))
+  v.Require().NoError(err)
+  latest, err := windowsCommon.GetFileVersion(vm, defaultBinPath)
+  v.Require().NoError(err)
+  v.T().Logf("Latest release installed version %v", latest)
+  v.latestVersion = latest
+  if !v.candidateIsNewerThanLatest(latest) {
+    err = windowsCommon.UninstallMSI(vm, latestReleaseMSI, "IISRESTART=true", filepath.Join(outputDir, "uninstall.log"))
+    v.Require().NoError(err)
+    v.T().Skip("local build cannot upgrade the latest release; installing fresh instead")
+  }
+}
+
+// testDowngradeRefused checks MajorUpgrade blocks installing the older latest
+// release over this build and leaves this build in place.
+func (v *rumvmSuite) testDowngradeRefused() {
+  vm := v.Env().RemoteHost
+  v.Require().NotNil(v.latestVersion, "latest release version was not recorded")
+  if !v.candidateIsNewerThanLatest(v.latestVersion) {
+    v.T().Skip("local build is not newer than the latest release")
+  }
+  outputDir, err := v.createTestOutputDir()
+  v.Require().NoError(err)
+  err = windowsCommon.InstallMSI(vm, latestReleaseMSI, "IISRESTART=true", filepath.Join(outputDir, "downgrade.log"))
+  v.Require().Error(err, "installing an older release over %s should fail", v.expectedVersion())
+  v.Require().NoError(windowsCommon.VerifyVersion(vm, defaultBinPath, v.expectedVersion()))
 }
 
 func (v *rumvmSuite) installOldVersionForUpgrade() {

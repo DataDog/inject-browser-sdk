@@ -7,6 +7,28 @@ issue](https://github.com/DataDog/inject-browser-sdk/issues/new) and discuss you
 ideas or propose the changes you wish to make. After a resolution is reached, a
 PR can be submitted for review.
 
+## Pull request titles
+
+Pull requests are squash-merged, so the title becomes the commit on `main` and
+the input to release-please. Titles must follow Conventional Commits, as
+checked by `.github/workflows/pr-title.yml`:
+
+```text
+type(optional-scope)!: short description
+```
+
+Allowed types are `feat`, `fix`, `perf`, `deps`, `docs`, `refactor`, `test`,
+`build`, `ci`, `chore` and `revert`. `feat` cuts a minor release; `fix`,
+`perf`, `deps` and `revert` a patch release; use `!` or a `BREAKING CHANGE:`
+footer for a major one. `docs`, `refactor`, `test`, `build`, `ci` and `chore`
+are left out of the changelog and never cut a release on their own. Only
+changes outside `installer/`, `cmd/` and `fuzz/` count towards an IIS release.
+
+## Releases
+
+Merging the release-please PR releases the IIS injector. See
+[injector_IIS/README.md](injector_IIS/README.md#releases).
+
 ## Linting
 
 Requires Docker. Install pre-commit hooks with [uv](https://docs.astral.sh/uv/):

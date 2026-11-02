@@ -18,17 +18,17 @@ from .utils import build_version
 
 def do_get_build_env(ctx, vstudio_root=None):
     try:
-        build_maj, build_min, build_build, pre = build_version()
+        version = build_version()
     except ValueError as error:
         raise Exit(str(error), code=2) from error
-    numeric = f"{build_maj}.{build_min}.{build_build}"
-    fullver = f"{numeric}-{pre}" if pre else numeric
+    fullver = version.display
 
     env = {
-        "MAJ_VER": build_maj,
-        "MIN_VER": build_min,
-        "BUILD_VER": build_build,
-        "VERSION_PRE": pre,
+        "MAJ_VER": version.major,
+        "MIN_VER": version.minor,
+        "BUILD_VER": version.build,
+        "VERSION_PRE": version.pre,
+        "RELEASE_VER": version.release,
     }
 
     vsroot = os.getenv("VSINSTALLDIR")

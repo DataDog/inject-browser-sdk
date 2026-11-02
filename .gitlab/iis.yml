@@ -68,6 +68,10 @@ variables:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: never
+    # Tag pipelines publish the candidate tested on the release branch
+    # (.gitlab/release.yml); they never rebuild.
+    - if: $CI_COMMIT_TAG
+      when: never
     - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
       changes:
         compare_to: refs/heads/main
@@ -87,6 +91,11 @@ variables:
         - .gitlab-ci.yml
         - .gitlab/iis.yml
         - .gitlab/windows-default-image.yml
+    # A release rehearsal stages this pipeline's tested build.
+    - if: $CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      changes:
+        compare_to: refs/heads/main
+        paths: !reference [.iis_release_files, paths]
 
 
 
@@ -304,52 +313,3 @@ manual_injector_IIS_e2e_test:
   extends: .injector_IIS_e2e_test_template
   when: manual
   needs: ["manual_injector_IIS_build", "manual_go_e2e_deps"]
-
-.injector_IIS_release:
-  stage: release
-  tags: ["arch:amd64"]
-  needs: []
-  image: $IIS_AGENT_DEPLOY_IMAGE
-  when: manual
-  allow_failure: false
-  script:
-    ## the msi will have a version-specific name, but there should be only one.
-    ## copy that to the expected filename.
-    - cp ${ARTIFACTS_DIR}/*.msi ${ARTIFACTS_DIR}/injector_IIS.msi
-    - aws s3 cp
-      --region us-east-1
-      --sse AES256
-      --acl public-read
-      --recursive
-      --exclude "*"
-      --include "injector_IIS.msi"
-      $ARTIFACTS_DIR
-      s3://$S3_BUCKET/iis/$CI_COMMIT_SHORT_SHA/$ARCH/
-    - echo https://$S3_BUCKET.s3.amazonaws.com/iis/$CI_COMMIT_SHORT_SHA/$ARCH/injector_IIS.msi
-  artifacts:
-    expire_in: 2 weeks
-    paths:
-      - $ARTIFACTS_DIR
-
-manual_injector_IIS_release:
-  extends: .injector_IIS_release
-  when: manual
-  needs: ["manual_injector_IIS_build"]
-  variables:
-    S3_BUCKET: rum-auto-instrumentation
-    BUILD_CONFIGURATION: Release
-    ARCH: x64
-
-
-promote_injector_IIS_release_candidate:
-  stage: release
-  tags: ["arch:amd64"]
-  image: $IIS_AGENT_DEPLOY_IMAGE
-  when: manual
-  needs: ["manual_injector_IIS_release"]
-  variables:
-    ARCH: x64
-    S3_BUCKET: rum-auto-instrumentation
-  script:
-    - aws s3 cp --region us-east-1 --sse AES256 --acl public-read s3://$S3_BUCKET/iis/$CI_COMMIT_SHORT_SHA/$ARCH/injector_IIS.msi injector_IIS.msi
-    - aws s3 cp --region us-east-1 --sse AES256 --acl public-read injector_IIS.msi s3://$S3_BUCKET/iis/latest/$ARCH/

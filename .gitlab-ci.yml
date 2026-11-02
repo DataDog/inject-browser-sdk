@@ -11,6 +11,16 @@ include:
   - local: .gitlab/installer.yml
   - local: .gitlab/cmake.yml
   - local: .gitlab/lint.yml
+  - local: .gitlab/release.yml
+
+workflow:
+  rules:
+    # The release-please PR branch and its tags build release-mode MSIs: no
+    # -dev display version. See .gitlab/release.yml.
+    - if: $CI_COMMIT_BRANCH == "release-please--branches--main--components--iis" || $CI_COMMIT_TAG =~ /^iis-[0-9]+\.[0-9]+\.[0-9]+$/
+      variables:
+        IIS_RELEASE_BUILD: "1"
+    - when: always
 
 stages:
   - build

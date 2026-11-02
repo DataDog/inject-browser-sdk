@@ -1,0 +1,322 @@
+---
+# IIS releases with release-please (modelled on DataDog/dd-trace-c):
+#
+# 1. release_please_pr keeps a release PR on IIS_RELEASE_BRANCH up to date
+#    from Conventional Commit titles merged to main.
+# 2. That branch's pipeline builds the MSI in release mode (IIS_RELEASE_BUILD,
+#    set in .gitlab-ci.yml), runs every IIS test against it, and stages the
+#    tested bytes in MASS keyed by git tree (stage_injector_IIS_candidate).
+# 3. Merging the release PR authorizes the release: release_please tags
+#    iis-X.Y.Z and creates a draft GitHub release.
+# 4. The tag pipeline publishes the staged candidate for its tree without
+#    rebuilding: S3 iis/X.Y.Z/ and iis/latest/, then the GitHub release.
+#
+# Pull requests that change this path rehearse steps 2 and 4 against scratch
+# locations, and dry-run step 1, so they are tested before any release.
+variables:
+  IIS_RELEASE_BRANCH: release-please--branches--main--components--iis
+  RELEASE_TOOLS_IMAGE_NAME: registry.ddbuild.io/ci/inject-browser-sdk/release-tools
+
+# Files that make up the release path. Changing any of them rehearses it, and
+# runs the IIS build and tests (see .IIS_build_when) that a rehearsal stages.
+.iis_release_files:
+  paths: &iis_release_paths
+  - .gitlab-ci.yml
+  - .gitlab/release.yml
+  - .gitlab/iis.yml
+  - .github/chainguard/self.gitlab.release-please.sts.yaml
+  - .github/chainguard/self.gitlab.github-release.sts.yaml
+  - docker/Dockerfile.release-tools
+  - release-please-config.json
+  - .release-please-manifest.json
+  - tools/release-please/**/*
+  - injector_IIS/VERSION
+  - injector_IIS/cmake/version.cmake
+  - injector_IIS/tasks/**/*
+  - injector_IIS/scripts/Assert-IISArtifactVersion.ps1
+  - injector_IIS/scripts/Get-IISBuildVersion.ps1
+  - injector_IIS/scripts/build_injector_IIS.bat
+  - injector_IIS/scripts/release/**/*
+  - injector_IIS/test/release_tests/**/*
+
+.iis_release_tag: &iis_release_tag
+  if: $CI_COMMIT_TAG =~ /^iis-[0-9]+\.[0-9]+\.[0-9]+$/
+
+.main_push: &main_push
+  if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
+
+.release_branch_push: &release_branch_push
+  if: $CI_COMMIT_BRANCH == $IIS_RELEASE_BRANCH && $CI_PIPELINE_SOURCE == "push"
+
+.rehearsal_push: &rehearsal_push
+  if: $CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_COMMIT_BRANCH != $IIS_RELEASE_BRANCH && $CI_PIPELINE_SOURCE == "push"
+  changes:
+    compare_to: refs/heads/main
+    paths: *iis_release_paths
+
+# Pipelines that use the release tooling at all.
+.release_tools_rules:
+  rules:
+    - *iis_release_tag
+    - *main_push
+    - *release_branch_push
+    - *rehearsal_push
+    - when: never
+
+.release_tools:
+  image: ${RELEASE_TOOLS_IMAGE}
+  tags: ["arch:amd64"]
+  needs: ["release_tools_image"]
+  before_script:
+    # The checkout may be owned by another UID; scripts read the tree with git.
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+
+# Mint a dd-octo-sts token for $DDOCTOSTS_POLICY into GH_TOKEN and revoke it
+# afterwards. Policies live in .github/chainguard/ and must be on main.
+.octo_sts:
+  variables:
+    DDOCTOSTS_TOKEN_FILE: /tmp/inject-browser-sdk-github-token
+  id_tokens:
+    DDOCTOSTS_ID_TOKEN:
+      aud: dd-octo-sts
+  before_script:
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - dd-octo-sts token --scope DataDog/inject-browser-sdk --policy "$DDOCTOSTS_POLICY" > "$DDOCTOSTS_TOKEN_FILE"
+    - test -s "$DDOCTOSTS_TOKEN_FILE"
+    - export GH_TOKEN="$(cat "$DDOCTOSTS_TOKEN_FILE")"
+  after_script:
+    - if [ -s "$DDOCTOSTS_TOKEN_FILE" ]; then dd-octo-sts revoke -t "$(cat "$DDOCTOSTS_TOKEN_FILE")" || true; fi
+    - rm -f "$DDOCTOSTS_TOKEN_FILE"
+
+# Build the release tools image once per content hash and export its name.
+release_tools_image:
+  stage: build
+  extends: .release_tools_rules
+  image: $NYDUS_DD_IMAGE
+  tags: ["arch:amd64"]
+  needs: []
+  script:
+    - |
+      set -euo pipefail
+      TAG=$(cat docker/Dockerfile.release-tools tools/release-please/package.json \
+        tools/release-please/package-lock.json tools/release-please/validate-config.mjs \
+        | sha256sum | cut -c1-12)
+      IMAGE="${RELEASE_TOOLS_IMAGE_NAME}:${TAG}"
+      echo "RELEASE_TOOLS_IMAGE=${IMAGE}" > release-tools.env
+      if crane manifest "${IMAGE}" > /dev/null 2>&1; then
+        echo "Image ${IMAGE} already exists in registry"
+      else
+        docker buildx build --platform linux/amd64 --push -t "${IMAGE}" \
+          -f docker/Dockerfile.release-tools .
+      fi
+  artifacts:
+    reports:
+      dotenv: release-tools.env
+
+# Credential-free checks of the whole release path, on every pipeline that
+# uses it: policies, release-please config, and the scripts against stubs.
+release_please_check:
+  stage: test
+  extends: [.release_tools_rules, .release_tools]
+  script:
+    - dd-octo-sts check --repo "$CI_PROJECT_DIR" --scope DataDog/inject-browser-sdk --policy self.gitlab.release-please --skip-token-check
+    - dd-octo-sts check --repo "$CI_PROJECT_DIR" --scope DataDog/inject-browser-sdk --policy self.gitlab.github-release --skip-token-check
+    - node /opt/release-please/validate-config.mjs release-please-config.json .release-please-manifest.json
+    - injector_IIS/test/release_tests/test_release_scripts.sh
+
+# Show the release PR this branch would produce, reading GitHub only.
+release_please_dry_run:
+  stage: test
+  extends: [.release_tools, .octo_sts]
+  needs: ["release_tools_image", "release_please_check"]
+  rules:
+    - *rehearsal_push
+    - when: never
+  variables:
+    DDOCTOSTS_POLICY: self.gitlab.branch-automation
+  script:
+    - >-
+      release-please release-pr --dry-run
+      --token="$DDOCTOSTS_TOKEN_FILE"
+      --repo-url=DataDog/inject-browser-sdk
+      --target-branch="$CI_COMMIT_BRANCH"
+      --config-file=release-please-config.json
+      --manifest-file=.release-please-manifest.json
+
+.release_please:
+  stage: release
+  extends: [.release_tools, .octo_sts]
+  needs: ["release_tools_image", "release_please_check"]
+  interruptible: false
+  resource_group: release-please-main
+  rules:
+    - *main_push
+    - when: never
+  variables:
+    DDOCTOSTS_POLICY: self.gitlab.release-please
+
+# Keep the release PR current. If the manifest's version has not been released
+# yet, finalization (release_please) takes precedence; the PR is refreshed on
+# the next main push.
+release_please_pr:
+  extends: .release_please
+  script:
+    - |
+      VERSION="$(jq -r '."."' .release-please-manifest.json)"
+      RELEASE_ID="$(gh api "repos/DataDog/inject-browser-sdk/releases/tags/iis-$VERSION" --jq .id 2>/dev/null || true)"
+      if [ -z "$RELEASE_ID" ]; then
+        echo "Deferring release PR maintenance until iis-$VERSION is tagged"
+        exit 0
+      fi
+    - >-
+      release-please release-pr
+      --token="$DDOCTOSTS_TOKEN_FILE"
+      --repo-url=DataDog/inject-browser-sdk
+      --target-branch=main
+      --config-file=release-please-config.json
+      --manifest-file=.release-please-manifest.json
+
+# A merged release PR is the authorization to release: tag it and create the
+# draft GitHub release. CodeSync mirrors the tag back to start the publisher.
+release_please:
+  extends: .release_please
+  script:
+    - >-
+      release-please github-release
+      --token="$DDOCTOSTS_TOKEN_FILE"
+      --repo-url=DataDog/inject-browser-sdk
+      --target-branch=main
+      --config-file=release-please-config.json
+      --manifest-file=.release-please-manifest.json
+
+########################################
+# Stage the tested IIS build, then publish it from the tag pipeline
+########################################
+
+# Needs every IIS build and test job, so only a fully green pipeline stages.
+# ASAN unit tests are allow_failure everywhere and stay out of the gate.
+.stage_injector_IIS:
+  stage: release
+  extends: .release_tools
+  interruptible: false
+  needs:
+    - release_tools_image
+    - injector_IIS_build
+    - job: injector_IIS_unit_test
+      artifacts: false
+    - job: injector_IIS_unit_test_linux_wine
+      artifacts: false
+    - job: injector_IIS_integration_test
+      artifacts: false
+    - job: injector_IIS_integration_test_msi
+      artifacts: false
+    - job: injector_IIS_e2e_test
+      artifacts: false
+  script:
+    - injector_IIS/scripts/release/stage-candidate.sh "$RELEASE_MODE" "$ARTIFACTS_DIR"
+
+stage_injector_IIS_candidate:
+  extends: .stage_injector_IIS
+  rules:
+    - *release_branch_push
+    - when: never
+  variables:
+    RELEASE_MODE: release
+
+stage_injector_IIS_rehearsal:
+  extends: .stage_injector_IIS
+  needs:
+    - release_tools_image
+    - injector_IIS_build
+    - job: injector_IIS_unit_test
+      artifacts: false
+    - job: injector_IIS_unit_test_linux_wine
+      artifacts: false
+    - job: injector_IIS_integration_test
+      artifacts: false
+    - job: injector_IIS_integration_test_msi
+      artifacts: false
+    - job: injector_IIS_e2e_test
+      artifacts: false
+    - job: injector_IIS_build_release_rehearsal
+      artifacts: false
+  rules:
+    - *rehearsal_push
+    - when: never
+  variables:
+    RELEASE_MODE: rehearsal
+
+# Rehearsals stage the dev build their tests ran against. Also build in
+# release mode, so the build's own release checks (no -dev display version,
+# matching DLL and MSI metadata) run before a release PR depends on them.
+injector_IIS_build_release_rehearsal:
+  extends: .IIS_build
+  rules:
+    - *rehearsal_push
+    - when: never
+  variables:
+    IIS_RELEASE_BUILD: "1"
+  script:
+    - !reference [.IIS_build, script]
+    - $release = (Get-Content "$ARTIFACTS_DIR\injector_IIS.release").Trim()
+    - $version = (Get-Content injector_IIS\VERSION).Trim()
+    - if ($release -ne $version) { throw "release-mode build is $release, expected $version" }
+
+.publish_injector_IIS:
+  stage: release
+  interruptible: false
+  rules:
+    - <<: *iis_release_tag
+      variables:
+        RELEASE_MODE: release
+    - <<: *rehearsal_push
+      variables:
+        RELEASE_MODE: rehearsal
+    - when: never
+
+# Fetch the staged build for this tree and verify it against the tag/VERSION.
+fetch_injector_IIS_release:
+  extends: [.publish_injector_IIS, .release_tools]
+  needs:
+    - release_tools_image
+    - job: stage_injector_IIS_rehearsal
+      artifacts: false
+      optional: true
+  script:
+    - injector_IIS/scripts/release/fetch-candidate.sh "$RELEASE_MODE" dist
+  artifacts:
+    expire_in: 2 weeks
+    paths:
+      - dist/
+
+publish_injector_IIS_s3:
+  extends: .publish_injector_IIS
+  image: $IIS_AGENT_DEPLOY_IMAGE
+  tags: ["arch:amd64"]
+  needs: ["fetch_injector_IIS_release"]
+  variables:
+    S3_BUCKET: rum-auto-instrumentation
+    ARCH: x64
+  script:
+    - injector_IIS/scripts/release/publish-s3.sh "$RELEASE_MODE" dist
+
+# GitHub is last: a public release means the S3 copies are already live.
+publish_injector_IIS_github:
+  extends: [.publish_injector_IIS, .release_tools, .octo_sts]
+  needs:
+    - release_tools_image
+    - fetch_injector_IIS_release
+    - job: publish_injector_IIS_s3
+      artifacts: false
+  rules:
+    - <<: *iis_release_tag
+      variables:
+        RELEASE_MODE: release
+        DDOCTOSTS_POLICY: self.gitlab.github-release
+    - <<: *rehearsal_push
+      variables:
+        RELEASE_MODE: rehearsal
+        DDOCTOSTS_POLICY: self.gitlab.branch-automation
+    - when: never
+  script:
+    - injector_IIS/scripts/release/publish-github.sh "$RELEASE_MODE" dist

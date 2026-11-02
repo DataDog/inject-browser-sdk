@@ -130,6 +130,7 @@ try {
         /p:MIN_VER=$MinVer `
         /p:BUILD_VER=$BuildVer `
         /p:VERSION_PRE=$($version.VERSION_PRE) `
+        /p:RELEASE_VER=$($version.RELEASE_VER) `
         /p:WixTargetsPath="$wixTargets" `
         /nologo /v:minimal
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

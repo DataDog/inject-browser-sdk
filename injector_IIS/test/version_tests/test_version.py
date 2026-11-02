@@ -1,5 +1,7 @@
 """Exercise the actual Python, CMake and PowerShell build version resolvers."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -23,7 +25,7 @@ class VersionContract(unittest.TestCase):
         (self.root / "cmake").mkdir()
         shutil.copy2(ROOT / "cmake/version.cmake", self.root / "cmake/version.cmake")
         self.file = self.root / "VERSION"
-        self.file.write_text("1.3-dev\n")
+        self.file.write_text("1.3.0\n")
         self.cmake = self.root / "check.cmake"
         self.cmake.write_text(
             'include("${CMAKE_CURRENT_LIST_DIR}/cmake/version.cmake")\n'
@@ -72,12 +74,12 @@ class VersionContract(unittest.TestCase):
             else:
                 self.assertEqual(0, ps.returncode, ps.stderr)
                 result = json.loads(ps.stdout)
-                self.assertEqual(expected, tuple(result[k] for k in ("MAJ_VER", "MIN_VER", "BUILD_VER", "VERSION_PRE")))
+                self.assertEqual(expected, tuple(result[k] for k in ("MAJ_VER", "MIN_VER", "BUILD_VER", "VERSION_PRE", "RELEASE_VER")))
 
     def test_pipeline_iid_boundaries(self):
         for iid, normalized in [(None, "0"), ("", "0"), ("0", "0"), ("00123", "123"), ("123", "123"), ("65535", "65535")]:
             with self.subTest(iid=iid):
-                self.check(iid, ("1", "3", normalized, "dev"))
+                self.check(iid, ("1", "3", normalized, "dev", "1.3.0"))
 
     def test_invalid_pipeline_iids(self):
         for iid in ["-1", "+1", " 1", "1 ", "1\n", "1.0", "abc", "١", "65536", "9" * 100]:
@@ -85,13 +87,39 @@ class VersionContract(unittest.TestCase):
                 self.check(iid, None)
 
     def test_release_mode_only_clears_suffix(self):
-        self.check("321", ("1", "3", "321", ""), release=True)
+        self.check("321", ("1", "3", "321", "", "1.3.0"), release=True)
+        self.file.write_text("1.3.0-beta")
+        self.check("321", ("1", "3", "321", "", "1.3.0"), release=True)
 
-    def test_marketing_version_ranges(self):
-        for raw, expected in [("255.255-dev", ("255", "255", "1", "dev")), ("000.001", ("0", "1", "1", "")), ("256.1", None), ("1.256", None)]:
+    def test_release_versions(self):
+        for raw, expected in [
+            ("255.255.0-rc", ("255", "255", "1", "rc", "255.255.0")),
+            ("000.001.002", ("0", "1", "1", "dev", "0.1.2")),
+            ("1.3.65535", ("1", "3", "1", "dev", "1.3.65535")),
+            ("256.1.0", None),
+            ("1.256.0", None),
+            ("1.3.65536", None),
+            # The pre-release-please MAJ.MIN format is no longer accepted.
+            ("1.3", None),
+            ("1.3-dev", None),
+        ]:
             with self.subTest(version=raw):
                 self.file.write_text(raw)
                 self.check("1", expected)
+
+    def test_display_version(self):
+        with patch.dict(os.environ, dict(self.env, CI_PIPELINE_IID="42"), clear=True):
+            self.assertEqual("1.3.0-dev.42", version.build_version(self.file).display)
+        with patch.dict(os.environ, dict(self.env, CI_PIPELINE_IID="42", IIS_RELEASE_BUILD="1"), clear=True):
+            self.assertEqual("1.3.0", version.build_version(self.file).display)
+
+    def test_warns_near_build_limit(self):
+        for iid, warned in [("60000", False), ("60001", True)]:
+            stderr = io.StringIO()
+            with self.subTest(iid=iid), patch.dict(os.environ, dict(self.env, CI_PIPELINE_IID=iid), clear=True), \
+                    contextlib.redirect_stderr(stderr):
+                version.build_version(self.file)
+            self.assertEqual(warned, "close to the Windows Installer limit" in stderr.getvalue())
 
     def test_local_overrides_reach_cmake_without_stale_cache(self):
         for build in ["41", "42"]:

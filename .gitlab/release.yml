@@ -95,6 +95,9 @@ release_tools_image:
   image: $NYDUS_DD_IMAGE
   tags: ["arch:amd64"]
   needs: []
+  id_tokens:
+    DDSIGN_ID_TOKEN:
+      aud: image-integrity
   script:
     - |
       set -euo pipefail
@@ -109,6 +112,9 @@ release_tools_image:
         docker buildx build --platform linux/amd64 --push -t "${IMAGE}" \
           -f docker/Dockerfile.release-tools .
       fi
+      # Runners only pull signed images. Signing is idempotent, so also sign
+      # on a cache hit in case an earlier push was never signed.
+      ddsign sign "${IMAGE}@$(crane digest "${IMAGE}")"
   artifacts:
     reports:
       dotenv: release-tools.env

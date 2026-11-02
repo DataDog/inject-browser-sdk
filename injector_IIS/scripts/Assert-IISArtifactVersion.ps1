@@ -11,12 +11,13 @@ if ($actual -ne $expected) { throw "DLL version $actual differs from expected $e
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $database = $installer.OpenDatabase((Resolve-Path $MsiPath).Path, 0)
 function Get-MsiProperty([string]$Name) {
+    # [void] keeps the COM calls' return values out of the function's output.
     $view = $database.OpenView("SELECT ``Value`` FROM ``Property`` WHERE ``Property`` = '$Name'")
-    $view.Execute()
+    [void]$view.Execute()
     $record = $view.Fetch()
-    $view.Close()
+    [void]$view.Close()
     if (-not $record) { throw "MSI has no $Name" }
-    return $record.StringData(1)
+    return [string]$record.StringData(1)
 }
 $actual = Get-MsiProperty 'ProductVersion'
 if ($actual -ne $expected) { throw "MSI ProductVersion $actual differs from expected $expected" }

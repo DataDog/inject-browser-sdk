@@ -50,7 +50,8 @@ class VersionContract(unittest.TestCase):
             env["CI_PIPELINE_IID"] = iid
         if release:
             env["IIS_RELEASE_BUILD"] = "1"
-        with patch.dict(os.environ, env, clear=True):
+        # Boundary IIDs trigger the near-limit warning on purpose; keep it out of build logs.
+        with patch.dict(os.environ, env, clear=True), contextlib.redirect_stderr(io.StringIO()):
             if expected is None:
                 with self.assertRaises(ValueError):
                     version.build_version(self.file)

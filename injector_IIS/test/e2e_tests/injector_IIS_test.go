@@ -51,6 +51,9 @@ var (
   oldVersionValidation = "0.0.2"
   // What customers download today: the last release promoted by .gitlab/release.yml.
   latestReleaseMSI = "https://rum-auto-instrumentation.s3.amazonaws.com/iis/latest/x64/injector_IIS.msi"
+  // Releases before this MAJ.MIN remove the RUM configuration when a major
+  // upgrade uninstalls them (fixed by #145, which keeps it on upgrade).
+  firstConfigKeepingRelease = []string{"1", "4"}
 )
 var sitesToTest = []windows.IISSiteDefinition{
   {
@@ -185,20 +188,7 @@ func (v *rumvmSuite) SetupSuite() {
   v.Require().NoError(err)
 
   if !v.isUpgradeSuite {
-    // NOTE(@dmehala): The agent code is wrong for application
-    for _, site := range sitesToTest {
-      // copy the configs, if they exist, for the applications
-      for _, app := range site.Applications {
-        localConfigFilePath := filepath.Join(assetDir, site.Name, app.Name, "web.config")
-        if _, err := runneros.Stat(localConfigFilePath); err != nil {
-          v.T().Logf("Didn't find %s %v, skipping", filepath.Join(assetDir, "web.config"), err)
-        } else {
-          v.T().Logf("Found %s", filepath.Join(assetDir, "web.config"))
-          remoteFilePath := filepath.Join(app.PhysicalPath, "web.config")
-          vm.CopyFile(localConfigFilePath, remoteFilePath)
-        }
-      }
-    }
+    v.copyApplicationConfigs()
   } else {
     v.copyOldVersinConfigFiles()
   }
@@ -229,8 +219,12 @@ func (v *rumInstallSuite) TestInjectorIISInstall() {
 
   v.requireRun("Install latest release", v.installLatestRelease)
   v.requireRun("Upgrade from latest release", v.testInstall)
+  if v.latestRemovesConfigOnUpgrade() {
+    v.requireRun("Latest release removes the RUM configuration on upgrade", v.testKnownConfigLoss)
+  }
   v.requireRun("Test injection after upgrade", v.testSuccessfulInjectionAll)
   v.requireRun("Uninstall upgraded", v.testUninstall)
+  v.requireRun("Restore RUM configuration removed by uninstall", v.restoreRUMConfig)
 
   v.requireRun("Install", v.testInstall)
   v.requireRun("Test injection", v.testSuccessfulInjectionAll)
@@ -297,6 +291,62 @@ func (v *rumvmSuite) candidateIsNewerThanLatest(latest []string) bool {
   }
   v.Require().Empty(runneros.Getenv("CI"), "build %s is not newer than the latest release %v", v.expectedVersion(), latest)
   return false
+}
+
+// copyApplicationConfigs copies the applications' web.config files; the sites'
+// own come with their assets.
+func (v *rumvmSuite) copyApplicationConfigs() {
+  vm := v.Env().RemoteHost
+  // NOTE(@dmehala): The agent code is wrong for application
+  for _, site := range sitesToTest {
+    // copy the configs, if they exist, for the applications
+    for _, app := range site.Applications {
+      localConfigFilePath := filepath.Join(assetDir, site.Name, app.Name, "web.config")
+      if _, err := runneros.Stat(localConfigFilePath); err != nil {
+        v.T().Logf("Didn't find %s %v, skipping", localConfigFilePath, err)
+      } else {
+        v.T().Logf("Found %s", localConfigFilePath)
+        remoteFilePath := filepath.Join(app.PhysicalPath, "web.config")
+        vm.CopyFile(localConfigFilePath, remoteFilePath)
+      }
+    }
+  }
+}
+
+// latestRemovesConfigOnUpgrade reports whether the installed latest release
+// predates firstConfigKeepingRelease.
+func (v *rumvmSuite) latestRemovesConfigOnUpgrade() bool {
+  return v.latestVersion != nil && newerThan(append(firstConfigKeepingRelease, "0"), v.latestVersion)
+}
+
+// testKnownConfigLoss documents that upgrading from a release before #145
+// removes the RUM configuration, then restores it so the following steps check
+// that the upgraded module injects. It stops running once latest keeps it.
+func (v *rumvmSuite) testKnownConfigLoss() {
+  vm := v.Env().RemoteHost
+  headers := vm.MustExecute("(iwr -UseBasicParsing " + expected_results[0].url + ").Headers")
+  v.Require().NotContains(headers, "x-datadog-rum-injected",
+    "latest release %v kept the RUM configuration on upgrade; raise firstConfigKeepingRelease", v.latestVersion)
+  v.restoreRUMConfig()
+}
+
+// restoreRUMConfig puts back the sites' and applications' RUM configuration,
+// which an uninstall removes.
+func (v *rumvmSuite) restoreRUMConfig() {
+  vm := v.Env().RemoteHost
+  for _, site := range sitesToTest {
+    localConfigFilePath := filepath.Join(assetDir, site.Name, "web.config")
+    if _, err := runneros.Stat(localConfigFilePath); err != nil {
+      continue
+    }
+    siteDir := site.SiteDir
+    if siteDir == "" {
+      siteDir = path.Join("c:", "tmp", "inetpub", site.Name)
+    }
+    vm.CopyFile(localConfigFilePath, filepath.Join(siteDir, "web.config"))
+  }
+  v.copyApplicationConfigs()
+  vm.MustExecute("iisreset /restart")
 }
 
 // installLatestRelease installs the MSI customers get today, so the following

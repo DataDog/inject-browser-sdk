@@ -149,9 +149,15 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
 
 def sign_binary(ctx, path):
     if os.environ.get("SIGN_WINDOWS_DD_WCS"):
-        print(f"Signing {path} with dd-wcs")
+        # windows-code-signer.exe signs with the job's CI Identity AWS credentials,
+        # injected as environment variables by the IIS build job.
+        print(f"Signing {path} with windows-code-signer")
         escaped_path = path.replace('"', '""')
-        ctx.run(f'dd-wcs sign --replace-signature "{escaped_path}"', hide=False, pty=False)
+        ctx.run(
+            f'C:/devtools/windows-code-signer.exe sign --replace-signature "{escaped_path}"',
+            hide=False,
+            pty=False,
+        )
     else:
         print(f"Skipping code signing for {path} (SIGN_WINDOWS_DD_WCS not set)")
 

@@ -20,7 +20,7 @@
         "description": "Used by `make lint-configure` to run clang-tidy in the devcontainer. TOOLCHAIN_ROOT must match LLVM_VERSION in .devcontainer/Dockerfile.",
         "inherits": "ci-xcomp",
         "cacheVariables": {
-          "TOOLCHAIN_ROOT": "/usr/lib/llvm-20/bin/"
+          "TOOLCHAIN_ROOT": "/usr/lib/llvm-23/bin/"
         }
       },
       {

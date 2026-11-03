@@ -77,10 +77,10 @@ test-iis: dev-image-x86_64-cached
 	$(IN_DEVCONTAINER_X86_64) bash -lc '\
 	  set -eu; \
 	  cd $(IIS_DIR); \
-	  export PATH=/usr/lib/llvm-20/bin:$$PATH; \
+	  export PATH=/usr/lib/llvm-23/bin:$$PATH; \
 	  export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link; \
 	  export RUSTFLAGS="-Lnative=/xwin/crt/lib/x86_64 -Lnative=/xwin/sdk/lib/ucrt/x86_64 -Lnative=/xwin/sdk/lib/um/x86_64"; \
-	  cmake --preset=ci-xcomp -B build -DTOOLCHAIN_ROOT=/usr/lib/llvm-20/bin/; \
+	  cmake --preset=ci-xcomp -B build -DTOOLCHAIN_ROOT=/usr/lib/llvm-23/bin/; \
 	  cmake --build build --target iis_injector_tests -j; \
 	  export WINEDEBUG=-all WINEPREFIX=$$HOME/.wine; \
 	  /usr/lib/wine/wine64 build/test/unittests/iis_injector_tests.exe --gtest_filter="$(TEST_FILTER)"'

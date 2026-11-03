@@ -7,10 +7,12 @@
 #    set in .gitlab-ci.yml) and runs every IIS test on that tree, unsigned.
 # 3. Merging the release PR authorizes the release: release_please tags
 #    iis-X.Y.Z and creates a draft GitHub release.
-# 4. The tag pipeline builds the same tree in release mode and signs it
-#    (IIS_SIGN), runs the IIS unit, integration (installing the signed MSI on
-#    a Windows runner) and E2E tests on the signed artifacts, then publishes
-#    exactly those: S3 iis/X.Y.Z/ and iis/latest/, then the GitHub release.
+# 4. The tag pipeline first checks that a release branch pipeline passed on
+#    this exact tree (check_injector_IIS_release_tree). It then builds that
+#    tree in release mode and signs it (IIS_SIGN), runs the IIS unit,
+#    integration (installing the signed MSI on a Windows runner) and E2E tests
+#    on the signed artifacts, then publishes exactly those: S3 iis/X.Y.Z/ and
+#    iis/latest/, then the GitHub release.
 #
 # Only step 4 signs. Pull requests that change this path build in release
 # mode, check the release scripts against stubs, and dry-run step 1.
@@ -215,6 +217,29 @@ injector_IIS_build_release_check:
     - $release = (Get-Content "$ARTIFACTS_DIR\injector_IIS.release").Trim()
     - $version = (Get-Content injector_IIS\VERSION).Trim()
     - if ($release -ne $version) { throw "release-mode build is $release, expected $version" }
+
+# Before anything is built or signed, require a successful release-please
+# branch pipeline for this exact tree: the release PR must have passed on the
+# content that was merged. injector_IIS_build waits for it on tags.
+check_injector_IIS_release_tree:
+  stage: build
+  extends: .release_tools
+  rules:
+    - *iis_release_tag
+    - when: never
+  script:
+    - injector_IIS/scripts/release/check-release-tree.sh release
+
+# Pull requests that change the release path check that the job token can
+# make the tree check's API calls, without holding up their build.
+check_injector_IIS_release_tree_access:
+  stage: test
+  extends: .release_tools
+  rules:
+    - *release_path_push
+    - when: never
+  script:
+    - injector_IIS/scripts/release/check-release-tree.sh access
 
 .publish_injector_IIS:
   stage: release

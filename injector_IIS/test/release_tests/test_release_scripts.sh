@@ -8,16 +8,40 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 export FAKE="$WORK/fake"
 export S3_BUCKET="bucket"
-mkdir -p "$FAKE/s3" "$FAKE/gh" "$WORK/bin"
+export CI_API_V4_URL="https://gitlab.invalid/api/v4" CI_PROJECT_ID=5002 CI_JOB_TOKEN=token
+export IIS_RELEASE_BRANCH=release-please--branches--main--components--iis
+mkdir -p "$FAKE/s3" "$FAKE/gh" "$FAKE/api" "$WORK/bin"
 
-# curl -fsSL URL -o OUT, serving public S3 URLs.
+# curl [flags] URL [-o OUT], serving public S3 URLs and the GitLab API:
+# $FAKE/api/pipelines.json for pipeline lists, and a compare without diffs
+# for every commit listed in $FAKE/api/same-tree. FAKE_API_DENY fails API calls.
 cat > "$WORK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-url="$2"; out="$4"
-src="$FAKE/s3/${url#https://"$S3_BUCKET".s3.amazonaws.com/}"
-[ "$src" != "$FAKE/s3/$url" ] && [ -f "$src" ] || exit 22
-cp "$src" "$out"
+out=/dev/stdout
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    http*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+case "$url" in
+  "$CI_API_V4_URL"/*)
+    [ -z "${FAKE_API_DENY:-}" ] || exit 22
+    case "$url" in
+      */pipelines\?*) cat "$FAKE/api/pipelines.json" > "$out" ;;
+      */repository/compare\?*)
+        from="${url#*from=}"; from="${from%%&*}"
+        if grep -qx "$from" "$FAKE/api/same-tree"; then echo '{"diffs":[]}'; else echo '{"diffs":[{}]}'; fi > "$out" ;;
+      *) exit 22 ;;
+    esac ;;
+  "https://$S3_BUCKET.s3.amazonaws.com/"*)
+    src="$FAKE/s3/${url#https://"$S3_BUCKET".s3.amazonaws.com/}"
+    [ -f "$src" ] || exit 22
+    cp "$src" "$out" ;;
+  *) exit 22 ;;
+esac
 EOF
 # aws --region R s3api put-object --bucket B --key K --body F [--if-none-match '*'] ...
 # aws --region R s3 cp [--only-show-errors] s3://B/K FILE
@@ -116,6 +140,23 @@ artifacts "$WORK/build" 1.3.4242 1.3.1
 artifacts "$WORK/dev-build" 1.3.4242 1.3.1-dev.4242
 artifacts "$WORK/other-pipeline" 1.3.4100 1.3.1
 export CI_COMMIT_TAG=iis-1.3.1 CI_PIPELINE_IID=4242 CI_PIPELINE_URL=https://gitlab.invalid/p/4242
+
+# Only a tree some successful release-branch pipeline tested is released.
+export CI_COMMIT_SHA=tagsha CI_COMMIT_BRANCH=some-pr
+cat > "$FAKE/api/pipelines.json" <<'EOF'
+[{"id": 12, "sha": "stale", "web_url": "https://gitlab.invalid/p/12"},
+ {"id": 11, "sha": "tested", "web_url": "https://gitlab.invalid/p/11"}]
+EOF
+printf '%s\n' tagsha > "$FAKE/api/same-tree"
+run "the job token can make the tree check's calls" "$SCRIPTS/check-release-tree.sh" access
+expect_fail "missing API access fails the check" "GitLab API request failed" env FAKE_API_DENY=1 "$SCRIPTS/check-release-tree.sh" access
+expect_fail "an untested tree is never built for release" "no successful release-please--branches--main--components--iis pipeline" \
+  "$SCRIPTS/check-release-tree.sh" release
+printf '%s\n' tagsha tested > "$FAKE/api/same-tree"
+run "a tree tested on the release branch passes" "$SCRIPTS/check-release-tree.sh" release
+check "it names the pipeline that tested it" grep -q "pipeline 11 (tested)" "$WORK/out"
+expect_fail "only iis-X.Y.Z tags pass the tree check" "non-release tag" \
+  env CI_COMMIT_TAG=installer-0.3.0 "$SCRIPTS/check-release-tree.sh" release
 
 expect_fail "the tag must match VERSION" "does not match injector_IIS/VERSION" \
   env CI_COMMIT_TAG=iis-1.3.2 "$SCRIPTS/prepare-release.sh" "$WORK/build" "$WORK/x"

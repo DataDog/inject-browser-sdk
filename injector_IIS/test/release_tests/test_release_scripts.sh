@@ -10,11 +10,10 @@ export FAKE="$WORK/fake"
 export S3_BUCKET="bucket"
 export CI_API_V4_URL="https://gitlab.invalid/api/v4" CI_PROJECT_ID=5002 CI_JOB_TOKEN=token
 export IIS_RELEASE_BRANCH=release-please--branches--main--components--iis
-mkdir -p "$FAKE/s3" "$FAKE/gh" "$FAKE/api" "$WORK/bin"
+mkdir -p "$FAKE/s3" "$FAKE/gh" "$FAKE/api" "$FAKE/ghapi" "$WORK/bin"
 
-# curl [flags] URL [-o OUT], serving public S3 URLs and the GitLab API:
-# $FAKE/api/pipelines.json for pipeline lists, and a compare without diffs
-# for every commit listed in $FAKE/api/same-tree. FAKE_API_DENY fails API calls.
+# curl [flags] URL [-o OUT], serving public S3 URLs and GitLab pipeline lists
+# from $FAKE/api/pipelines.json. FAKE_API_DENY fails GitLab API calls.
 cat > "$WORK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -31,9 +30,6 @@ case "$url" in
     [ -z "${FAKE_API_DENY:-}" ] || exit 22
     case "$url" in
       */pipelines\?*) cat "$FAKE/api/pipelines.json" > "$out" ;;
-      */repository/compare\?*)
-        from="${url#*from=}"; from="${from%%&*}"
-        if grep -qx "$from" "$FAKE/api/same-tree"; then echo '{"diffs":[]}'; else echo '{"diffs":[{}]}'; fi > "$out" ;;
       *) exit 22 ;;
     esac ;;
   "https://$S3_BUCKET.s3.amazonaws.com/"*)
@@ -82,10 +78,16 @@ fi
 cp "$src" "$dst"
 EOF
 # gh release view TAG ... --jq .isDraft | gh release upload TAG ... | gh release edit TAG ...
+# gh api PATH --jq EXPR answers from $FAKE/ghapi/PATH.json.
 cat > "$WORK/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "gh $*" >> "$FAKE/gh.log"
+if [ "$1" = api ]; then
+  [ -f "$FAKE/ghapi/$2.json" ] || exit 1
+  jq -r "$4" "$FAKE/ghapi/$2.json"
+  exit
+fi
 tag="$3"
 case "$2" in
   view) [ -f "$FAKE/gh/$tag" ] && cat "$FAKE/gh/$tag" ;;
@@ -141,22 +143,45 @@ artifacts "$WORK/dev-build" 1.3.4242 1.3.1-dev.4242
 artifacts "$WORK/other-pipeline" 1.3.4100 1.3.1
 export CI_COMMIT_TAG=iis-1.3.1 CI_PIPELINE_IID=4242 CI_PIPELINE_URL=https://gitlab.invalid/p/4242
 
-# Only a tree some successful release-branch pipeline tested is released.
+# Only the tree the release PR's passing pipeline tested is released: tagsha
+# squash-merges the release PR, whose head is prhead.
+R=repos/DataDog/inject-browser-sdk
 export CI_COMMIT_SHA=tagsha CI_COMMIT_BRANCH=some-pr
-cat > "$FAKE/api/pipelines.json" <<'EOF'
-[{"id": 12, "sha": "stale", "web_url": "https://gitlab.invalid/p/12"},
- {"id": 11, "sha": "tested", "web_url": "https://gitlab.invalid/p/11"}]
-EOF
-printf '%s\n' tagsha > "$FAKE/api/same-tree"
-run "the job token can make the tree check's calls" "$SCRIPTS/check-release-tree.sh" access
-expect_fail "missing API access fails the check" "GitLab API request failed" env FAKE_API_DENY=1 "$SCRIPTS/check-release-tree.sh" access
-expect_fail "an untested tree is never built for release" "no successful release-please--branches--main--components--iis pipeline" \
+mkdir -p "$FAKE/ghapi/$R/commits/tagsha" "$FAKE/ghapi/$R/git/commits"
+pulls() { # <merged_at|null> <head ref>
+  printf '[{"number": 3, "merged_at": %s, "head": {"ref": "%s", "sha": "prhead"}}]\n' "$1" "$2" \
+    > "$FAKE/ghapi/$R/commits/tagsha/pulls.json"
+}
+tree() { # <sha> <tree>
+  printf '{"tree": {"sha": "%s"}}\n' "$2" > "$FAKE/ghapi/$R/git/commits/$1.json"
+}
+pulls '"2026-11-03T00:00:00Z"' "$IIS_RELEASE_BRANCH"
+tree tagsha t1
+tree prhead t1
+echo '[{"id": 11, "web_url": "https://gitlab.invalid/p/11"}]' > "$FAKE/api/pipelines.json"
+run "the release PR's tested tree passes" "$SCRIPTS/check-release-tree.sh" release
+check "it names the pipeline that tested it" grep -q "passed https://gitlab.invalid/p/11" "$WORK/out"
+echo '[]' > "$FAKE/api/pipelines.json"
+expect_fail "a release PR without a passing pipeline is refused" "no successful $IIS_RELEASE_BRANCH pipeline for its head prhead" \
   "$SCRIPTS/check-release-tree.sh" release
-printf '%s\n' tagsha tested > "$FAKE/api/same-tree"
-run "a tree tested on the release branch passes" "$SCRIPTS/check-release-tree.sh" release
-check "it names the pipeline that tested it" grep -q "pipeline 11 (tested)" "$WORK/out"
+echo '[{"id": 11, "web_url": "https://gitlab.invalid/p/11"}]' > "$FAKE/api/pipelines.json"
+tree prhead t0
+expect_fail "a release PR merged out of date is refused" "merged while out of date with main" \
+  "$SCRIPTS/check-release-tree.sh" release
+tree prhead t1
+pulls null "$IIS_RELEASE_BRANCH"
+expect_fail "only a merged release PR counts" "is not the merge of a $IIS_RELEASE_BRANCH pull request" \
+  "$SCRIPTS/check-release-tree.sh" release
+pulls '"2026-11-03T00:00:00Z"' some-other-branch
+expect_fail "only the release-please branch counts" "is not the merge of a" \
+  "$SCRIPTS/check-release-tree.sh" release
+pulls '"2026-11-03T00:00:00Z"' "$IIS_RELEASE_BRANCH"
+expect_fail "GitLab API errors fail the check" "GitLab API request failed" \
+  env FAKE_API_DENY=1 "$SCRIPTS/check-release-tree.sh" release
 expect_fail "only iis-X.Y.Z tags pass the tree check" "non-release tag" \
   env CI_COMMIT_TAG=installer-0.3.0 "$SCRIPTS/check-release-tree.sh" release
+pulls null some-pr
+run "the lookups work for a pull request branch" "$SCRIPTS/check-release-tree.sh" access
 
 expect_fail "the tag must match VERSION" "does not match injector_IIS/VERSION" \
   env CI_COMMIT_TAG=iis-1.3.2 "$SCRIPTS/prepare-release.sh" "$WORK/build" "$WORK/x"

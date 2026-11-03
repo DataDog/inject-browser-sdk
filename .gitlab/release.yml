@@ -223,21 +223,25 @@ injector_IIS_build_release_check:
 # content that was merged. injector_IIS_build waits for it on tags.
 check_injector_IIS_release_tree:
   stage: build
-  extends: .release_tools
+  extends: [.release_tools, .octo_sts]
   rules:
     - *iis_release_tag
     - when: never
+  variables:
+    DDOCTOSTS_POLICY: self.gitlab.github-release
   script:
     - injector_IIS/scripts/release/check-release-tree.sh release
 
-# Pull requests that change the release path check that the job token can
-# make the tree check's API calls, without holding up their build.
+# Pull requests that change the release path run the tree check's GitHub and
+# GitLab lookups for their own branch, without holding up their build.
 check_injector_IIS_release_tree_access:
   stage: test
-  extends: .release_tools
+  extends: [.release_tools, .octo_sts]
   rules:
     - *release_path_push
     - when: never
+  variables:
+    DDOCTOSTS_POLICY: self.gitlab.branch-automation
   script:
     - injector_IIS/scripts/release/check-release-tree.sh access
 

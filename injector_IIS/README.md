@@ -89,9 +89,11 @@ The jobs live in [`.gitlab/release.yml`](../.gitlab/release.yml):
    PR means the tree is ready to release.**
 3. Merging the release PR authorizes the release: main tags `iis-X.Y.Z` and
    creates a draft GitHub release.
-4. The tag pipeline first checks, through the GitLab API, that a release
-   branch pipeline passed on this exact tree, and stops otherwise: a release
-   PR merged before its pipeline passed on its final commit is never built.
+4. The tag pipeline first checks that the tag commit is the squash merge of
+   the release PR with the same tree as the PR's head (GitHub API), and that
+   GitLab has a successful release branch pipeline for that head. Otherwise it
+   stops: a release PR merged before its pipeline passed on its final commit,
+   or while out of date with main, is never built.
    It then builds that tree in release mode and signs the DLL,
    PowerShell modules and MSI with `windows-code-signer` (CI Identity
    credentials); the build fails unless every signature is valid. It runs the

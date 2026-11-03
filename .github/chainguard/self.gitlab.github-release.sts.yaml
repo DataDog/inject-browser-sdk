@@ -1,4 +1,4 @@
-# Publish IIS release assets from mirrored iis-X.Y.Z tag pipelines only, using
+# Check and publish IIS releases from mirrored iis-X.Y.Z tag pipelines only, using
 # the tagged CI config. Kept separate from release-please, which never needs
 # tag-scoped credentials.
 issuer: https://gitlab.ddbuild.io
@@ -14,3 +14,5 @@ claim_pattern:
 
 permissions:
   contents: write
+  # check-release-tree.sh finds the release PR behind the tag commit.
+  pull_requests: read

@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
-# Publish a verified IIS build from fetch-candidate.sh to S3. A release writes
-# the immutable iis/<version>/ copy, then moves iis/latest/; a rehearsal only
-# writes iis/rehearsal/<pipeline>/. Every write is read back over the public
-# URL that customers use.
+# Publish the release MSI from prepare-release.sh to S3: the immutable
+# iis/X.Y.Z/ copy, then iis/latest/ unless a newer release is already there.
+# Every write is read back over the public URL that customers use.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
-mode="${1:?usage: publish-s3.sh <release|rehearsal> <dir>}"
-dir="${2:?usage: publish-s3.sh <release|rehearsal> <dir>}"
-candidate_kind "$mode" > /dev/null
+dir="${1:?usage: publish-s3.sh <dist>}"
 bucket="${S3_BUCKET:?S3_BUCKET must be set}"
 arch="${ARCH:-x64}"
 msi="$dir/injector_IIS.msi"
 sha="$(sha256_of "$msi")"
-# Only the MSI that finalize-signed.sh installed from the sign job is published.
-[ "$sha" = "$(manifest_get "$dir/injector_IIS.manifest" signed_msi_sha256)" ] || die "$msi is not the signed MSI recorded by finalize-signed.sh"
-display="$(manifest_get "$dir/injector_IIS.manifest" display_version)"
+[ "$sha" = "$(manifest_get "$dir/injector_IIS.manifest" msi_sha256)" ] || die "$msi is not the MSI prepare-release.sh recorded"
+version="$(tag_version)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -24,33 +20,53 @@ aws_() {
   "${AWS:-aws}" --region "$AWS_REGION" "$@"
 }
 
-upload() {
-  aws_ s3 cp --sse AES256 --acl public-read --only-show-errors "$msi" "s3://$bucket/$1"
+put() { # <key> <file> [put-object flags...]
+  local key="$1" file="$2"
+  shift 2
+  aws_ s3api put-object --bucket "$bucket" --key "$key" --body "$file" \
+    --server-side-encryption AES256 --acl public-read "$@" > /dev/null
 }
 
-verify_public() {
-  rm -f "$tmp/public.msi"
-  curl -fsSL "https://$bucket.s3.amazonaws.com/$1" -o "$tmp/public.msi"
-  [ "$(sha256_of "$tmp/public.msi")" = "$sha" ] || die "https://$bucket.s3.amazonaws.com/$1 does not serve the verified MSI"
+verify_public() { # <key> <sha256>
+  rm -f "$tmp/public"
+  curl -fsSL "https://$bucket.s3.amazonaws.com/$1" -o "$tmp/public"
+  [ "$(sha256_of "$tmp/public")" = "$2" ] || die "https://$bucket.s3.amazonaws.com/$1 does not serve the expected bytes"
   echo "Verified https://$bucket.s3.amazonaws.com/$1"
 }
 
-# Never replace a different build at a pinned path; rerunning is a no-op.
-upload_immutable() {
-  if aws_ s3api head-object --bucket "$bucket" --key "$1" > /dev/null 2>&1; then
-    aws_ s3 cp --only-show-errors "s3://$bucket/$1" "$tmp/existing.msi"
-    [ "$(sha256_of "$tmp/existing.msi")" = "$sha" ] || die "s3://$bucket/$1 already holds a different MSI"
-    echo "s3://$bucket/$1 already holds this MSI"
-  else
-    upload "$1"
-  fi
-  verify_public "$1"
-}
-
-if [ "$mode" = release ]; then
-  upload_immutable "iis/$display/$arch/injector_IIS.msi"
-  upload "iis/latest/$arch/injector_IIS.msi"
-  verify_public "iis/latest/$arch/injector_IIS.msi"
+# Create the versioned copy only if absent; S3 refuses a concurrent or later
+# write. A rerun with the same bytes is a no-op, anything else is an error.
+key="iis/$version/$arch/injector_IIS.msi"
+if put "$key" "$msi" --if-none-match '*' 2> "$tmp/err"; then
+  echo "Published s3://$bucket/$key"
+elif grep -q PreconditionFailed "$tmp/err"; then
+  aws_ s3 cp --only-show-errors "s3://$bucket/$key" "$tmp/existing.msi"
+  [ "$(sha256_of "$tmp/existing.msi")" = "$sha" ] || die "s3://$bucket/$key already holds a different MSI"
+  echo "s3://$bucket/$key already holds this MSI"
 else
-  upload_immutable "iis/rehearsal/${CI_PIPELINE_ID:?CI_PIPELINE_ID must be set}/$arch/injector_IIS.msi"
+  cat "$tmp/err" >&2
+  die "could not publish s3://$bucket/$key"
 fi
+verify_public "$key" "$sha"
+
+# Never move latest back to an older release (retried or out-of-order tags).
+# The job's resource_group serializes publishers.
+marker="iis/latest/$arch/injector_IIS.version"
+if aws_ s3 cp --only-show-errors "s3://$bucket/$marker" "$tmp/latest" 2> "$tmp/err"; then
+  latest="$(tr -d '\r\n' < "$tmp/latest")"
+elif grep -q -E '\(404\)|NoSuchKey|does not exist' "$tmp/err"; then
+  latest="" # releases before this script did not record their version
+else
+  cat "$tmp/err" >&2
+  die "could not read s3://$bucket/$marker"
+fi
+if [ -n "$latest" ] && [ "$latest" != "$version" ] \
+  && [ "$(printf '%s\n%s\n' "$latest" "$version" | sort -V | tail -n 1)" = "$latest" ]; then
+  echo "Keeping iis/latest at $latest, newer than $version"
+  exit 0
+fi
+put "iis/latest/$arch/injector_IIS.msi" "$msi"
+verify_public "iis/latest/$arch/injector_IIS.msi" "$sha"
+echo "$version" > "$tmp/version"
+put "$marker" "$tmp/version" --content-type text/plain
+echo "iis/latest is now $version"

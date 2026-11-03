@@ -51,8 +51,8 @@ var (
   oldVersionValidation = "0.0.2"
   // What customers download today: the last release promoted by .gitlab/release.yml.
   latestReleaseMSI = "https://rum-auto-instrumentation.s3.amazonaws.com/iis/latest/x64/injector_IIS.msi"
-  // Releases before this MAJ.MIN remove the RUM configuration when a major
-  // upgrade uninstalls them (fixed by #145, which keeps it on upgrade).
+  // Releases before this MAJ.MIN may remove the RUM configuration when a
+  // major upgrade uninstalls them (fixed by #145, which keeps it on upgrade).
   firstConfigKeepingRelease = []string{"1", "4"}
 )
 var sitesToTest = []windows.IISSiteDefinition{
@@ -219,9 +219,7 @@ func (v *rumInstallSuite) TestInjectorIISInstall() {
 
   v.requireRun("Install latest release", v.installLatestRelease)
   v.requireRun("Upgrade from latest release", v.testInstall)
-  if v.latestRemovesConfigOnUpgrade() {
-    v.requireRun("Latest release removes the RUM configuration on upgrade", v.testKnownConfigLoss)
-  }
+  v.requireRun("RUM configuration after upgrade", v.testConfigAfterUpgrade)
   v.requireRun("Test injection after upgrade", v.testSuccessfulInjectionAll)
   v.requireRun("Uninstall upgraded", v.testUninstall)
   v.requireRun("Restore RUM configuration removed by uninstall", v.restoreRUMConfig)
@@ -255,9 +253,8 @@ func (v *rumvmSuite) testInstall() {
   vm.CopyFile(iname, remoteFilePath)
   // The build verifies MSI/DLL metadata against the pipeline IID and writes
   // this expectation alongside the artifacts (not from the installed DLL).
-  // Builds under test are unsigned: only the release tag pipeline signs, and
-  // it checks the signatures (scripts/release/Assert-IISSignedRelease.ps1).
-  v.doTestInstall(remoteFilePath, v.expectedVersion(), true)
+  // Only release tag pipelines sign (IIS_SIGN); check signatures there.
+  v.doTestInstall(remoteFilePath, v.expectedVersion(), runneros.Getenv("IIS_SIGN") != "1")
 }
 
 // expectedVersion is the MAJ.MIN.BUILD the build recorded for its artifacts.
@@ -313,20 +310,20 @@ func (v *rumvmSuite) copyApplicationConfigs() {
   }
 }
 
-// latestRemovesConfigOnUpgrade reports whether the installed latest release
-// predates firstConfigKeepingRelease.
-func (v *rumvmSuite) latestRemovesConfigOnUpgrade() bool {
-  return v.latestVersion != nil && newerThan(append(firstConfigKeepingRelease, "0"), v.latestVersion)
-}
-
-// testKnownConfigLoss documents that upgrading from a release before #145
-// removes the RUM configuration, then restores it so the following steps check
-// that the upgraded module injects. It stops running once latest keeps it.
-func (v *rumvmSuite) testKnownConfigLoss() {
+// testConfigAfterUpgrade checks the upgrade kept the RUM configuration.
+// Releases before firstConfigKeepingRelease (including 1.3.x patches without
+// #145) may remove it: restore it then, so the following steps still check
+// that the upgraded module injects.
+func (v *rumvmSuite) testConfigAfterUpgrade() {
   vm := v.Env().RemoteHost
   headers := vm.MustExecute("(iwr -UseBasicParsing " + expected_results[0].url + ").Headers")
-  v.Require().NotContains(headers, "x-datadog-rum-injected",
-    "latest release %v kept the RUM configuration on upgrade; raise firstConfigKeepingRelease", v.latestVersion)
+  if strings.Contains(headers, "x-datadog-rum-injected") {
+    return
+  }
+  v.Require().NotNil(v.latestVersion, "latest release version was not recorded")
+  v.Require().True(newerThan(append(firstConfigKeepingRelease, "0"), v.latestVersion),
+    "upgrading from %v removed the RUM configuration", v.latestVersion)
+  v.T().Logf("Known issue: upgrading from %v removed the RUM configuration; restoring it", v.latestVersion)
   v.restoreRUMConfig()
 }
 

@@ -4,25 +4,22 @@
 # 1. release_please_pr keeps a release PR on IIS_RELEASE_BRANCH up to date
 #    from Conventional Commit titles merged to main.
 # 2. That branch's pipeline builds the MSI in release mode (IIS_RELEASE_BUILD,
-#    set in .gitlab-ci.yml), runs every IIS test against it, and stages the
-#    tested, unsigned bytes in MASS keyed by git tree
-#    (stage_injector_IIS_candidate).
+#    set in .gitlab-ci.yml) and runs every IIS test on that tree, unsigned.
 # 3. Merging the release PR authorizes the release: release_please tags
 #    iis-X.Y.Z and creates a draft GitHub release.
-# 4. The tag pipeline never recompiles. It signs the staged DLL, repackages
-#    and signs the MSI with the candidate's version, installs the signed MSI on
-#    a Windows runner and runs the integration tests, then publishes it: S3
-#    iis/X.Y.Z/ and iis/latest/, then the GitHub release.
+# 4. The tag pipeline builds the same tree in release mode and signs it
+#    (IIS_SIGN), runs the IIS unit, integration (installing the signed MSI on
+#    a Windows runner) and E2E tests on the signed artifacts, then publishes
+#    exactly those: S3 iis/X.Y.Z/ and iis/latest/, then the GitHub release.
 #
-# Only step 4 signs; nothing before the merge touches the signing key.
-# Pull requests that change this path rehearse steps 2 and 4 (without
-# signing) against scratch locations, and dry-run step 1.
+# Only step 4 signs. Pull requests that change this path build in release
+# mode, check the release scripts against stubs, and dry-run step 1.
 variables:
   IIS_RELEASE_BRANCH: release-please--branches--main--components--iis
   RELEASE_TOOLS_IMAGE_NAME: registry.ddbuild.io/ci/inject-browser-sdk/release-tools
 
-# Files that make up the release path. Changing any of them rehearses it, and
-# runs the IIS build and tests (see .IIS_build_when) that a rehearsal stages.
+# Files that make up the release path. Changing any of them runs the release
+# checks below and the IIS build and tests (see .IIS_build_when).
 .iis_release_files:
   paths: &iis_release_paths
   - .gitlab-ci.yml
@@ -52,7 +49,7 @@ variables:
 .release_branch_push: &release_branch_push
   if: $CI_COMMIT_BRANCH == $IIS_RELEASE_BRANCH && $CI_PIPELINE_SOURCE == "push"
 
-.rehearsal_push: &rehearsal_push
+.release_path_push: &release_path_push
   if: $CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_COMMIT_BRANCH != $IIS_RELEASE_BRANCH && $CI_PIPELINE_SOURCE == "push"
   changes:
     compare_to: refs/heads/main
@@ -64,7 +61,7 @@ variables:
     - *iis_release_tag
     - *main_push
     - *release_branch_push
-    - *rehearsal_push
+    - *release_path_push
     - when: never
 
 .release_tools:
@@ -140,7 +137,7 @@ release_please_dry_run:
   extends: [.release_tools, .octo_sts]
   needs: ["release_tools_image", "release_please_check"]
   rules:
-    - *rehearsal_push
+    - *release_path_push
     - when: never
   variables:
     DDOCTOSTS_POLICY: self.gitlab.branch-automation
@@ -200,69 +197,16 @@ release_please:
       --manifest-file=.release-please-manifest.json
 
 ########################################
-# Stage the tested IIS build, then publish it from the tag pipeline
+# Build, sign, test and publish the release from the tag pipeline
 ########################################
 
-# Needs every IIS build and test job, so only a fully green pipeline stages.
-# ASAN unit tests are allow_failure everywhere and stay out of the gate.
-.stage_injector_IIS:
-  stage: release
-  extends: .release_tools
-  interruptible: false
-  needs:
-    - release_tools_image
-    - injector_IIS_build
-    - job: injector_IIS_unit_test
-      artifacts: false
-    - job: injector_IIS_unit_test_linux_wine
-      artifacts: false
-    - job: injector_IIS_integration_test
-      artifacts: false
-    - job: injector_IIS_integration_test_msi
-      artifacts: false
-    - job: injector_IIS_e2e_test
-      artifacts: false
-  script:
-    - injector_IIS/scripts/release/stage-candidate.sh "$RELEASE_MODE" "$ARTIFACTS_DIR"
-
-stage_injector_IIS_candidate:
-  extends: .stage_injector_IIS
-  rules:
-    - *release_branch_push
-    - when: never
-  variables:
-    RELEASE_MODE: release
-
-stage_injector_IIS_rehearsal:
-  extends: .stage_injector_IIS
-  needs:
-    - release_tools_image
-    - injector_IIS_build
-    - job: injector_IIS_unit_test
-      artifacts: false
-    - job: injector_IIS_unit_test_linux_wine
-      artifacts: false
-    - job: injector_IIS_integration_test
-      artifacts: false
-    - job: injector_IIS_integration_test_msi
-      artifacts: false
-    - job: injector_IIS_e2e_test
-      artifacts: false
-    - job: injector_IIS_build_release_rehearsal
-      artifacts: false
-  rules:
-    - *rehearsal_push
-    - when: never
-  variables:
-    RELEASE_MODE: rehearsal
-
-# Rehearsals stage the dev build their tests ran against. Also build in
-# release mode, so the build's own release checks (no -dev display version,
-# matching DLL and MSI metadata) run before a release PR depends on them.
-injector_IIS_build_release_rehearsal:
+# Build in release mode on pull requests that change the release path, so the
+# build's own release checks (no -dev display version, matching DLL and MSI
+# metadata) run before a release PR depends on them. Unsigned.
+injector_IIS_build_release_check:
   extends: .IIS_build
   rules:
-    - *rehearsal_push
+    - *release_path_push
     - when: never
   variables:
     IIS_RELEASE_BUILD: "1"
@@ -276,88 +220,35 @@ injector_IIS_build_release_rehearsal:
   stage: release
   interruptible: false
   rules:
-    - <<: *iis_release_tag
-      variables:
-        RELEASE_MODE: release
-    - <<: *rehearsal_push
-      variables:
-        RELEASE_MODE: rehearsal
+    - *iis_release_tag
     - when: never
 
-# Fetch the staged build for this tree and verify it against the tag/VERSION.
-fetch_injector_IIS_release:
-  extends: [.publish_injector_IIS, .release_tools]
-  needs:
-    - release_tools_image
-    - job: stage_injector_IIS_rehearsal
-      artifacts: false
-      optional: true
-  script:
-    - injector_IIS/scripts/release/fetch-candidate.sh "$RELEASE_MODE" dist
-  artifacts:
-    expire_in: 2 weeks
-    paths:
-      - dist/
-
-# Sign the candidate's DLL, repackage it with the candidate's version and sign
-# the MSI (tasks/iis.py sign_candidate). Release mode signs with this job's CI
-# Identity; rehearsals repackage and verify without signing.
-sign_injector_IIS_release:
-  extends: .publish_injector_IIS
-  tags: ["windows-v2:2022"]
-  needs: ["fetch_injector_IIS_release"]
-  id_tokens:
-    CI_IDENTITIES_GITLAB_ID_TOKEN:
-      aud: ci-identities
-  script:
-    - docker pull $env:WINDOWS_DEFAULT_IMAGE
-    - if (Test-Path signed) { Remove-Item -Recurse -Force signed }
-    - |
-      $run = @('run', '--rm', '-m', '4096M', '-v', "$(Get-Location):c:\mnt",
-        '-e', 'CARGO_HOME=c:\cargo', '-e', 'CI=true', '-e', 'WINDOWS_BUILDER=true',
-        '-e', "IIS_RELEASE_BUILD=$env:IIS_RELEASE_BUILD")
-      if ($env:RELEASE_MODE -eq 'release') {
-        # windows-code-signer.exe signs with the CI Identity AWS credentials.
-        $run += @('-e', 'SIGN_WINDOWS_DD_WCS=true', '-e', 'AWS_NETWORKING=true',
-          '-e', 'AWS_ACCESS_KEY_ID', '-e', 'AWS_SECRET_ACCESS_KEY', '-e', 'AWS_SESSION_TOKEN',
-          '-e', 'AWS_DEFAULT_REGION', '-e', "CI_JOB_NAME_SLUG=$env:CI_JOB_NAME_SLUG")
-        $run += @($env:WINDOWS_DEFAULT_IMAGE, 'c:\mnt\injector_IIS\scripts\release\sign_candidate.bat')
-        & C:\ci-identities-gitlab-job-client.exe assume-role -- docker @run
-      } else {
-        $run += @($env:WINDOWS_DEFAULT_IMAGE, 'c:\mnt\injector_IIS\scripts\release\sign_candidate.bat')
-        & docker @run
-      }
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-  artifacts:
-    expire_in: 2 weeks
-    paths:
-      - signed/
-
-# Install the final, signed MSI on a Windows CI runner and run the integration
-# tests against it before anything is published.
-verify_injector_IIS_signed_install:
-  extends: .publish_injector_IIS
-  tags: ["windows-v2:2022"]
-  needs: ["sign_injector_IIS_release"]
-  script:
-    - .\injector_IIS\scripts\setup-integration-test-env.ps1 -MsiPath ".\signed\injector_IIS_installer.msi" -RepoRoot "."
-    - .\injector_IIS\scripts\run-integration-tests.ps1
-
+# Publish only what this tag pipeline built and signed, once every IIS test
+# passed on it. ASAN unit tests are allow_failure everywhere and stay out.
 publish_injector_IIS_s3:
   extends: .publish_injector_IIS
   image: $IIS_AGENT_DEPLOY_IMAGE
   tags: ["arch:amd64"]
+  # Serialize publishers so iis/latest only ever moves forward.
+  resource_group: iis-latest
   needs:
-    - fetch_injector_IIS_release
-    - sign_injector_IIS_release
-    - job: verify_injector_IIS_signed_install
+    - injector_IIS_build
+    - job: injector_IIS_unit_test
+      artifacts: false
+    - job: injector_IIS_unit_test_linux_wine
+      artifacts: false
+    - job: injector_IIS_integration_test
+      artifacts: false
+    - job: injector_IIS_integration_test_msi
+      artifacts: false
+    - job: injector_IIS_e2e_test
       artifacts: false
   variables:
     S3_BUCKET: rum-auto-instrumentation
     ARCH: x64
   script:
-    - injector_IIS/scripts/release/finalize-signed.sh dist signed
-    - injector_IIS/scripts/release/publish-s3.sh "$RELEASE_MODE" dist
+    - injector_IIS/scripts/release/prepare-release.sh "$ARTIFACTS_DIR" dist
+    - injector_IIS/scripts/release/publish-s3.sh dist
   artifacts:
     expire_in: 2 weeks
     paths:
@@ -369,15 +260,7 @@ publish_injector_IIS_github:
   needs:
     - release_tools_image
     - publish_injector_IIS_s3
-  rules:
-    - <<: *iis_release_tag
-      variables:
-        RELEASE_MODE: release
-        DDOCTOSTS_POLICY: self.gitlab.github-release
-    - <<: *rehearsal_push
-      variables:
-        RELEASE_MODE: rehearsal
-        DDOCTOSTS_POLICY: self.gitlab.branch-automation
-    - when: never
+  variables:
+    DDOCTOSTS_POLICY: self.gitlab.github-release
   script:
-    - injector_IIS/scripts/release/publish-github.sh "$RELEASE_MODE" dist
+    - injector_IIS/scripts/release/publish-github.sh dist

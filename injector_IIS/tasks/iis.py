@@ -8,7 +8,6 @@
 IIS namespaced tasks
 """
 from __future__ import print_function
-import hashlib
 import os
 import shutil
 import sys
@@ -158,56 +157,18 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
         release_file.write(f"{fullver}\n")
 
     sign_binary(ctx, msipath)
+    if os.environ.get("SIGN_WINDOWS_DD_WCS"):
+        # Fail the release build rather than publish anything left unsigned.
+        signed = [dllpath, msipath] + [
+            os.path.join(".", "resources", "modules", name) for name in ("Datadog.RUM.psm1", "Datadog.RUM.psd1")
+        ]
+        checker = os.path.join(PROJECT_DIR, "scripts", "Assert-IISSignature.ps1")
+        paths = " ".join(f'"{path}"' for path in signed)
+        ctx.run(f'powershell -NoProfile -ExecutionPolicy Bypass -File "{checker}" {paths}', hide=False, pty=False)
 
     ## copy the newly built file into the target directory
     target_filename = "injector_IIS_installer.msi"
     shutil.copy2(msipath, os.path.join(out_dir, target_filename))
-
-
-@task
-def sign_candidate(ctx, candidate_dir, out_dir, vstudio_root=None):
-    """
-    Sign a tested, unsigned release candidate and repackage it
-
-    Only the release tag pipeline signs (SIGN_WINDOWS_DD_WCS); branch builds,
-    including the release PR's, are unsigned. The candidate's DLL is signed as
-    is and repackaged from the same tree with the candidate's BUILD number,
-    so the MSI only differs from the tested one by signatures.
-    """
-    with open(os.path.join(candidate_dir, "injector_IIS.manifest")) as manifest_file:
-        manifest = dict(line.rstrip("\n").split("=", 1) for line in manifest_file if "=" in line)
-    candidate_dll = os.path.join(candidate_dir, "injector_IIS.dll")
-    with open(candidate_dll, "rb") as dll_file:
-        if hashlib.sha256(dll_file.read()).hexdigest() != manifest["dll_sha256"]:
-            print(f"{candidate_dll} differs from the staged candidate")
-            raise Exit(code=1)
-
-    # Reproduce the candidate's MAJ.MIN.BUILD; IIS_RELEASE_BUILD comes from CI.
-    os.environ["CI_PIPELINE_IID"] = manifest["product_version"].split(".")[2]
-    if not os.path.exists(out_dir):
-        os.mkdir(out_dir)
-    dllpath = os.path.join(out_dir, "signed", "injector_IIS.dll")
-    os.makedirs(os.path.dirname(dllpath), exist_ok=True)
-    shutil.copy2(candidate_dll, dllpath)
-    sign_binary(ctx, dllpath)
-    package(ctx, out_dir, iis_dll=dllpath, vstudio_root=vstudio_root)
-
-    for sidecar, key in (("injector_IIS.version", "product_version"), ("injector_IIS.release", "display_version")):
-        with open(os.path.join(out_dir, sidecar)) as sidecar_file:
-            actual = sidecar_file.read().strip()
-        if actual != manifest[key]:
-            print(f"repackaged {key} {actual} differs from the candidate's {manifest[key]}")
-            raise Exit(code=1)
-
-    verifier = os.path.join(PROJECT_DIR, "scripts", "release", "Assert-IISSignedRelease.ps1")
-    require = "-RequireSignature" if os.environ.get("SIGN_WINDOWS_DD_WCS") else ""
-    ctx.run(
-        f'powershell -NoProfile -ExecutionPolicy Bypass -File "{verifier}" '
-        f'-MsiPath "{os.path.join(out_dir, "injector_IIS_installer.msi")}" -DllPath "{dllpath}" '
-        f'-CandidateMsiPath "{os.path.join(candidate_dir, "injector_IIS.msi")}" {require}',
-        hide=False,
-        pty=False,
-    )
 
 
 def sign_binary(ctx, path):

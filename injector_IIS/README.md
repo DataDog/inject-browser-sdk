@@ -84,42 +84,32 @@ The jobs live in [`.gitlab/release.yml`](../.gitlab/release.yml):
 1. Every main push updates the release PR on
    `release-please--branches--main--components--iis`, with the next version in
    `VERSION` and the changelog in `CHANGELOG.md`.
-2. That branch's pipeline builds the MSI in release mode, runs all IIS unit,
-   integration and E2E tests on it, and stages the tested, unsigned MSI and DLL
-   in MASS under `inject-browser-sdk/iis/candidates/<git tree>/`. **A green
-   release PR means the artifact is ready.**
+2. That branch's pipeline builds the MSI in release mode and runs all IIS
+   unit, integration and E2E tests on that tree, unsigned. **A green release
+   PR means the tree is ready to release.**
 3. Merging the release PR authorizes the release: main tags `iis-X.Y.Z` and
    creates a draft GitHub release.
-4. The tag pipeline does not recompile. It fetches the candidate for its
-   tree and verifies the checksums, tag and version. It signs the candidate's
-   DLL with `windows-code-signer` (CI Identity credentials), repackages it from
-   the same tree with the candidate's version, and signs the MSI. Before
-   publishing, it checks the Authenticode signatures, that the MSI contains the
-   signed DLL and the candidate's files, and that its versions match the
-   candidate. It then installs the signed MSI on a Windows CI runner and runs
-   the integration tests against it. Finally, it publishes to
-   `s3://rum-auto-instrumentation/iis/X.Y.Z/x64/` and `iis/latest/x64/`, reads
-   both back over the public URL, and attaches the MSI and `SHA256SUMS` to the
-   GitHub release before publishing it.
+4. The tag pipeline builds the same tree in release mode and signs the DLL,
+   PowerShell modules and MSI with `windows-code-signer` (CI Identity
+   credentials); the build fails unless every signature is valid. It runs the
+   unit and integration tests, which install the signed MSI on a Windows CI
+   runner, and E2E with signature checks, against those signed artifacts.
+   Only then does it publish exactly those bytes. First
+   `s3://rum-auto-instrumentation/iis/X.Y.Z/x64/` is written; it is
+   created once and never replaced. Then `iis/latest/x64/` moves forward,
+   never back to an older release. Both are read back over the public URL.
+   Last, the MSI and `SHA256SUMS` go to the GitHub release, which is then
+   published.
 
-Only that tag pipeline signs. Branch builds, including the release PR's, are
-unsigned, so E2E skips the signature check.
+Only that tag pipeline signs. Every other build, including the release PR's,
+is unsigned, so their E2E runs skip the signature check. If a publish job fails,
+retry it in the same tag pipeline: it reuses the signed artifacts, and
+republishing the same bytes is a no-op.
 
-Merge the release PR only once its pipeline has passed for its latest commit,
-with the branch up to date with main. Otherwise the merged tree has no tested
-candidate and the tag pipeline stops before publishing anything. To recover,
-push the tag's commit to the release branch
-(`git push -f origin iis-X.Y.Z:refs/heads/release-please--branches--main--components--iis`),
-wait for that pipeline to stage a candidate, then retry the tag pipeline's
-`fetch_injector_IIS_release` job.
-
-Pull requests that change the release path rehearse it without releasing. They
-stage their tested build under `iis/rehearsals/`, build once more in release
-mode, repackage and install-test it as the tag pipeline would (without
-signing), publish to `s3://rum-auto-instrumentation/iis/rehearsal/<pipeline>/`,
-check the GitHub release lookup read-only, and dry-run release-please against
-the PR branch. `injector_IIS/test/release_tests/test_release_scripts.sh` covers
-the release scripts locally with stubs.
+Pull requests that change the release path also build in release mode, run
+`injector_IIS/test/release_tests/test_release_scripts.sh` (the release scripts
+against stubbed `aws`, `curl` and `gh`), and dry-run release-please against
+the PR branch.
 
 # Powershell Module
 

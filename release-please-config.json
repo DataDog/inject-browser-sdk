@@ -3,6 +3,7 @@
   "last-release-sha": "c5e11442bc483df194de8df4e59763c347dee106",
   "draft": true,
   "force-tag-creation": true,
+  "separate-pull-requests": true,
   "packages": {
     ".": {
       "release-type": "simple",

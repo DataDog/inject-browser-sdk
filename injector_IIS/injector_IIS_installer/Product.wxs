@@ -292,8 +292,11 @@
 
 		<InstallExecuteSequence>
 			<Custom Action="RegisterModule" After="InstallFiles" >NOT Installed</Custom>
-			<Custom Action="RemoveRUMConfig_Cmd" Before="UnregisterModule">REMOVE="ALL"</Custom>
-			<Custom Action="RemoveRUMConfig" After="RemoveRUMConfig_Cmd">REMOVE="ALL"</Custom>
+			<!-- Keep the customer's RUM configuration when a major upgrade removes
+			     this version: Windows Installer then uninstalls it with
+			     UPGRADINGPRODUCTCODE set. -->
+			<Custom Action="RemoveRUMConfig_Cmd" Before="UnregisterModule">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+			<Custom Action="RemoveRUMConfig" After="RemoveRUMConfig_Cmd">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
 			<Custom Action="UnregisterModule" After="StopServices">REMOVE="ALL"</Custom>
 
 

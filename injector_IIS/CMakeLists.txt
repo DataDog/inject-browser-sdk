@@ -188,7 +188,8 @@ target_link_libraries(iis_injector iis_injector-objects)
 ## Tests
 FetchContent_Declare(
   googletest
-  URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip
+  URL https://github.com/google/googletest/archive/refs/tags/v1.18.0.zip
+  URL_HASH SHA256=63b9c77751a5b8f492486005f67533fdc58682b67476fcb91650be5958d5195a
 )
 
 set(gtest_force_shared_crt OFF CACHE BOOL "" FORCE)

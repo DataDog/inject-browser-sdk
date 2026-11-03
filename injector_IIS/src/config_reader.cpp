@@ -45,7 +45,7 @@ Snippet* make_snippet(const int version, const std::unordered_map<std::string, s
       }
     } else if (key == "trackResources" || key == "trackLongTasks" ||
                key == "trackUserInteractions") {
-      auto b = (value == "true");
+      const auto b = (value == "true");
       rum.AddMember(rapidjson::Value(key.c_str(), allocator).Move(), rapidjson::Value(b).Move(),
                     allocator);
     } else if (key == "allowedTracingUrls") {
@@ -54,9 +54,9 @@ Snippet* make_snippet(const int version, const std::unordered_map<std::string, s
       std::string url;
 
       while (std::getline(ss, url, ',')) {
-        auto start = url.find_first_not_of(" \t");
+        const auto start = url.find_first_not_of(" \t");
         if (start != std::string::npos) {
-          auto end = url.find_last_not_of(" \t");
+          const auto end = url.find_last_not_of(" \t");
           url = url.substr(start, end - start + 1);
 
           urlArray.PushBack(rapidjson::Value(url.c_str(), allocator).Move(), allocator);
@@ -159,8 +159,8 @@ std::optional<ServerConfig> read_server_conf(const IHttpServer& server, Logger& 
   }
 
   IAppHostElement* cfg_root_elem = nullptr;
-  auto res = admin_manager->GetAdminSection((BSTR)L"system.applicationHost/datadogRumServer",
-                                            (BSTR)L"MACHINE/WEBROOT/APPHOST", &cfg_root_elem);
+  const auto res = admin_manager->GetAdminSection((BSTR)L"system.applicationHost/datadogRumServer",
+                                                  (BSTR)L"MACHINE/WEBROOT/APPHOST", &cfg_root_elem);
 
   if (res != S_OK) {
     // Section may legitimately not exist if the user hasn't configured it.
@@ -202,8 +202,8 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   }
 
   IAppHostElement* cfg_root_elem = nullptr;
-  auto res = admin_manager->GetAdminSection((BSTR)L"system.webServer/datadogRum",
-                                            const_cast<BSTR>(cfg_path), &cfg_root_elem);
+  const auto res = admin_manager->GetAdminSection((BSTR)L"system.webServer/datadogRum",
+                                                  const_cast<BSTR>(cfg_path), &cfg_root_elem);
   if (res != S_OK) {
     logger.debug(std::format("datadogRum config section not found: {}",
                              std::system_category().message(res)));
@@ -359,13 +359,18 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
     return;
   }
 
+  if (!result.config) {
+    // ReadConfResult::ok is the only way to get here, and it always carries a config.
+    logger.error("Config read reported success without a config; keeping previous config");
+    return;
+  }
   auto& config = *result.config;
   Snippet* snippet = make_snippet(config.version, config.sdk_options, logger);
 
   // On make_snippet failure, preserve the existing snippet/tags. Operators
   // prefer continued injection with the last-known-good config over going
   // dark on a broken deploy; the next valid reload replaces it.
-  auto report_invalid = [&](std::string error_tag, const std::string& message) {
+  const auto report_invalid = [&](std::string error_tag, const std::string& message) {
     logger.error(message + "; keeping previous config");
     datadog::telemetry::counter::increment(
         telemetry::config_invalid,
@@ -394,7 +399,7 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
   ctx.injection_strategy = config.injection_strategy;
 
   ctx.application_id_tag.clear();
-  if (auto appIdIt = config.sdk_options.find("applicationId");
+  if (const auto appIdIt = config.sdk_options.find("applicationId");
       appIdIt != config.sdk_options.end()) {
     ctx.application_id_tag = std::format("application_id:{}", appIdIt->second);
   }

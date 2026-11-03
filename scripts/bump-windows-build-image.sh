@@ -119,7 +119,8 @@ if [[ -n $branch_current ]] && (( $(pipeline_of "$branch_current") > new_pipelin
   exit 0
 fi
 
-title="Bump Windows build image to $new_tag"
+# Conventional Commit title (.github/workflows/pr-title.yml); build: does not cut a release.
+title="build: bump Windows build image to $new_tag"
 body="The Windows runners pre-pull \`$new_tag\`, so pinning it saves IIS jobs the ~12 minute image pull.
 
 - Before: \`${current_line#"$PIN_PREFIX"}\`

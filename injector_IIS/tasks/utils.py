@@ -11,12 +11,17 @@ from __future__ import print_function
 
 import os
 import re
+import sys
+from typing import NamedTuple
 
 
 # Path to the IIS injector VERSION file
 _VERSION_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "VERSION"
 )
+
+# Warn well before CI_PIPELINE_IID overflows the 16-bit MSI BUILD field.
+BUILD_WARNING_THRESHOLD = 60000
 
 
 def parse_version(version_file=_VERSION_FILE):
@@ -26,27 +31,41 @@ def parse_version(version_file=_VERSION_FILE):
     The numeric version is MAJ.MIN.BUILD, including the pipeline IID (or 0
     locally), so those consumers agree with the DLL and MSI metadata.
     """
-    major, minor, build, pre = build_version(version_file)
-    return f"{major}.{minor}.{build}", pre
+    v = build_version(version_file)
+    return f"{v.major}.{v.minor}.{v.build}", v.pre
 
 
-def _parse_marketing_version(version_file):
-    """Parse the IIS injector version from its VERSION file.
+class BuildVersion(NamedTuple):
+    major: str
+    minor: str
+    build: str
+    pre: str
+    release: str  # release-please's MAJ.MIN.PATCH from VERSION
 
-    The VERSION file holds the marketing version as ``MAJ.MIN`` (optionally
-    suffixed with ``-prerelease``). The MSI ProductVersion BUILD slot is
-    populated separately from ``CI_PIPELINE_IID`` so dev builds upgrade
-    cleanly over each other.
+    @property
+    def display(self):
+        """Human-readable version: the release, or a prerelease of it."""
+        return f"{self.release}-{self.pre}.{self.build}" if self.pre else self.release
 
-    Returns ``(major, minor, prerelease)`` as strings. ``prerelease`` is the
-    suffix after the hyphen (e.g., ``"dev"``) or ``""`` if absent.
+
+def _parse_release_version(version_file):
+    """Parse the IIS injector release version from its VERSION file.
+
+    release-please owns VERSION and writes the release as ``MAJ.MIN.PATCH``
+    (optionally suffixed with ``-prerelease``). The MSI ProductVersion is
+    ``MAJ.MIN.BUILD``: Windows Installer has no room for PATCH next to the
+    ``CI_PIPELINE_IID`` that keeps every build upgradable, so PATCH only
+    appears in the display version.
+
+    Returns ``(major, minor, patch, prerelease)`` as strings. ``prerelease``
+    is the suffix after the hyphen, or ``"dev"`` when absent.
     """
     with open(version_file) as f:
         raw = f.read().strip()
-    m = re.fullmatch(r'([0-9]+)\.([0-9]+)(?:-(.+))?', raw)
+    m = re.fullmatch(r'([0-9]+)\.([0-9]+)\.([0-9]+)(?:-(.+))?', raw)
     if m:
-        return m.group(1), m.group(2), m.group(3) or ""
-    raise Exception(f"Could not parse version from {version_file}: '{raw}'")
+        return m.group(1), m.group(2), m.group(3), m.group(4) or "dev"
+    raise ValueError(f"Could not parse version from {version_file}: '{raw}'")
 
 
 def version_field(value, name, maximum):
@@ -60,10 +79,18 @@ def version_field(value, name, maximum):
 
 
 def build_version(version_file=_VERSION_FILE):
-    major, minor, pre = _parse_marketing_version(version_file)
+    major, minor, patch, pre = _parse_release_version(version_file)
     major = version_field(major, "MAJ_VER", 255)
     minor = version_field(minor, "MIN_VER", 255)
+    patch = version_field(patch, "PATCH", 65535)
     build = version_field(os.environ.get("CI_PIPELINE_IID") or "0", "CI_PIPELINE_IID", 65535)
+    if int(build) > BUILD_WARNING_THRESHOLD:
+        print(
+            f"warning: CI_PIPELINE_IID={build} is close to the Windows Installer "
+            "limit (65535); plan a bounded BUILD counter",
+            file=sys.stderr,
+        )
+    # Only CI sets this, for release-please branches and iis-* tags.
     if os.environ.get("IIS_RELEASE_BUILD") == "1":
         pre = ""
-    return major, minor, build, pre
+    return BuildVersion(major, minor, build, pre, f"{major}.{minor}.{patch}")

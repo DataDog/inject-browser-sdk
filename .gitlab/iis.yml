@@ -36,31 +36,37 @@ variables:
       }
       docker pull $image
     - if (Test-Path build-out) { remove-item -recurse -force build-out }
-    # Inject the job's CI Identity AWS credentials, which windows-code-signer.exe
-    # uses to sign the DLL, PowerShell modules and MSI with AWS KMS.
-    - >
-      C:\ci-identities-gitlab-job-client.exe assume-role --
-      docker run --rm
-      -m 4096M
-      -v "$(Get-Location):c:\mnt"
-      -e CARGO_HOME=c:\cargo
-      -e BUILD_OUTDIR="c:\mnt\build-out\${CI_JOB_ID}"
-      -e BUILD_CONFIGURATION=$BUILD_CONFIGURATION
-      -e ARCH=$ARCH
-      -e TEST_DIR="c:\mnt\injector_IIS\test\"
-      -e WINDOWS_BUILDER=true
-      -e SIGN_WINDOWS_DD_WCS=true
-      -e AWS_NETWORKING=true
-      -e AWS_ACCESS_KEY_ID
-      -e AWS_SECRET_ACCESS_KEY
-      -e AWS_SESSION_TOKEN
-      -e AWS_DEFAULT_REGION
-      -e CI=true
-      -e CI_JOB_ID=${CI_JOB_ID}
-      -e CI_PROJECT_NAME=${CI_PROJECT_NAME}
-      -e CI_JOB_NAME_SLUG=${CI_JOB_NAME_SLUG}
-      ${WINDOWS_DEFAULT_IMAGE}
-      c:\mnt\injector_IIS\scripts\build_injector_IIS.bat
+    # Only iis-X.Y.Z tag pipelines sign (IIS_SIGN, set in .gitlab-ci.yml):
+    # windows-code-signer.exe signs the DLL, PowerShell modules and MSI with
+    # the job's CI Identity AWS credentials. All other builds are unsigned.
+    - |
+      $run = @('run', '--rm', '-m', '4096M',
+        '-v', "$(Get-Location):c:\mnt",
+        '-e', 'CARGO_HOME=c:\cargo',
+        '-e', "BUILD_OUTDIR=c:\mnt\build-out\$env:CI_JOB_ID",
+        '-e', "BUILD_CONFIGURATION=$env:BUILD_CONFIGURATION",
+        '-e', "ARCH=$env:ARCH",
+        '-e', 'TEST_DIR=c:\mnt\injector_IIS\test\',
+        '-e', 'WINDOWS_BUILDER=true',
+        '-e', 'AWS_NETWORKING=true',
+        '-e', 'CI=true',
+        '-e', "CI_JOB_ID=$env:CI_JOB_ID",
+        '-e', "CI_PROJECT_NAME=$env:CI_PROJECT_NAME",
+        '-e', "CI_PIPELINE_IID=$env:CI_PIPELINE_IID",
+        '-e', "IIS_RELEASE_BUILD=$env:IIS_RELEASE_BUILD")
+      if ($env:IIS_SIGN -eq '1') {
+        $run += @('-e', 'SIGN_WINDOWS_DD_WCS=true',
+          '-e', 'AWS_ACCESS_KEY_ID', '-e', 'AWS_SECRET_ACCESS_KEY',
+          '-e', 'AWS_SESSION_TOKEN', '-e', 'AWS_DEFAULT_REGION',
+          '-e', "CI_JOB_NAME_SLUG=$env:CI_JOB_NAME_SLUG")
+      }
+      $run += @($env:WINDOWS_DEFAULT_IMAGE, 'c:\mnt\injector_IIS\scripts\build_injector_IIS.bat')
+      if ($env:IIS_SIGN -eq '1') {
+        & C:\ci-identities-gitlab-job-client.exe assume-role -- docker @run
+      } else {
+        & docker @run
+      }
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Copy output files to artifacts dir for use in later jobs
     - if (Test-Path $ARTIFACTS_DIR) { remove-item -recurse -force $ARTIFACTS_DIR }
     - mkdir $ARTIFACTS_DIR
@@ -76,6 +82,11 @@ variables:
 .IIS_build_when:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    # iis-X.Y.Z tags build, sign and test the release before publishing it
+    # (.gitlab/release.yml); other tags don't build the IIS injector.
+    - if: $CI_COMMIT_TAG =~ /^iis-[0-9]+\.[0-9]+\.[0-9]+$/
+    - if: $CI_COMMIT_TAG
       when: never
     - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
       changes:
@@ -96,6 +107,11 @@ variables:
         - .gitlab-ci.yml
         - .gitlab/iis.yml
         - .gitlab/windows-default-image.yml
+    # Changes to the release path build and test the IIS injector too.
+    - if: $CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      changes:
+        compare_to: refs/heads/main
+        paths: !reference [.iis_release_files, paths]
 
 
 
@@ -103,6 +119,11 @@ injector_IIS_build:
   extends:
     - .IIS_build
     - .IIS_build_when
+  # Tag pipelines sign only a tree the release branch pipeline tested.
+  needs:
+    - job: check_injector_IIS_release_tree
+      artifacts: false
+      optional: true
 
 manual_injector_IIS_build:
   extends: .IIS_build
@@ -258,6 +279,11 @@ manual_go_e2e_deps:
     when:
       - script_failure
   image: $E2E_LINUX_IMAGE
+  timeout: 1h
+  # `needs: injector_IIS_e2e_test` waits for every suite.
+  parallel:
+    matrix:
+      - E2E_SUITE: [TestRUMInstallSuite, TestRUMUpgradeSuite]
   variables:
     AWS_SSM_PREFIX: "ci.inject-browser-sdk."
     KEY_PAIR_NAME: "ci.inject-browser-sdk"
@@ -291,10 +317,10 @@ manual_go_e2e_deps:
     ## the msi will have a version-specific name, but there should be only one.
     ## copy that to the filename expected by the test.
     - cp ${ARTIFACTS_DIR}/*.msi injector_IIS/test/e2e_tests/test_assets/injector_IIS.msi
-    # Both suites provision their own Windows VM and install IIS on it, which alone takes upwards of
-    # ten minutes each: a green run sits at around 24 of the 30 minutes this used to allow, so a
-    # slower than usual VM setup timed the whole binary out rather than failing anything.
-    - cd injector_IIS/test/e2e_tests && go test -v -timeout 45m
+    - cp ${ARTIFACTS_DIR}/injector_IIS.version injector_IIS/test/e2e_tests/test_assets/injector_IIS.version
+    # Each suite provisions its own Windows VM and installs IIS on it, which alone takes upwards of
+    # ten minutes, so the suites run as parallel jobs (E2E_SUITE) rather than one after the other.
+    - cd injector_IIS/test/e2e_tests && go test -v -timeout 45m -run "^${E2E_SUITE}\$"
   artifacts:
     expire_in: 2 weeks
     when: always
@@ -311,52 +337,3 @@ manual_injector_IIS_e2e_test:
   extends: .injector_IIS_e2e_test_template
   when: manual
   needs: ["manual_injector_IIS_build", "manual_go_e2e_deps"]
-
-.injector_IIS_release:
-  stage: release
-  tags: ["arch:amd64"]
-  needs: []
-  image: $IIS_AGENT_DEPLOY_IMAGE
-  when: manual
-  allow_failure: false
-  script:
-    ## the msi will have a version-specific name, but there should be only one.
-    ## copy that to the expected filename.
-    - cp ${ARTIFACTS_DIR}/*.msi ${ARTIFACTS_DIR}/injector_IIS.msi
-    - aws s3 cp
-      --region us-east-1
-      --sse AES256
-      --acl public-read
-      --recursive
-      --exclude "*"
-      --include "injector_IIS.msi"
-      $ARTIFACTS_DIR
-      s3://$S3_BUCKET/iis/$CI_COMMIT_SHORT_SHA/$ARCH/
-    - echo https://$S3_BUCKET.s3.amazonaws.com/iis/$CI_COMMIT_SHORT_SHA/$ARCH/injector_IIS.msi
-  artifacts:
-    expire_in: 2 weeks
-    paths:
-      - $ARTIFACTS_DIR
-
-manual_injector_IIS_release:
-  extends: .injector_IIS_release
-  when: manual
-  needs: ["manual_injector_IIS_build"]
-  variables:
-    S3_BUCKET: rum-auto-instrumentation
-    BUILD_CONFIGURATION: Release
-    ARCH: x64
-
-
-promote_injector_IIS_release_candidate:
-  stage: release
-  tags: ["arch:amd64"]
-  image: $IIS_AGENT_DEPLOY_IMAGE
-  when: manual
-  variables:
-    RC_COMMIT: ""
-    ARCH: x64
-    S3_BUCKET: rum-auto-instrumentation
-  script:
-    - aws s3 cp --region us-east-1 --sse AES256 --acl public-read s3://$S3_BUCKET/iis/$RC_COMMIT/$ARCH/injector_IIS.msi injector_IIS.msi
-    - aws s3 cp --region us-east-1 --sse AES256 --acl public-read injector_IIS.msi s3://$S3_BUCKET/iis/latest/$ARCH/

@@ -11,6 +11,21 @@ include:
   - local: .gitlab/installer.yml
   - local: .gitlab/cmake.yml
   - local: .gitlab/lint.yml
+  - local: .gitlab/release.yml
+
+workflow:
+  rules:
+    # Release tags build, sign (IIS_SIGN) and test release-mode MSIs: no -dev
+    # display version. Only they sign. See .gitlab/release.yml.
+    - if: $CI_COMMIT_TAG =~ /^iis-[0-9]+\.[0-9]+\.[0-9]+$/
+      variables:
+        IIS_RELEASE_BUILD: "1"
+        IIS_SIGN: "1"
+    # The release-please PR branch builds and tests the same tree unsigned.
+    - if: $CI_COMMIT_BRANCH == "release-please--branches--main--components--iis"
+      variables:
+        IIS_RELEASE_BUILD: "1"
+    - when: always
 
 stages:
   - build

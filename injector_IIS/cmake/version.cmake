@@ -1,12 +1,23 @@
-# Marketing version comes from VERSION; BUILD is the GitLab pipeline IID.
+# release-please writes MAJ.MIN.PATCH to VERSION; the MSI/DLL numeric version
+# is MAJ.MIN.BUILD, where BUILD is the GitLab pipeline IID. PATCH has no slot
+# there and only reaches the display version (see tasks/utils.py).
 file(READ "${CMAKE_CURRENT_LIST_DIR}/../VERSION" _IIS_VERSION_RAW)
 string(STRIP "${_IIS_VERSION_RAW}" _IIS_VERSION_RAW)
-if(_IIS_VERSION_RAW MATCHES "^([0-9]+)\\.([0-9]+)(-(.+))?$")
+if(_IIS_VERSION_RAW MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)(-(.+))?$")
   set(IIS_INJECTOR_VERSION_MAJ "${CMAKE_MATCH_1}")
   set(IIS_INJECTOR_VERSION_MIN "${CMAKE_MATCH_2}")
-  set(IIS_INJECTOR_VERSION_PRE "${CMAKE_MATCH_4}")
+  set(IIS_INJECTOR_VERSION_PRE "${CMAKE_MATCH_5}")
+  # PATCH is not an MSI field; bound it like BUILD so all resolvers agree.
+  string(REGEX REPLACE "^0+(.)" "\\1" _IIS_VERSION_PATCH "${CMAKE_MATCH_3}")
+  string(LENGTH "${_IIS_VERSION_PATCH}" _digits)
+  if(_digits GREATER 5 OR _IIS_VERSION_PATCH GREATER 65535)
+    message(FATAL_ERROR "PATCH=${_IIS_VERSION_PATCH} in VERSION exceeds 65535")
+  endif()
+  if(IIS_INJECTOR_VERSION_PRE STREQUAL "")
+    set(IIS_INJECTOR_VERSION_PRE "dev")
+  endif()
 else()
-  message(FATAL_ERROR "Invalid IIS VERSION: '${_IIS_VERSION_RAW}' (expected MAJ.MIN or MAJ.MIN-PRE)")
+  message(FATAL_ERROR "Invalid IIS VERSION: '${_IIS_VERSION_RAW}' (expected MAJ.MIN.PATCH or MAJ.MIN.PATCH-PRE)")
 endif()
 set(IIS_INJECTOR_VERSION_BUILD "$ENV{CI_PIPELINE_IID}")
 if(IIS_INJECTOR_VERSION_BUILD STREQUAL "")

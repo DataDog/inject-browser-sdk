@@ -13,7 +13,7 @@
 	 <!-- Version is assembled by the build system. MAJ_VER, MIN_VER come from
 	      injector_IIS/VERSION; BUILD_VER is CI_PIPELINE_IID (0 locally) so
 	      dev builds upgrade cleanly. VERSION_PRE is "dev" except when
-	      IIS_RELEASE_BUILD=1 strips it. All four are passed from MSBuild. -->
+	      IIS_RELEASE_BUILD=1 strips it. All five are passed from MSBuild. -->
 	<?if $(var.MAJ_VER) != "" ?>
 		<?define VERSION_MAJOR = $(var.MAJ_VER) ?>
 		<?define VERSION_MINOR = $(var.MIN_VER) ?>
@@ -26,10 +26,16 @@
 		<?define VERSION_NUMBER = 0.0.0.0 ?>
 	<?endif ?>
 
-	<?if $(var.VERSION_PRE) and $(var.VERSION_PRE) != "" ?>
-		<?define VERSION_DISPLAY = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_BUILD)-$(var.VERSION_PRE) ?>
+	<!-- RELEASE_VER is the MAJ.MIN.PATCH release-please wrote to VERSION. -->
+	<?if $(var.RELEASE_VER) != "" ?>
+		<?define VERSION_RELEASE = $(var.RELEASE_VER) ?>
 	<?else ?>
-		<?define VERSION_DISPLAY = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_BUILD) ?>
+		<?define VERSION_RELEASE = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_BUILD) ?>
+	<?endif ?>
+	<?if $(var.VERSION_PRE) and $(var.VERSION_PRE) != "" ?>
+		<?define VERSION_DISPLAY = $(var.VERSION_RELEASE)-$(var.VERSION_PRE).$(var.VERSION_BUILD) ?>
+	<?else ?>
+		<?define VERSION_DISPLAY = $(var.VERSION_RELEASE) ?>
 	<?endif ?>
 
 	<?define UPGRADE_CODE=A5E2C93A-4340-4D15-BA17-F3CA858D09CA?>

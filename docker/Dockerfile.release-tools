@@ -1,0 +1,29 @@
+# Release automation image: dd-octo-sts, gh, git, jq and curl from the octo-sts
+# CI base, adms for MASS, plus Node and a lockfile-pinned release-please. Built
+# per content hash by release_tools_image so release jobs never install tools
+# at runtime.
+ARG NODE_IMAGE=registry.ddbuild.io/images/mirror/node:24-bookworm@sha256:222f704ce7f499c7bd7d101c993b980d86393e87bb54d416bcfcfe8e62aa9f64
+ARG OCTO_STS_IMAGE=registry.ddbuild.io/images/dd-octo-sts-ci-base:2026.08-2@sha256:c9815338b8aeb4656f045ff93952a0472e83f6d9f53ea5832ef42c04b5ec1e14
+ARG ADMS_IMAGE=registry.ddbuild.io/adms-cli@sha256:4ab06229c5e7a3578f2b2c1c5a6687d183417d7d205448a3d16505776eea168c
+FROM ${NODE_IMAGE} AS node
+FROM ${ADMS_IMAGE} AS adms
+
+FROM ${OCTO_STS_IMAGE}
+
+USER root
+
+# Both bases are Debian (glibc), so the official Node distribution runs as is.
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+COPY --from=adms /usr/local/bin/adms /usr/local/bin/adms
+
+COPY tools/release-please/package.json tools/release-please/package-lock.json tools/release-please/validate-config.mjs /opt/release-please/
+RUN cd /opt/release-please \
+    && npm ci --omit=dev --ignore-scripts \
+    && npm cache clean --force \
+    && ln -s /opt/release-please/node_modules/.bin/release-please /usr/local/bin/release-please \
+    && release-please --version \
+    && adms --help > /dev/null
+
+USER 501

@@ -152,8 +152,19 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
     )
     with open(os.path.join(out_dir, "injector_IIS.version"), "w") as version_file:
         version_file.write(f"{env['MAJ_VER']}.{env['MIN_VER']}.{env['BUILD_VER']}\n")
+    # The display version, which the release job matches against the tag.
+    with open(os.path.join(out_dir, "injector_IIS.release"), "w") as release_file:
+        release_file.write(f"{fullver}\n")
 
     sign_binary(ctx, msipath)
+    if os.environ.get("SIGN_WINDOWS_DD_WCS"):
+        # Fail the release build rather than publish anything left unsigned.
+        signed = [dllpath, msipath] + [
+            os.path.join(".", "resources", "modules", name) for name in ("Datadog.RUM.psm1", "Datadog.RUM.psd1")
+        ]
+        checker = os.path.join(PROJECT_DIR, "scripts", "Assert-IISSignature.ps1")
+        paths = " ".join(f'"{path}"' for path in signed)
+        ctx.run(f'powershell -NoProfile -ExecutionPolicy Bypass -File "{checker}" {paths}', hide=False, pty=False)
 
     ## copy the newly built file into the target directory
     target_filename = "injector_IIS_installer.msi"
@@ -162,9 +173,15 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
 
 def sign_binary(ctx, path):
     if os.environ.get("SIGN_WINDOWS_DD_WCS"):
-        print(f"Signing {path} with dd-wcs")
+        # windows-code-signer.exe signs with the job's CI Identity AWS credentials,
+        # injected as environment variables by the IIS build job.
+        print(f"Signing {path} with windows-code-signer")
         escaped_path = path.replace('"', '""')
-        ctx.run(f'dd-wcs sign --replace-signature "{escaped_path}"', hide=False, pty=False)
+        ctx.run(
+            f'C:/devtools/windows-code-signer.exe sign --replace-signature "{escaped_path}"',
+            hide=False,
+            pty=False,
+        )
     else:
         print(f"Skipping code signing for {path} (SIGN_WINDOWS_DD_WCS not set)")
 

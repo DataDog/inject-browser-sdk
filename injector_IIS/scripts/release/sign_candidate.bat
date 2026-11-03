@@ -12,8 +12,11 @@ powershell -Command "Invoke-WebRequest -Uri 'https://github.com/wixtoolset/wix3/
 start /wait wix314.exe /install /quiet /norestart || exit /b 5
 set "PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.14\bin"
 
+:: MSBuild reads the outdir environment variable as $(OutDir), which is where
+:: package() expects the MSI (as in build_injector_IIS.bat).
+set "outdir=%cd%\signed"
 pushd injector_iis
-invoke iis.sign-candidate --candidate-dir \build\dist --out-dir \build\signed || exit /b 4
+invoke iis.sign-candidate --candidate-dir \build\dist --out-dir %outdir% || exit /b 4
 popd
 
 if not exist c:\mnt\signed (mkdir c:\mnt\signed)

@@ -43,7 +43,7 @@ GlobalModule::GlobalModule(IHttpServer* server, DWORD server_version,
 
       return;
     }
-    datadog::tracing::FinalizedDatadogAgentConfig const dac = *finalized_agent_cfg_result;
+    const auto& dac = *finalized_agent_cfg_result;
 
     if (!dac.http_client) {
       logger_->error("HTTPClient for telemetry is null, no telemetry will be sent");

@@ -30,3 +30,5 @@ make test-iis TEST_FILTER='*MissingEnabled*' # subset
 ```
 
 Cross-compiled to `x86_64-pc-windows-msvc` and run via wine64 in the linux/amd64 devcontainer (Apple Silicon goes through Rosetta).
+
+PR titles must be Conventional Commits (`type(scope)!: summary`, checked by `.github/workflows/pr-title.yml`); squash merges use them as the commit release-please versions from.

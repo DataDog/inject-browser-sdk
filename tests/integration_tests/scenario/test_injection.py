@@ -107,8 +107,11 @@ def test_large_proxied_response_is_served_whole(upstream_server, chunked):
     r = requests.get("http://localhost:8080" + path, timeout=60)
 
     assert r.status_code == 200
-    __assert_rum_injection(r.headers, r.content)
+    # Sent in several parts, an injected response loses its Content-Length and goes out chunked.
+    assert r.headers["x-datadog-rum-injected"] == "1"
     body = r.content
+    if "content-length" in r.headers:
+        assert int(r.headers["content-length"]) == len(body)
     # Wherever the snippet went, the rest of the page is there, once and in order.
     prefix = 0
     while prefix < len(LARGE_HTML) and body[prefix] == LARGE_HTML[prefix]:

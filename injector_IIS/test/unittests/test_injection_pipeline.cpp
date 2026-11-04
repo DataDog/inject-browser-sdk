@@ -926,7 +926,8 @@ TEST(InjectionPipeline, HeadersFlushedBeforeTheBody) {
   }
 }
 
-// The single send of a whole response is still flushed and finished, with the snippet in.
+// The single send of a whole response is still flushed and finished, with the snippet in, and the
+// length it announces grown by exactly the snippet.
 TEST(InjectionPipeline, ResponseSentAtOnceIsFlushed) {
   MockRumConfigElement rumConfig;
   MockAdminManager adminManager(&rumConfig);
@@ -950,6 +951,18 @@ TEST(InjectionPipeline, ResponseSentAtOnceIsFlushed) {
   setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr,
                            {"<html><head><title>t</title></head><body>hi</body></html>"});
 
+  const std::string announced = std::to_string(pr.bodies[0].size());
+  EXPECT_CALL(httpResp, GetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _))
+      .WillRepeatedly(DoAll(Invoke([&announced](_In_ PCSTR, _Out_ USHORT* len) {
+                              *len = static_cast<USHORT>(announced.size());
+                            }),
+                            Return(announced.c_str())));
+  std::string extended_to;
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _, _, _))
+      .WillOnce(DoAll(Invoke([&extended_to](PCSTR, PCSTR value, USHORT length, BOOL) {
+                        extended_to.assign(value, length);
+                      }),
+                      Return(S_OK)));
   EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
       .WillOnce(Return(S_OK));
   EXPECT_CALL(httpResp, DeleteHeader(Matcher<PCSTR>(_))).Times(0);
@@ -957,7 +970,9 @@ TEST(InjectionPipeline, ResponseSentAtOnceIsFlushed) {
 
   MockSendResponseProvider provider(TRUE, 0);
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, &provider), RQ_NOTIFICATION_FINISH_REQUEST);
-  EXPECT_NE(assembleResponseBody(pr).find("DD_RUM"), std::string::npos);
+  const std::string body = assembleResponseBody(pr);
+  EXPECT_NE(body.find("DD_RUM"), std::string::npos);
+  EXPECT_EQ(extended_to, std::to_string(body.size()));
 
   mod.factory->Terminate();
   mod.global->Terminate();

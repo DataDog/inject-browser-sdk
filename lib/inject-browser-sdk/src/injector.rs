@@ -157,6 +157,30 @@ impl<'snippet> Injector<'snippet> {
         };
     }
 
+    /// The length a response that announced `content_length`, the value of its `Content-Length`
+    /// header, has to announce once the snippet is in it, or `None` if that value is not a valid
+    /// length. The snippet is all the injection adds, and the padding [`Injector::end`] emits instead
+    /// is as long, so the announced length grows by exactly the snippet length either way.
+    ///
+    /// A list of identical lengths, as a proxy may produce by merging headers, is valid per RFC 9110
+    /// (<https://www.rfc-editor.org/rfc/rfc9110#section-8.6>); anything else is not, and a server
+    /// should remove the header rather than announce a wrong length.
+    pub fn content_length_with_snippet(&self, content_length: &[u8]) -> Option<u64> {
+        let mut announced: Option<u64> = None;
+        for value in content_length.split(|&byte| return byte == b',') {
+            let value = value.trim_ascii();
+            if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            let length = core::str::from_utf8(value).ok()?.parse::<u64>().ok()?;
+            if announced.is_some_and(|announced| return announced != length) {
+                return None;
+            }
+            announced = Some(length);
+        }
+        return announced?.checked_add(u64::try_from(self.snippet.len()).ok()?);
+    }
+
     pub fn write<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
         match self.injector_state {
             InjectorState::BufferingHeadWindow => {
@@ -1068,6 +1092,36 @@ mod tests {
                 InjectionStrategy::HeadOpenTagWithCloseTagFallback,
                 input_chunks,
                 expected,
+            );
+        }
+    }
+
+    #[test]
+    fn content_length_with_snippet() {
+        let injector = Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadCloseTag);
+        assert_eq!(injector.content_length_with_snippet(b"100"), Some(111));
+        assert_eq!(injector.content_length_with_snippet(b" 0\t"), Some(11));
+        assert_eq!(
+            injector.content_length_with_snippet(b"100, 100,100"),
+            Some(111)
+        );
+        for invalid in [
+            b"".as_slice(),
+            b" ",
+            b"12x",
+            b"-1",
+            b"+1",
+            b"1 2",
+            b"100, 101",
+            b"100,",
+            b"18446744073709551615",
+            b"99999999999999999999",
+        ] {
+            assert_eq!(
+                injector.content_length_with_snippet(invalid),
+                None,
+                "{:?}",
+                core::str::from_utf8(invalid)
             );
         }
     }

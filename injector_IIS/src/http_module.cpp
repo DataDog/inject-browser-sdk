@@ -10,12 +10,12 @@
 #include "telemetry.h"
 #include <algorithm>
 #include <cassert>
-#include <charconv>
 #include <cstdint>
 #include <datadog/telemetry/telemetry.h>
 #include <format>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace datadog::rum {
@@ -117,23 +117,19 @@ std::string_view get_header(const IHttpResponse& http_response, const char* head
   return {data, length};
 }
 
-// Adds `added` bytes to the length the response announces in its Content-Length, if it announces
-// one. A header that cannot be read or updated is removed instead, and the response goes out
-// chunked: no length is better than a wrong one.
-void extend_content_length(IHttpResponse& http_response, size_t added, Logger& logger) {
+// Has the response announce the length it has once the snippet is in, if it announces one. The
+// library tells what that length is; a header it cannot read, or that cannot be updated, is
+// removed instead, and the response goes out chunked: no length is better than a wrong one.
+void extend_content_length(IHttpResponse& http_response, const Injector& injector, Logger& logger) {
   const std::string_view announced = get_header(http_response, "Content-Length");
   if (announced.empty()) {
     return;
   }
 
   uint64_t length = 0;
-  // Bounded by `end`: the header value is not NUL-terminated.
-  const char* const begin = announced.data();
-  const char* const end = begin + announced.size();
-  const auto [parsed_end, error] = std::from_chars(begin, end, length);
-  if (error == std::errc{} && parsed_end == end &&
-      length <= (std::numeric_limits<uint64_t>::max)() - added) {
-    const std::string extended = std::to_string(length + added);
+  if (injector_extend_content_length(&injector, reinterpret_cast<const uint8_t*>(announced.data()),
+                                     static_cast<uint32_t>(announced.size()), &length)) {
+    const std::string extended = std::to_string(length);
     HRESULT const result = http_response.SetHeader("Content-Length", extended.c_str(),
                                                    static_cast<USHORT>(extended.size()), TRUE);
     if (SUCCEEDED(result)) {
@@ -200,6 +196,79 @@ bool starts_body(IHttpContext& http_context, const HTTP_RESPONSE* response, bool
   }
   state->awaiting_body = false;
   return true;
+}
+
+// Owns an injector, and frees it on every way out.
+using InjectorPtr = std::unique_ptr<Injector, decltype(&injector_cleanup)>;
+
+// The injector output that carried the snippet, and where it belongs in the response.
+struct Injection {
+  InjectionPoint point;
+  InjectorResult result;
+};
+
+// Writes the response's entity chunks to `injector` until the snippet comes out, which happens at
+// `injector_end` for a response shorter than the head window. The queued chunks are left as they
+// are: they already carry every byte in order, which is how they serve a response the snippet never
+// goes into. Returns nullopt then.
+//
+// While it looks for the injection point, the injector holds data back: a partially matched
+// `</head>`, or for the head-open strategies up to the first kilobyte, which has to be scanned for
+// an encoding declaration before anything can go ahead of it. Past that it streams. What it holds
+// back is always the end of what it was given, and it reports how much
+// (`injector_held_back_length`), read before each call: that is what the result that injects brings
+// back out, and what is trimmed off the queued chunks in its place.
+std::optional<Injection> write_response(Injector& injector, const HTTP_RESPONSE& response) {
+  const int count = response.EntityChunkCount;
+  for (int i = 0; i < count; i++) {
+    const HTTP_DATA_CHUNK& chunk = response.pEntityChunks[i];
+    const size_t withheld = injector_held_back_length(&injector);
+    const InjectorResult result =
+        injector_write(&injector, static_cast<const uint8_t*>(chunk.FromMemory.pBuffer),
+                       chunk.FromMemory.BufferLength);
+    if (result.injected) {
+      return Injection{{i, withheld}, result};
+    }
+  }
+  const size_t withheld = injector_held_back_length(&injector);
+  // Without padding: the queued chunks keep the original length when nothing is injected.
+  const InjectorResult result = injector_end_without_padding(&injector);
+  if (result.injected) {
+    return Injection{{count, withheld}, result};
+  }
+  return std::nullopt;
+}
+
+// Has the response serve `injection`: its entity chunks rebuilt around the snippet, then its
+// headers, unless they are gone already, saying the snippet is in and announcing the length it now
+// has. Must be called before the next call to the injector, which reuses the memory the result
+// points to.
+//
+// Returns an error message, or nullptr. Splicing only fails before it touches the response, which
+// is then served untouched.
+const char* apply_injection(IHttpContext& http_context, IHttpResponse& http_response,
+                            HTTP_RESPONSE& response, const Injection& injection,
+                            const Injector& injector, bool headers_gone, Logger& logger) {
+  if (const char* error =
+          splice_injection(http_context, response, injection.point, injection.result)) {
+    return error;
+  }
+  if (headers_gone) {
+    // Sent already, and announcing no length: the caller checks that.
+    return nullptr;
+  }
+  extend_content_length(http_response, injector, logger);
+  if (FAILED(http_response.SetHeader(k_injection_header, "1", 1, TRUE))) {
+    return "Error setting the injection header";
+  }
+  return nullptr;
+}
+
+// Counts an injection that succeeded or failed, for telemetry.
+void count_injection(const ModuleContext& ctx, bool injected) {
+  datadog::telemetry::counter::increment(
+      injected ? telemetry::injection_succeed : telemetry::injection_failed,
+      telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
 }
 
 // Returns the per-location context if cached on the metadata container,
@@ -425,7 +494,6 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
                              ModuleContext& ctx, Send send) {
   assert(ctx.snippet != nullptr);
   assert(ctx.logger != nullptr);
-  const Snippet* snippet = ctx.snippet;
   auto& logger = *ctx.logger;
 
   // Not const: splice_injection rebuilds its entity chunk list.
@@ -446,91 +514,37 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  Injector* injector = injector_create_with_strategy(snippet, ctx.injection_strategy);
+  for (int i = 0; i < pResponseStruct->EntityChunkCount; i++) {
+    const HTTP_DATA_CHUNK& dataChunk = pResponseStruct->pEntityChunks[i];
+    if (dataChunk.DataChunkType != HttpDataChunkFromMemory) {
+      logger.debug("Skipping response which is not in memory: response type = " +
+                   std::to_string(dataChunk.DataChunkType));
+      return RQ_NOTIFICATION_CONTINUE;
+    }
+  }
+
+  const InjectorPtr injector(injector_create_with_strategy(ctx.snippet, ctx.injection_strategy),
+                             injector_cleanup);
   if (!injector) {
     logger.error("Error creating injector");
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  const int count = pResponseStruct->EntityChunkCount;
-  for (int i = 0; i < count; i++) {
-    const HTTP_DATA_CHUNK& dataChunk = pResponseStruct->pEntityChunks[i];
-    if (dataChunk.DataChunkType != HttpDataChunkFromMemory) {
-      logger.debug("Skipping response which is not in memory: response type = " +
-                   std::to_string(dataChunk.DataChunkType));
-      injector_cleanup(injector);
-      return RQ_NOTIFICATION_CONTINUE;
-    }
-  }
-
-  // While it looks for the injection point, the injector holds data back: a partially matched
-  // `</head>`, or for the head-open strategies up to the first kilobyte, which has to be scanned
-  // for an encoding declaration before anything can go ahead of it. Past that it streams. The
-  // queued chunks are left alone until the snippet comes out: they already carry every byte in
-  // order, so a response without an injection point is served untouched. What the injector holds
-  // back is always the end of what it was given, and it reports how much
-  // (`injector_held_back_length`), which is what gets trimmed off the queued chunks when the result
-  // that injects brings it back out. A response shorter than the head window resolves at
-  // `injector_end`.
   bool injected = false;
-  int injected_at = 0;
-  size_t withheld = 0;
-  InjectorResult result{};
-  for (; injected_at < count; injected_at++) {
-    const HTTP_DATA_CHUNK& dataChunk = pResponseStruct->pEntityChunks[injected_at];
-    withheld = injector_held_back_length(injector);
-    result = injector_write(injector, (uint8_t*)dataChunk.FromMemory.pBuffer,
-                            dataChunk.FromMemory.BufferLength);
-    if (result.injected) {
-      injected = true;
-      break;
-    }
-  }
-  if (!injected) {
-    withheld = injector_held_back_length(injector);
-    // Without padding: the queued chunks keep the original length when nothing is injected.
-    result = injector_end_without_padding(injector);
-    injected = result.injected;
-  }
-
-  if (injected) {
-    // Each result must be consumed before the next call to the injector, which this is.
-    if (const char* error =
-            splice_injection(pHttpContext, *pResponseStruct, {injected_at, withheld}, result)) {
+  if (const auto injection = write_response(*injector, *pResponseStruct)) {
+    if (const char* error = apply_injection(pHttpContext, pHttpResponse, *pResponseStruct,
+                                            *injection, *injector, send.headers_gone, logger)) {
       logger.error(error);
-      injector_cleanup(injector);
       return RQ_NOTIFICATION_CONTINUE;
     }
-
-    HRESULT const header_result = pHttpResponse.SetHeader(k_injection_header, "1", 1, TRUE);
-    if (header_result != S_OK) {
-      logger.error("Error setting injection header: " +
-                   std::system_category().message(header_result));
-      injector_cleanup(injector);
-      return RQ_NOTIFICATION_CONTINUE;
-    }
+    injected = true;
   }
-
-  if (injected) {
-    datadog::telemetry::counter::increment(
-        telemetry::injection_succeed,
-        telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
-  } else {
-    datadog::telemetry::counter::increment(
-        telemetry::injection_failed,
-        telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
-  }
-
-  injector_cleanup(injector);
+  count_injection(ctx, injected);
 
   if (send.more_data || send.headers_gone) {
     // Part of a response sent in several sends: flushing here and finishing the request would drop
     // the sends still to come. IIS sends this part as the module left it, and the next ones as they
-    // are. The headers go out with the first part, and the snippet is all the injection adds, so
-    // the length the response announces grows by exactly that.
-    if (injected && !send.headers_gone) {
-      extend_content_length(pHttpResponse, snippet->length, logger);
-    }
+    // are.
     return RQ_NOTIFICATION_CONTINUE;
   }
 

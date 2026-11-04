@@ -206,6 +206,49 @@ pub unsafe extern "C" fn injector_held_back_length(injector: *const Injector) ->
     return (*injector).inner.held_back() as u32;
 }
 
+/// Computes the `Content-Length` a response has to announce once the snippet is in it, given the
+/// `length` bytes at `value`, the `Content-Length` it announced (not NUL-terminated). The snippet is
+/// all the injection adds, and the padding [`injector_end`] emits instead is as long, so the length
+/// grows by exactly the snippet length either way.
+///
+/// Returns false, leaving `*extended` untouched, when `value` is not a valid length (a list of
+/// identical lengths is): the server should then remove the header rather than announce a wrong
+/// length. Passing `NULL` for `injector` or `extended` returns false.
+///
+/// # Example
+///
+/// ```c
+/// uint64_t extended;
+/// if (injector_extend_content_length(injector, value, value_length, &extended)) {
+///   // announce `extended`
+/// } else {
+///   // remove Content-Length
+/// }
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn injector_extend_content_length(
+    injector: *const Injector,
+    value: *const u8,
+    length: u32,
+    extended: *mut u64,
+) -> bool {
+    if injector.is_null() || extended.is_null() {
+        return false;
+    }
+    let value: &[u8] = if value.is_null() || length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(value, length as usize)
+    };
+    return match (*injector).inner.content_length_with_snippet(value) {
+        Some(length) => {
+            *extended = length;
+            true
+        }
+        None => false,
+    };
+}
+
 /// Notify the [`Injector`] that the full HTML document has been written.
 ///
 /// If the injection did not happen yet, a slice of the same size as the snippet containing only
@@ -562,6 +605,45 @@ mod tests {
                 b"{\"majorVersion\":5,\"rum\":{\"applicationId\":\"a\",\"clientToken\":\"t\"}}\0",
             ))
         };
+    }
+
+    #[test]
+    fn injector_extend_content_length_adds_the_snippet() {
+        let snippet = test_snippet();
+        let injector = unsafe { injector_create(snippet) };
+        let mut extended = 0u64;
+        let value = b"1000";
+        assert!(unsafe {
+            injector_extend_content_length(
+                injector,
+                value.as_ptr(),
+                value.len() as u32,
+                &mut extended,
+            )
+        });
+        assert_eq!(extended, 1000 + snippet_len() as u64);
+
+        let mut untouched = 7u64;
+        let value = b"12x";
+        assert!(!unsafe {
+            injector_extend_content_length(
+                injector,
+                value.as_ptr(),
+                value.len() as u32,
+                &mut untouched,
+            )
+        });
+        assert_eq!(untouched, 7);
+        assert!(!unsafe { injector_extend_content_length(injector, null(), 0, &mut untouched) });
+        assert!(!unsafe {
+            injector_extend_content_length(null(), value.as_ptr(), 3, &mut untouched)
+        });
+        assert!(!unsafe {
+            injector_extend_content_length(injector, value.as_ptr(), 3, core::ptr::null_mut())
+        });
+
+        unsafe { injector_cleanup(injector) };
+        unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]

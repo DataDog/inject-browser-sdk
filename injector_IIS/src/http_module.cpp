@@ -340,6 +340,19 @@ bool all_in_memory(const HTTP_RESPONSE& response) {
   return true;
 }
 
+// Readies `injector`, which wrote the first of several parts without the snippet coming out, for
+// the parts that follow, and returns whether it may still inject into them. Past the head window
+// it holds nothing back. A part shorter than the window leaves what it holds already in the queued
+// chunks: the injector is flushed, giving up the window, and so a `<head>` within it, but not one
+// further in the document.
+bool carry_over(Injector& injector) {
+  if (injector_held_back_length(&injector) != 0) {
+    // What the flush hands back is in this part's chunks already, which go out as they are.
+    injector_flush(&injector);
+  }
+  return injector_is_pending(&injector);
+}
+
 // Counts an injection that succeeded or failed, for telemetry.
 void count_injection(const ModuleContext& ctx, bool injected) {
   datadog::telemetry::counter::increment(
@@ -639,12 +652,8 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
       return RQ_NOTIFICATION_CONTINUE;
     }
     injected = true;
-  } else if (may_carry && snippet && all_in_memory(*pResponseStruct) &&
-             injector_held_back_length(injector.get()) == 0 &&
-             injector_is_pending(injector.get())) {
-    // Past the head window, the injector holds nothing back: this part goes out as it is, and
-    // the next ones go to the same injector. A first part shorter than the window is not worth
-    // carrying held-back bytes over to the next send.
+  } else if (may_carry && snippet && all_in_memory(*pResponseStruct) && carry_over(*injector)) {
+    // This part goes out as it is, and the next ones go to the same injector.
     if (auto* carried = request_state(pHttpContext, true)) {
       // The headers go out with this part, if they have not already, before the snippet goes in,
       // if it ever does: the announced length counts it already, and the last part is padded to
@@ -720,6 +729,9 @@ HttpModule::ContinueInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRe
       }
       state->padded = state->padded && error != nullptr;
       resolve(error == nullptr);
+    } else if (!injector_is_pending(state->injector.get())) {
+      // It gave up: there is nothing left to look for, only the padding below.
+      resolve(false);
     }
   }
 

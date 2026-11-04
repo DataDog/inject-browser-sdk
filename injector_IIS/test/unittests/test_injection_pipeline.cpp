@@ -1102,6 +1102,39 @@ TEST(InjectionPipeline, InjectionCarriedOverToALaterPart) {
   response.stop();
 }
 
+// A first part shorter than the head window is flushed rather than given up: the injector carries
+// over, and a `<head>` past the window, in a later part, is injected after. One within the window
+// is not, the window having been cut short.
+TEST(InjectionPipeline, ShortFirstPartIsCarriedOver) {
+  for (const bool head_past_the_window : {true, false}) {
+    SCOPED_TRACE(head_past_the_window ? "head past the window" : "head within the window");
+    PartedResponse response;
+    response.content_length = "100000";
+    response.start();
+
+    const Part first{"<!DOCTYPE html><html>", TRUE, true};
+    const std::string preamble =
+        head_past_the_window ? "<!-- " + std::string(2000, 'c') + " -->" : "";
+    const Part second{preamble + "<head><meta name=a>", FALSE, true};
+    const Part last{"</head><body></body></html>", FALSE, false};
+
+    EXPECT_EQ(response.send(first), first.body);
+    const std::string body = response.send(second);
+    if (head_past_the_window) {
+      const std::string before = preamble + "<head>";
+      EXPECT_EQ(body.size(), second.body.size() + response.snippet_length()) << body;
+      EXPECT_EQ(body.substr(0, before.size()), before);
+      EXPECT_NE(body.find("DD_RUM"), std::string::npos);
+      EXPECT_EQ(response.send(last), last.body);
+    } else {
+      EXPECT_EQ(body, second.body);
+      // The length counted the snippet from the first part, so the last part is padded to it.
+      EXPECT_EQ(response.send(last), last.body + std::string(response.snippet_length(), ' '));
+    }
+    response.stop();
+  }
+}
+
 // The carried injector never finds a `<head>`: the last part is padded to the length announced,
 // which counted the snippet, unless the response announced none.
 TEST(InjectionPipeline, CarriedInjectionPadsTheLastPart) {

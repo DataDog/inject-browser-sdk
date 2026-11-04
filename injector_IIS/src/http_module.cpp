@@ -50,8 +50,10 @@ void extend_content_length(IHttpResponse& http_response, size_t added, Logger& l
   }
 
   uint64_t length = 0;
-  const char* const end = announced.data() + announced.size();
-  const auto [parsed_end, error] = std::from_chars(announced.data(), end, length);
+  // Bounded by `end`: the header value is not NUL-terminated.
+  const char* const begin = announced.data();
+  const char* const end = begin + announced.size();
+  const auto [parsed_end, error] = std::from_chars(begin, end, length);
   if (error == std::errc{} && parsed_end == end &&
       length <= (std::numeric_limits<uint64_t>::max)() - added) {
     const std::string extended = std::to_string(length + added);

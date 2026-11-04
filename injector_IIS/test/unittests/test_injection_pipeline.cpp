@@ -18,6 +18,7 @@
 #include "gtest/gtest.h"
 
 #include <map>
+#include <array>
 #include <optional>
 #include <string>
 #include <utility>
@@ -442,7 +443,8 @@ static RegisteredModule registerModule(MockServer& server) {
 // Set up a mock HTTP response that looks like a 200 text/html with the given
 // HTML body. Returns the raw HTTP_RESPONSE (caller owns the chunk memory).
 struct PreparedResponse {
-  HTTP_DATA_CHUNK chunk;
+  // IIS's chunk array, with room for the chunks an injection writes back.
+  std::array<HTTP_DATA_CHUNK, 8> chunks{};
   HTTP_RESPONSE raw;
 };
 
@@ -450,9 +452,27 @@ struct PreparedResponse {
 // streamed response. The bodies are owned here, so they outlive the chunks pointing into them.
 struct PreparedChunkedResponse {
   std::vector<std::string> bodies;
+  // IIS's chunk array, with room for the chunks an injection writes back.
   std::vector<HTTP_DATA_CHUNK> chunks;
   HTTP_RESPONSE raw;
 };
+
+// Room the chunk arrays above leave past the response's own chunks: an injection adds at most
+// three.
+constexpr size_t k_spare_chunks = 4;
+
+// IIS keeps the entity chunks in an array it manages, which WriteEntityChunkByReference appends to.
+// Emulated over `raw`, whose array holds `capacity` chunks.
+static void emulateEntityChunkWrites(MockHttpResponse& resp, HTTP_RESPONSE& raw, size_t capacity) {
+  EXPECT_CALL(resp, WriteEntityChunkByReference(_, _))
+      .WillRepeatedly(Invoke([&raw, capacity](HTTP_DATA_CHUNK* chunk, LONG position) -> HRESULT {
+        if (position != -1 || raw.EntityChunkCount >= capacity) {
+          return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
+        }
+        raw.pEntityChunks[raw.EntityChunkCount++] = *chunk;
+        return S_OK;
+      }));
+}
 
 // Everything but the entity chunks: a 200 text/html response, uncompressed and not yet injected.
 static void setupHtmlResponseMetadata(MockHttpContext& ctx, MockHttpResponse& resp,
@@ -481,14 +501,15 @@ static void setupHtmlResponse(MockHttpContext& ctx, MockHttpResponse& resp, IHtt
                               MockMetadataInfo* metadata, PreparedResponse& pr, const char* html) {
   setupHtmlResponseMetadata(ctx, resp, app, metadata);
 
-  pr.chunk.DataChunkType = HttpDataChunkFromMemory;
-  pr.chunk.FromMemory.pBuffer = (PVOID)html;
-  pr.chunk.FromMemory.BufferLength = (ULONG)strlen(html);
+  pr.chunks[0].DataChunkType = HttpDataChunkFromMemory;
+  pr.chunks[0].FromMemory.pBuffer = (PVOID)html;
+  pr.chunks[0].FromMemory.BufferLength = (ULONG)strlen(html);
   pr.raw = {};
   pr.raw.EntityChunkCount = 1;
-  pr.raw.pEntityChunks = &pr.chunk;
+  pr.raw.pEntityChunks = pr.chunks.data();
 
   EXPECT_CALL(resp, GetRawHttpResponse()).WillRepeatedly(Return(&pr.raw));
+  emulateEntityChunkWrites(resp, pr.raw, pr.chunks.size());
 }
 
 // Same, with the body split across one entity chunk per element of `bodies`.
@@ -509,9 +530,11 @@ static void setupChunkedHtmlResponse(MockHttpContext& ctx, MockHttpResponse& res
   }
   pr.raw = {};
   pr.raw.EntityChunkCount = (USHORT)pr.chunks.size();
+  pr.chunks.resize(pr.chunks.size() + k_spare_chunks);
   pr.raw.pEntityChunks = pr.chunks.data();
 
   EXPECT_CALL(resp, GetRawHttpResponse()).WillRepeatedly(Return(&pr.raw));
+  emulateEntityChunkWrites(resp, pr.raw, pr.chunks.size());
 }
 
 // The body IIS would send: the entity chunks the raw response points to once the module is done,
@@ -911,7 +934,9 @@ TEST(InjectionPipeline, HeadersFlushedBeforeTheBody) {
     };
 
     EXPECT_EQ(send({}, TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA), "");
-    const std::string head = "<html><head><title>t</title></head><body>";
+    // Past the head window: the injector decides on this part, though more data follows.
+    const std::string head =
+        "<html><head><title>t</title><!--" + std::string(1100, 'x') + "--></head><body>";
     const std::string body = send({head}, FALSE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA);
     EXPECT_EQ(body.find("DD_RUM") != std::string::npos, !announced) << body;
     if (announced) {
@@ -924,6 +949,117 @@ TEST(InjectionPipeline, HeadersFlushedBeforeTheBody) {
     mod.factory->Terminate();
     mod.global->Terminate();
   }
+}
+
+// A module set up for one test of how it rebuilds a response: default configuration, unless
+// `strategy` is given.
+class ModuleUnderTest {
+ public:
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager{&rumConfig};
+  MockServer mockServer;
+  RegisteredModule mod{};
+  MockAppWithContext app;
+  CHttpModule* httpMod = nullptr;
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata{L"MACHINE/WEBROOT/APPHOST/Default Web Site"};
+
+  explicit ModuleUnderTest(std::optional<InjectionStrategy> strategy = std::nullopt) {
+    if (strategy) {
+      rumConfig.SetInjectionStrategy(*strategy);
+    }
+    EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+    mod = registerModule(mockServer);
+    MockAppStartProvider appStart(app);
+    EXPECT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+    EXPECT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+  }
+
+  ModuleUnderTest(const ModuleUnderTest&) = delete;
+  ModuleUnderTest& operator=(const ModuleUnderTest&) = delete;
+
+  ~ModuleUnderTest() {
+    mod.factory->Terminate();
+    mod.global->Terminate();
+  }
+};
+
+// Only chunks in memory can be scanned. One that is not, a file handle for instance, is served as
+// it is past the injection point, and leaves the response alone when it comes before.
+TEST(InjectionPipeline, ChunksNotInMemory) {
+  for (const bool before : {false, true}) {
+    SCOPED_TRACE(before ? "before the injection point" : "after the injection point");
+    ModuleUnderTest module;
+    const std::vector<std::string> bodies = {"<html><head><title>t</title></head>", "file"};
+    PreparedChunkedResponse pr;
+    setupChunkedHtmlResponse(module.httpCtx, module.httpResp, &module.app, &module.metadata, pr,
+                             before ? std::vector<std::string>{"file", bodies[0]} : bodies);
+    HTTP_DATA_CHUNK& file = pr.chunks[before ? 0 : 1];
+    file = {};
+    file.DataChunkType = HttpDataChunkFromFileHandle;
+    file.FromFileHandle.FileHandle = reinterpret_cast<HANDLE>(0x1234);
+
+    EXPECT_CALL(module.httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+        .Times(before ? 0 : 1)
+        .WillRepeatedly(Return(S_OK));
+    EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+    EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr),
+              RQ_NOTIFICATION_FINISH_REQUEST);
+
+    const int file_at = before ? 0 : pr.raw.EntityChunkCount - 1;
+    EXPECT_EQ(pr.raw.pEntityChunks[file_at].DataChunkType, HttpDataChunkFromFileHandle);
+    EXPECT_EQ(pr.raw.pEntityChunks[file_at].FromFileHandle.FileHandle,
+              reinterpret_cast<HANDLE>(0x1234));
+    if (before) {
+      EXPECT_EQ(pr.raw.EntityChunkCount, 2);
+    } else {
+      // Every chunk before the file one is in memory: the head, with the snippet in.
+      std::string head;
+      for (int i = 0; i < file_at; i++) {
+        const auto& chunk = pr.raw.pEntityChunks[i];
+        head.append(static_cast<const char*>(chunk.FromMemory.pBuffer),
+                    chunk.FromMemory.BufferLength);
+      }
+      EXPECT_NE(head.find("DD_RUM"), std::string::npos);
+      EXPECT_TRUE(head.ends_with("</head>")) << head;
+    }
+  }
+}
+
+// IIS refusing a chunk of the rebuilt body has the original one written back: the response is
+// served untouched rather than cut short.
+TEST(InjectionPipeline, RefusedChunkWriteLeavesTheResponseUntouched) {
+  ModuleUnderTest module;
+  const std::vector<std::string> bodies = {"<html><head><title>t</title></head>", "<body></body>"};
+  PreparedChunkedResponse pr;
+  setupChunkedHtmlResponse(module.httpCtx, module.httpResp, &module.app, &module.metadata, pr,
+                           bodies);
+  // No room past the response's own chunks.
+  emulateEntityChunkWrites(module.httpResp, pr.raw, bodies.size());
+
+  EXPECT_CALL(module.httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .Times(0);
+  EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).Times(0);
+  EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
+  EXPECT_EQ(assembleResponseBody(pr), bodies[0] + bodies[1]);
+}
+
+// A first part that more data follows and that ends within the head window is not the whole
+// document: the injector is not ended on it, so the snippet cannot go in ahead of a declaration the
+// next part may hold.
+TEST(InjectionPipeline, FirstPartShorterThanTheHeadWindowIsNotInjected) {
+  ModuleUnderTest module(InjectionStrategy::HeadOpenTagWithCloseTagFallback);
+  PreparedChunkedResponse pr;
+  setupChunkedHtmlResponse(module.httpCtx, module.httpResp, &module.app, &module.metadata, pr,
+                           {"<html><head><title>t</title>"});
+
+  EXPECT_CALL(module.httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .Times(0);
+  EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).Times(0);
+  MockSendResponseProvider provider(TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA);
+  EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, &provider), RQ_NOTIFICATION_CONTINUE);
+  EXPECT_EQ(assembleResponseBody(pr), "<html><head><title>t</title>");
 }
 
 // The single send of a whole response is still flushed and finished, with the snippet in, and the

@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace datadog::rum {
 namespace {
@@ -27,21 +28,28 @@ struct InjectionPoint {
   size_t withheld;  // bytes held back from the chunks before it
 };
 
-// Replaces the entity chunks with ones that serve `result`, the injector output that carried the
-// snippet, in place of the bytes it covers.
+// Rebuilds the response body around `result`, the injector output that carried the snippet, in
+// place of the bytes it covers.
 //
 // Those are the `withheld` bytes the injector held back from the chunks before `injected_at`, which
 // are always a suffix of them, and the chunk at `injected_at` itself, unless the injection was only
-// resolved by `injector_end` (`injected_at` is then the chunk count). The rebuilt list is: the
+// resolved by `injector_end` (`injected_at` is then the chunk count). The rebuilt body is: the
 // chunks before, minus the withheld suffix; one chunk per slice of `result`; the chunks after,
 // untouched. A slice that points into the chunk at `injected_at` is referenced where it is.
-// Anything else lives in the injector, which reuses that memory on its next call, so it is copied:
-// at most the head window the strategy holds back, a partial tag, and the snippet. Nothing past the
-// injection point is copied, whatever the size of the response.
+// Anything else lives in the injector, which reuses that memory on its next call, so it is copied
+// into request memory: at most the head window the strategy holds back, a partial tag, and the
+// snippet. Nothing past the injection point is copied, whatever the size of the response.
 //
-// Returns an error message, or nullptr once the response serves the rebuilt chunks.
-const char* splice_injection(IHttpContext& http_context, HTTP_RESPONSE& response,
-                             InjectionPoint point, const InjectorResult& result) {
+// The body goes through IIS's own API: the chunk descriptors are copied out, the body emptied, and
+// each chunk written back by reference. IIS keeps managing its chunk array, so a write after this
+// one, by IIS or another module, finds it as it expects.
+//
+// Returns an error message, or nullptr once the response serves the rebuilt body. Everything that
+// can fail is checked before the body is emptied, except IIS refusing a chunk, after which the
+// original body is written back.
+const char* splice_injection(IHttpContext& http_context, IHttpResponse& http_response,
+                             HTTP_RESPONSE& response, InjectionPoint point,
+                             const InjectorResult& result) {
   const auto [injected_at, withheld] = point;
   const int count = response.EntityChunkCount;
   const bool written = injected_at < count;
@@ -62,48 +70,59 @@ const char* splice_injection(IHttpContext& http_context, HTTP_RESPONSE& response
     owned += in_place(result.slices[i]) ? 0 : result.slices[i].length;
   }
   const size_t following = written ? count - injected_at - 1 : 0;
-  const size_t chunk_count = injected_at + result.slices_length + following;
-  const size_t size = chunk_count * sizeof(HTTP_DATA_CHUNK) + owned;
-  if (chunk_count > (std::numeric_limits<USHORT>::max)() ||
-      size > (std::numeric_limits<DWORD>::max)()) {
+  // IIS takes at most 65535 chunks.
+  if (injected_at + result.slices_length + following > (std::numeric_limits<USHORT>::max)() ||
+      owned > (std::numeric_limits<DWORD>::max)()) {
     return "Response has too many entity chunks to rewrite for injection";
   }
-
-  void* memory = http_context.AllocateRequestMemory(static_cast<DWORD>(size));
-  if (!memory) {
+  auto* bytes = static_cast<uint8_t*>(
+      owned == 0 ? nullptr : http_context.AllocateRequestMemory(static_cast<DWORD>(owned)));
+  if (owned != 0 && bytes == nullptr) {
     return "Failed to allocate memory for injection";
   }
-  auto* chunks = static_cast<HTTP_DATA_CHUNK*>(memory);
-  auto* bytes = reinterpret_cast<uint8_t*>(chunks + chunk_count);
 
+  const std::vector<HTTP_DATA_CHUNK> original(response.pEntityChunks,
+                                              response.pEntityChunks + count);
+  std::vector<HTTP_DATA_CHUNK> rebuilt;
+  rebuilt.reserve(injected_at + result.slices_length + following);
   size_t keep = preceding_length - withheld;
-  HTTP_DATA_CHUNK* next = chunks;
   for (int i = 0; i < injected_at; i++) {
-    *next = response.pEntityChunks[i];
-    const size_t length = (std::min)(keep, static_cast<size_t>(next->FromMemory.BufferLength));
-    next->FromMemory.BufferLength = static_cast<ULONG>(length);
+    HTTP_DATA_CHUNK chunk = original[i];
+    const size_t length = (std::min)(keep, static_cast<size_t>(chunk.FromMemory.BufferLength));
+    chunk.FromMemory.BufferLength = static_cast<ULONG>(length);
     keep -= length;
-    next++;
+    rebuilt.push_back(chunk);
   }
   for (size_t i = 0; i < result.slices_length; i++) {
     const BytesSlice& slice = result.slices[i];
-    next->DataChunkType = HttpDataChunkFromMemory;
+    HTTP_DATA_CHUNK chunk{};
+    chunk.DataChunkType = HttpDataChunkFromMemory;
     if (in_place(slice)) {
-      next->FromMemory.pBuffer = const_cast<uint8_t*>(slice.start);
+      chunk.FromMemory.pBuffer = const_cast<uint8_t*>(slice.start);
     } else {
       memcpy(bytes, slice.start, slice.length);
-      next->FromMemory.pBuffer = bytes;
+      chunk.FromMemory.pBuffer = bytes;
       bytes += slice.length;
     }
-    next->FromMemory.BufferLength = static_cast<ULONG>(slice.length);
-    next++;
+    chunk.FromMemory.BufferLength = static_cast<ULONG>(slice.length);
+    rebuilt.push_back(chunk);
   }
-  for (size_t i = 0; i < following; i++) {
-    *next++ = response.pEntityChunks[injected_at + 1 + i];
-  }
+  rebuilt.insert(rebuilt.end(), original.begin() + injected_at + (written ? 1 : 0), original.end());
 
-  response.pEntityChunks = chunks;
-  response.EntityChunkCount = static_cast<USHORT>(chunk_count);
+  const auto write_body = [&](std::vector<HTTP_DATA_CHUNK>& chunks) {
+    response.EntityChunkCount = 0;
+    for (HTTP_DATA_CHUNK& chunk : chunks) {
+      if (FAILED(http_response.WriteEntityChunkByReference(&chunk, -1))) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (!write_body(rebuilt)) {
+    auto restored = original;
+    write_body(restored);
+    return "IIS refused an entity chunk, skipping injection";
+  }
   return nullptr;
 }
 
@@ -218,10 +237,19 @@ struct Injection {
 // back is always the end of what it was given, and it reports how much
 // (`injector_held_back_length`), read before each call: that is what the result that injects brings
 // back out, and what is trimmed off the queued chunks in its place.
-std::optional<Injection> write_response(Injector& injector, const HTTP_RESPONSE& response) {
+//
+// Only chunks in memory can be scanned: one that is not, a file handle for instance, ends the scan,
+// and is served as it is past an injection point found before it. And when more of the response
+// follows in later sends (`more_data`), the end of these chunks is not the end of the document:
+// the injector is not ended, so it never injects on the strength of a document cut short.
+std::optional<Injection> write_response(Injector& injector, const HTTP_RESPONSE& response,
+                                        bool more_data) {
   const int count = response.EntityChunkCount;
   for (int i = 0; i < count; i++) {
     const HTTP_DATA_CHUNK& chunk = response.pEntityChunks[i];
+    if (chunk.DataChunkType != HttpDataChunkFromMemory) {
+      return std::nullopt;
+    }
     const size_t withheld = injector_held_back_length(&injector);
     const InjectorResult result =
         injector_write(&injector, static_cast<const uint8_t*>(chunk.FromMemory.pBuffer),
@@ -229,6 +257,9 @@ std::optional<Injection> write_response(Injector& injector, const HTTP_RESPONSE&
     if (result.injected) {
       return Injection{{i, withheld}, result};
     }
+  }
+  if (more_data) {
+    return std::nullopt;
   }
   const size_t withheld = injector_held_back_length(&injector);
   // Without padding: the queued chunks keep the original length when nothing is injected.
@@ -514,15 +545,6 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  for (int i = 0; i < pResponseStruct->EntityChunkCount; i++) {
-    const HTTP_DATA_CHUNK& dataChunk = pResponseStruct->pEntityChunks[i];
-    if (dataChunk.DataChunkType != HttpDataChunkFromMemory) {
-      logger.debug("Skipping response which is not in memory: response type = " +
-                   std::to_string(dataChunk.DataChunkType));
-      return RQ_NOTIFICATION_CONTINUE;
-    }
-  }
-
   const InjectorPtr injector(injector_create_with_strategy(ctx.snippet, ctx.injection_strategy),
                              injector_cleanup);
   if (!injector) {
@@ -531,7 +553,7 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
   }
 
   bool injected = false;
-  if (const auto injection = write_response(*injector, *pResponseStruct)) {
+  if (const auto injection = write_response(*injector, *pResponseStruct, send.more_data)) {
     if (const char* error = apply_injection(pHttpContext, pHttpResponse, *pResponseStruct,
                                             *injection, *injector, send.headers_gone, logger)) {
       logger.error(error);

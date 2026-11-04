@@ -139,10 +139,11 @@ std::string_view get_header(const IHttpResponse& http_response, const char* head
 // Has the response announce the length it has once the snippet is in, if it announces one. The
 // library tells what that length is; a header it cannot read, or that cannot be updated, is
 // removed instead, and the response goes out chunked: no length is better than a wrong one.
-void extend_content_length(IHttpResponse& http_response, const Injector& injector, Logger& logger) {
+// Returns whether the announced length counts the snippet.
+bool extend_content_length(IHttpResponse& http_response, const Injector& injector, Logger& logger) {
   const std::string_view announced = get_header(http_response, "Content-Length");
   if (announced.empty()) {
-    return;
+    return false;
   }
 
   uint64_t length = 0;
@@ -152,7 +153,7 @@ void extend_content_length(IHttpResponse& http_response, const Injector& injecto
     HRESULT const result = http_response.SetHeader("Content-Length", extended.c_str(),
                                                    static_cast<USHORT>(extended.size()), TRUE);
     if (SUCCEEDED(result)) {
-      return;
+      return true;
     }
     logger.error("Error updating Content-Length: " + std::system_category().message(result));
   } else {
@@ -163,58 +164,7 @@ void extend_content_length(IHttpResponse& http_response, const Injector& injecto
   if (FAILED(result)) {
     logger.error("Error removing Content-Length: " + std::system_category().message(result));
   }
-}
-
-// What the module keeps on a request from one send to the next. Stored on the request, which frees
-// it.
-struct RequestState final : public IHttpStoredContext {
-  // The headers went out alone, with no body, as when an application flushes them first: the
-  // next send with a body starts it, though it carries no headers.
-  bool awaiting_body = false;
-
-  void CleanupStoredContext() override { delete this; }
-};
-
-// Returns the state the module keeps on the request, creating it when `create` is set, or nullptr.
-RequestState* request_state(IHttpContext& http_context, bool create) {
-  auto* container = http_context.GetModuleContextContainer();
-  if (container == nullptr) {
-    return nullptr;
-  }
-  if (auto* state = container->GetModuleContext(g_module_id)) {
-    return static_cast<RequestState*>(state);
-  }
-  if (!create) {
-    return nullptr;
-  }
-  auto state = std::unique_ptr<RequestState>(new (std::nothrow) RequestState);
-  if (state == nullptr || FAILED(container->SetModuleContext(state.get(), g_module_id))) {
-    return nullptr;
-  }
-  return state.release();  // the request owns it now
-}
-
-// Returns whether a send carries the start of the body, where the snippet goes, `headers` telling
-// whether the headers go out with it. That is the first send with entity chunks: the one with the
-// headers, unless they went out alone before it. The sends after it carry the rest of the body.
-bool starts_body(IHttpContext& http_context, const HTTP_RESPONSE* response, bool headers) {
-  const bool has_body = response != nullptr && response->EntityChunkCount > 0;
-  if (headers) {
-    if (!has_body) {
-      // Remember it for the send that brings the body, which would otherwise be taken for a later
-      // part and passed through, as every send without the headers is.
-      if (auto* state = request_state(http_context, true)) {
-        state->awaiting_body = true;
-      }
-    }
-    return has_body;
-  }
-  RequestState* state = request_state(http_context, false);
-  if (state == nullptr || !state->awaiting_body || !has_body) {
-    return false;
-  }
-  state->awaiting_body = false;
-  return true;
+  return false;
 }
 
 // Owns an injector, and frees it on every way out.
@@ -294,6 +244,102 @@ const char* apply_injection(IHttpContext& http_context, IHttpResponse& http_resp
   return nullptr;
 }
 
+// Owns a snippet.
+using SnippetPtr = std::unique_ptr<Snippet, decltype(&snippet_cleanup)>;
+
+// What the module keeps on a request from one notification to the next. Stored on the request,
+// which frees it.
+struct RequestState final : public IHttpStoredContext {
+  // The request came with the injection-pending header: an injector downstream, a proxy in front
+  // of this server, injects the response unless it says it is injected already. Only the first
+  // part of a response can say so, its headers going out with it, so a response is then never
+  // injected in a later part.
+  bool downstream_injector = false;
+
+  // The headers went out alone, with no body, as when an application flushes them first: the
+  // next send with a body starts it, though it carries no headers.
+  bool awaiting_body = false;
+
+  // The injection carried over the parts of a response, while the snippet may still go into a
+  // later one. The injector borrows `snippet`, a copy of the configured one that a configuration
+  // reload cannot free; declared after it, it is destroyed first.
+  SnippetPtr snippet{nullptr, snippet_cleanup};
+  InjectorPtr injector{nullptr, injector_cleanup};
+  // Whether the announced length counts the snippet already: the last part is then padded to it
+  // if the snippet never goes in.
+  bool padded = false;
+  size_t snippet_length = 0;
+
+  void CleanupStoredContext() override { delete this; }
+};
+
+// Returns the state the module keeps on the request, creating it when `create` is set, or nullptr.
+RequestState* request_state(IHttpContext& http_context, bool create) {
+  auto* container = http_context.GetModuleContextContainer();
+  if (container == nullptr) {
+    return nullptr;
+  }
+  if (auto* state = container->GetModuleContext(g_module_id)) {
+    return static_cast<RequestState*>(state);
+  }
+  if (!create) {
+    return nullptr;
+  }
+  auto state = std::unique_ptr<RequestState>(new (std::nothrow) RequestState);
+  if (state == nullptr || FAILED(container->SetModuleContext(state.get(), g_module_id))) {
+    return nullptr;
+  }
+  return state.release();  // the request owns it now
+}
+
+// Returns whether a send carries the start of the body, where the snippet goes, `headers` telling
+// whether the headers go out with it. That is the first send with entity chunks: the one with the
+// headers, unless they went out alone before it. The sends after it carry the rest of the body.
+bool starts_body(IHttpContext& http_context, const HTTP_RESPONSE* response, bool headers) {
+  const bool has_body = response != nullptr && response->EntityChunkCount > 0;
+  if (headers) {
+    if (!has_body) {
+      // Remember it for the send that brings the body, which would otherwise be taken for a later
+      // part, as every send without the headers is.
+      if (auto* state = request_state(http_context, true)) {
+        state->awaiting_body = true;
+      }
+    }
+    return has_body;
+  }
+  RequestState* state = request_state(http_context, false);
+  if (state == nullptr || !state->awaiting_body || !has_body) {
+    return false;
+  }
+  state->awaiting_body = false;
+  return true;
+}
+
+// Appends `length` spaces to the response, standing in for a snippet its announced length counts
+// but that never went in. Returns an error message, or nullptr.
+const char* append_padding(IHttpContext& http_context, IHttpResponse& http_response,
+                           HTTP_RESPONSE& response, size_t length) {
+  if (length > (std::numeric_limits<uint32_t>::max)()) {
+    return "Padding too large";
+  }
+  // The splice copies the slices it does not reference in place, so the spaces can be local.
+  const std::vector<uint8_t> spaces(length, ' ');
+  const BytesSlice slice{static_cast<uint32_t>(length), spaces.data(), false};
+  const InjectorResult padding{1, &slice, false};
+  return splice_injection(http_context, http_response, response, {response.EntityChunkCount, 0},
+                          padding);
+}
+
+// Returns whether every entity chunk of the response is in memory, where the injector can read it.
+bool all_in_memory(const HTTP_RESPONSE& response) {
+  for (int i = 0; i < response.EntityChunkCount; i++) {
+    if (response.pEntityChunks[i].DataChunkType != HttpDataChunkFromMemory) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Counts an injection that succeeded or failed, for telemetry.
 void count_injection(const ModuleContext& ctx, bool injected) {
   datadog::telemetry::counter::increment(
@@ -367,6 +413,33 @@ ModuleContext* try_cache_per_location_context(IHttpContext& http_context, Module
   return nullptr;
 }
 
+// Returns the context of the request's application, or of its `<location>` when it has its own
+// configuration, or nullptr if there is none.
+ModuleContext* resolve_module_context(IHttpContext& http_context) {
+  // Get app-level context (always needed for logger, server, tags).
+  auto* app = http_context.GetApplication();
+  if (!app) {
+    return nullptr;
+  }
+  auto* app_container = app->GetModuleContextContainer();
+  if (!app_container) {
+    return nullptr;
+  }
+  auto* app_opaque = app_container->GetModuleContext(g_module_id);
+  if (!app_opaque) {
+    return nullptr;
+  }
+  auto& app_ctx = *static_cast<ModuleContext*>(app_opaque);
+
+  // Resolve per-<location> config. Cached on the IMetadataInfo container;
+  // IIS recycles it on config change, so hot-reload works automatically.
+  ModuleContext* ctx = resolve_cached_context(http_context, app_ctx);
+  if (ctx == &app_ctx) {
+    ctx = try_cache_per_location_context(http_context, app_ctx);
+  }
+  return ctx;
+}
+
 }  // namespace
 
 REQUEST_NOTIFICATION_STATUS
@@ -376,6 +449,16 @@ HttpModule::OnBeginRequest(IN IHttpContext* http_context, IN IHttpEventProvider*
   IHttpRequest* http_request = http_context->GetRequest();
   if (!http_request) {
     return RQ_NOTIFICATION_CONTINUE;
+  }
+
+  // Before this module sets it for the server it forwards to: a request that already has it comes
+  // from an injector downstream.
+  USHORT pending_length = 0;
+  if (http_request->GetHeader(k_injection_pending_header, &pending_length) != nullptr &&
+      pending_length != 0) {
+    if (auto* state = request_state(*http_context, true)) {
+      state->downstream_injector = true;
+    }
   }
 
   auto* app = http_context->GetApplication();
@@ -420,37 +503,26 @@ HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvid
   }
 
   // A response can reach the module in several sends, as when ARR streams a large upstream
-  // response, each one with the next part of the body. A send without the headers continues a
-  // response, and only one the module took on has anything left to do: any other, every one with
-  // RUM disabled among them, ends at this lookup.
+  // response, each one with the next part of the body. Only the one with the start of the body is
+  // injected into; the later ones go to the injector it left, if any.
   const bool headers = provider == nullptr || provider->GetHeadersBeingSent() != FALSE;
-  if (!headers && request_state(*http_context, false) == nullptr) {
-    return RQ_NOTIFICATION_CONTINUE;
-  }
-
-  // Get app-level context (always needed for logger, server, tags).
-  auto* app = http_context->GetApplication();
-  if (!app) {
-    return RQ_NOTIFICATION_CONTINUE;
-  }
-  auto* app_container = app->GetModuleContextContainer();
-  if (!app_container) {
-    return RQ_NOTIFICATION_CONTINUE;
-  }
-  auto* app_opaque = app_container->GetModuleContext(g_module_id);
-  if (!app_opaque) {
-    return RQ_NOTIFICATION_CONTINUE;
-  }
-  auto& app_ctx = *static_cast<ModuleContext*>(app_opaque);
-
-  // Resolve per-<location> config. Cached on the IMetadataInfo container;
-  // IIS recycles it on config change, so hot-reload works automatically.
-  ModuleContext* ctx = resolve_cached_context(*http_context, app_ctx);
-  if (ctx == &app_ctx) {
-    ctx = try_cache_per_location_context(*http_context, app_ctx);
-    if (!ctx) {
+  const Send send{
+      provider != nullptr && (provider->GetFlags() & HTTP_SEND_RESPONSE_FLAG_MORE_DATA) != 0,
+      !headers};
+  if (!headers) {
+    // A send without the headers continues a response, and only one the module took on has
+    // anything left to do: any other, every one with RUM disabled among them, ends at this lookup.
+    if (request_state(*http_context, false) == nullptr) {
       return RQ_NOTIFICATION_CONTINUE;
     }
+    if (!starts_body(*http_context, http_response->GetRawHttpResponse(), headers)) {
+      return ContinueInjection(*http_context, *http_response, send.more_data);
+    }
+  }
+
+  ModuleContext* ctx = resolve_module_context(*http_context);
+  if (!ctx) {
+    return RQ_NOTIFICATION_CONTINUE;
   }
 
   if (!ctx->snippet) {
@@ -459,14 +531,10 @@ HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvid
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  // Only the send with the start of the body is injected into: the later ones are passed through
-  // as they are.
-  if (!starts_body(*http_context, http_response->GetRawHttpResponse(), headers)) {
+  // The headers going out alone, ahead of the body: noted for the send that starts it.
+  if (headers && !starts_body(*http_context, http_response->GetRawHttpResponse(), headers)) {
     return RQ_NOTIFICATION_CONTINUE;
   }
-  const Send send{
-      provider != nullptr && (provider->GetFlags() & HTTP_SEND_RESPONSE_FLAG_MORE_DATA) != 0,
-      !headers};
 
   if (!ShouldAttemptInjection(*http_response, *ctx)) {
     return RQ_NOTIFICATION_CONTINUE;
@@ -552,7 +620,12 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  const InjectorPtr injector(injector_create(ctx.snippet), injector_cleanup);
+  // The first of several parts may leave an injector to carry over to the next ones, which has to
+  // outlive the configured snippet: it is created from a copy of it then.
+  const RequestState* state = request_state(pHttpContext, false);
+  const bool may_carry = send.more_data && (state == nullptr || !state->downstream_injector);
+  SnippetPtr snippet(may_carry ? snippet_copy(ctx.snippet) : nullptr, snippet_cleanup);
+  InjectorPtr injector(injector_create(snippet ? snippet.get() : ctx.snippet), injector_cleanup);
   if (!injector) {
     logger.error("Error creating injector");
     return RQ_NOTIFICATION_CONTINUE;
@@ -566,6 +639,23 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
       return RQ_NOTIFICATION_CONTINUE;
     }
     injected = true;
+  } else if (may_carry && snippet && all_in_memory(*pResponseStruct) &&
+             injector_held_back_length(injector.get()) == 0 &&
+             injector_is_pending(injector.get())) {
+    // Past the head window, the injector holds nothing back: this part goes out as it is, and
+    // the next ones go to the same injector. A first part shorter than the window is not worth
+    // carrying held-back bytes over to the next send.
+    if (auto* carried = request_state(pHttpContext, true)) {
+      // The headers go out with this part, if they have not already, before the snippet goes in,
+      // if it ever does: the announced length counts it already, and the last part is padded to
+      // it otherwise. Gone already, they announce no length.
+      carried->padded =
+          !send.headers_gone && extend_content_length(pHttpResponse, *injector, logger);
+      carried->snippet_length = snippet->length;
+      carried->snippet = std::move(snippet);
+      carried->injector = std::move(injector);
+      return RQ_NOTIFICATION_CONTINUE;
+    }
   }
   count_injection(ctx, injected);
 
@@ -585,6 +675,70 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
   }
 
   return RQ_NOTIFICATION_FINISH_REQUEST;
+}
+
+REQUEST_NOTIFICATION_STATUS
+HttpModule::ContinueInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpResponse,
+                              bool more_data) {
+  RequestState* state = request_state(pHttpContext, false);
+  if (state == nullptr || (state->injector == nullptr && !state->padded)) {
+    return RQ_NOTIFICATION_CONTINUE;
+  }
+  HTTP_RESPONSE* pResponseStruct = pHttpResponse.GetRawHttpResponse();
+  if (pResponseStruct == nullptr) {
+    return RQ_NOTIFICATION_CONTINUE;
+  }
+  // For logging and telemetry only: the injector owns what it injects.
+  const ModuleContext* ctx = resolve_module_context(pHttpContext);
+  const auto log_error = [ctx](const char* error) {
+    if (ctx != nullptr) {
+      ctx->logger->error(error);
+    }
+  };
+  const auto resolve = [&](bool injected) {
+    if (ctx != nullptr) {
+      count_injection(*ctx, injected);
+    }
+    state->injector.reset();
+    state->snippet.reset();
+  };
+
+  // A chunk the injector cannot read leaves a gap it cannot scan across.
+  if (state->injector != nullptr && !all_in_memory(*pResponseStruct)) {
+    resolve(false);
+  }
+  if (state->injector != nullptr) {
+    // Past the head window nothing is held back, so each part is written on its own, and the
+    // injector is never ended on one: the padding below stands in for the snippet instead.
+    if (const auto injection = write_response(*state->injector, *pResponseStruct, true)) {
+      // The headers are gone: only the body can take the snippet. Splicing fails before it touches
+      // the response, which then still lacks the snippet its announced length counts.
+      const char* error = splice_injection(pHttpContext, pHttpResponse, *pResponseStruct,
+                                           injection->point, injection->result);
+      if (error != nullptr) {
+        log_error(error);
+      }
+      state->padded = state->padded && error != nullptr;
+      resolve(error == nullptr);
+    }
+  }
+
+  if (more_data) {
+    return RQ_NOTIFICATION_CONTINUE;
+  }
+
+  // The last part. The snippet did not go in if the injector is still there.
+  if (state->injector != nullptr) {
+    resolve(false);
+  }
+  if (state->padded) {
+    state->padded = false;
+    if (const char* error =
+            append_padding(pHttpContext, pHttpResponse, *pResponseStruct, state->snippet_length)) {
+      log_error(error);
+    }
+  }
+  return RQ_NOTIFICATION_CONTINUE;
 }
 
 }  // namespace datadog::rum

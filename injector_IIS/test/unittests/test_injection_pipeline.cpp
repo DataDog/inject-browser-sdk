@@ -1005,6 +1005,213 @@ TEST(InjectionPipeline, FirstPartShorterThanTheHeadWindowIsNotInjected) {
   EXPECT_EQ(assembleResponseBody(pr), "<html><head><title>t</title>");
 }
 
+// One part of a response sent in several, through the module: `headers` for the first one, `more`
+// unless it is the last. The response announces `content_length`, if any.
+struct Part {
+  std::string body;
+  BOOL headers;
+  bool more;
+};
+
+class PartedResponse {
+ public:
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager{&rumConfig};
+  MockServer mockServer;
+  RegisteredModule mod;
+  MockAppWithContext app;
+  CHttpModule* httpMod = nullptr;
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata{L"MACHINE/WEBROOT/APPHOST/Default Web Site"};
+  MockModuleContextContainer requestContainer;
+  std::optional<std::string> content_length;
+  std::string extended_to;  // what Content-Length was set to, if it was
+
+  void start() {
+    EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+    mod = registerModule(mockServer);
+    MockAppStartProvider appStart(app);
+    ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+    ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+    EXPECT_CALL(httpCtx, GetModuleContextContainer()).WillRepeatedly(Return(&requestContainer));
+    EXPECT_CALL(httpResp, GetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _))
+        .WillRepeatedly(DoAll(Invoke([this](_In_ PCSTR, _Out_ USHORT* len) {
+                                *len = static_cast<USHORT>(content_length.value_or("").size());
+                              }),
+                              Invoke([this](_In_ PCSTR, _Out_ USHORT*) -> PCSTR {
+                                return content_length ? content_length->c_str() : nullptr;
+                              })));
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _, _, _))
+        .WillRepeatedly(DoAll(Invoke([this](PCSTR, PCSTR value, USHORT length, BOOL) {
+                                extended_to.assign(value, length);
+                              }),
+                              Return(S_OK)));
+    EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
+  }
+
+  size_t snippet_length() {
+    auto* ctx =
+        static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+    return ctx->snippet->length;
+  }
+
+  // Sends `part` and returns the body IIS would send for it.
+  std::string send(const Part& part) {
+    PreparedChunkedResponse pr;
+    setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, {part.body});
+    MockSendResponseProvider provider(part.headers,
+                                      part.more ? HTTP_SEND_RESPONSE_FLAG_MORE_DATA : 0);
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, &provider), RQ_NOTIFICATION_CONTINUE);
+    EXPECT_TRUE(httpCtx.AllocationGuardIntact()) << "wrote past the end of request memory";
+    return assembleResponseBody(pr);
+  }
+
+  void stop() {
+    mod.factory->Terminate();
+    mod.global->Terminate();
+  }
+};
+
+// The first part holds no `<head>` tag but looks like an HTML document: the injector carries over
+// to the next parts, and the snippet goes right after the `<head>` tag of whichever holds it. The
+// headers left with the first part, so the announced length counted the snippet from there.
+TEST(InjectionPipeline, InjectionCarriedOverToALaterPart) {
+  PartedResponse response;
+  response.content_length = "100000";
+  response.start();
+  EXPECT_CALL(response.httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .Times(0);
+  EXPECT_CALL(response.httpResp, DeleteHeader(Matcher<PCSTR>(_))).Times(0);
+
+  const Part first{"<html><!-- " + std::string(2000, 'c') + " -->", TRUE, true};
+  const Part second{"<p>x</p><head><meta name=a>", FALSE, true};
+  const Part last{"</head><body>hi</body></html>", FALSE, false};
+
+  EXPECT_EQ(response.send(first), first.body);
+  EXPECT_EQ(response.extended_to, std::to_string(100000 + response.snippet_length()));
+
+  const std::string body = response.send(second);
+  const std::string before = "<p>x</p><head>";
+  EXPECT_EQ(body.size(), second.body.size() + response.snippet_length()) << body;
+  EXPECT_EQ(body.substr(0, before.size()), before);
+  EXPECT_NE(body.find("DD_RUM"), std::string::npos) << body;
+  EXPECT_EQ(body.substr(before.size() + response.snippet_length()), "<meta name=a>");
+
+  EXPECT_EQ(response.send(last), last.body);
+  response.stop();
+}
+
+// The carried injector never finds a `<head>`: the last part is padded to the length announced,
+// which counted the snippet, unless the response announced none.
+TEST(InjectionPipeline, CarriedInjectionPadsTheLastPart) {
+  for (const bool announced : {true, false}) {
+    SCOPED_TRACE(announced ? "with a Content-Length" : "chunked");
+    PartedResponse response;
+    if (announced) {
+      response.content_length = "100000";
+    }
+    response.start();
+
+    const Part first{"<html><!-- " + std::string(2000, 'c') + " -->", TRUE, true};
+    const Part second{"<body><p>no head</p>", FALSE, true};
+    const Part last{"</body></html>", FALSE, false};
+
+    EXPECT_EQ(response.send(first), first.body);
+    EXPECT_EQ(response.send(second), second.body);
+    const std::string padding = announced ? std::string(response.snippet_length(), ' ') : "";
+    EXPECT_EQ(response.send(last), last.body + padding);
+    response.stop();
+  }
+}
+
+// Without HTML evidence in the first part, nothing is carried over: the later `<head>` is left
+// alone, and so is the announced length.
+TEST(InjectionPipeline, NoInjectionCarriedOverWithoutHtmlEvidence) {
+  PartedResponse response;
+  response.content_length = "100000";
+  response.start();
+
+  const Part first{"{\"data\": \"" + std::string(2000, 'x'), TRUE, true};
+  const Part last{"\", \"html\": \"<head></head>\"}", FALSE, false};
+
+  EXPECT_EQ(response.send(first), first.body);
+  EXPECT_EQ(response.extended_to, "");
+  EXPECT_EQ(response.send(last), last.body);
+  response.stop();
+}
+
+// The carried injector owns a copy of the snippet: a configuration reload freeing the configured
+// one while the response is still being sent does not affect it.
+TEST(InjectionPipeline, CarriedInjectionOutlivesAConfigurationReload) {
+  PartedResponse response;
+  response.content_length = "100000";
+  response.start();
+
+  const Part first{"<html><!-- " + std::string(2000, 'c') + " -->", TRUE, true};
+  const Part last{"<head><title>t</title></head></html>", FALSE, false};
+
+  EXPECT_EQ(response.send(first), first.body);
+  const size_t snippet_length = response.snippet_length();
+
+  // What a reload does to the snippet of the context in use: the per-location one the module
+  // cached, or else the application's.
+  IHttpStoredContext* location =
+      response.metadata.GetModuleContextContainer()->GetModuleContext(nullptr);
+  auto* ctx = static_cast<ModuleContext*>(
+      location != nullptr ? location
+                          : response.app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  Snippet* configured = std::exchange(ctx->snippet, nullptr);
+  snippet_cleanup(configured);
+
+  const std::string body = response.send(last);
+  EXPECT_EQ(body.size(), last.body.size() + snippet_length) << body;
+  EXPECT_EQ(body.substr(0, std::string("<head>").size()), "<head>");
+  EXPECT_NE(body.find("DD_RUM"), std::string::npos) << body;
+  response.stop();
+}
+
+// A request from an injector downstream, a proxy in front that injects unless the response says it
+// is injected already: only the first part can say so, so the snippet never goes into a later one.
+// The first part is still injected, the injection header protecting it.
+TEST(InjectionPipeline, DownstreamInjectorKeepsLaterPartsUninjected) {
+  for (const bool head_in_first_part : {true, false}) {
+    SCOPED_TRACE(head_in_first_part ? "head in the first part" : "head in a later part");
+    PartedResponse response;
+    response.content_length = "100000";
+    response.start();
+
+    MockHttpRequest httpReq;
+    MockEventProvider eventProvider;
+    EXPECT_CALL(response.httpCtx, GetRequest()).WillRepeatedly(Return(&httpReq));
+    EXPECT_CALL(httpReq, GetHeader(Matcher<PCSTR>(StrEq(k_injection_pending_header)), _))
+        .WillRepeatedly(
+            DoAll(Invoke([](_In_ PCSTR, _Out_ USHORT* len) { *len = 1; }), Return("1")));
+    EXPECT_CALL(httpReq, SetHeader(Matcher<PCSTR>(StrEq(k_injection_pending_header)), _, _, _))
+        .WillRepeatedly(Return(S_OK));
+    EXPECT_CALL(response.httpCtx, GetApplication()).WillRepeatedly(Return(&response.app));
+    EXPECT_CALL(response.httpCtx, GetMetadata()).WillRepeatedly(Return(&response.metadata));
+    EXPECT_EQ(response.httpMod->OnBeginRequest(&response.httpCtx, &eventProvider),
+              RQ_NOTIFICATION_CONTINUE);
+
+    EXPECT_CALL(response.httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+        .Times(head_in_first_part ? 1 : 0)
+        .WillRepeatedly(Return(S_OK));
+
+    const std::string filler(2000, 'c');
+    const Part first{head_in_first_part ? "<html><head>" + filler : "<html><!-- " + filler + " -->",
+                     TRUE, true};
+    const Part last{"<head><title>t</title></head></html>", FALSE, false};
+
+    const std::string first_body = response.send(first);
+    EXPECT_EQ(first_body.find("DD_RUM") != std::string::npos, head_in_first_part) << first_body;
+    EXPECT_EQ(response.extended_to,
+              head_in_first_part ? std::to_string(100000 + response.snippet_length()) : "");
+    EXPECT_EQ(response.send(last), last.body);
+    response.stop();
+  }
+}
+
 // The single send of a whole response is still flushed and finished, with the snippet in, and the
 // length it announces grown by exactly the snippet.
 TEST(InjectionPipeline, ResponseSentAtOnceIsFlushed) {

@@ -15,13 +15,6 @@
     <!-- NOTE(@dmehala): arbitrarily set an upper bound because it is mandatory. -->
     <attribute name="version" type="int" defaultValue="6" validationType="integerRange" validationParameter="5,1000"/>
 
-    <!-- Where the snippet is injected. Values mirror the InjectionStrategy enumerators. -->
-    <attribute name="injectionStrategy" type="enum" defaultValue="headCloseTag">
-      <enum name="headCloseTag"                    value="0" />
-      <enum name="headOpenTag"                     value="1" />
-      <enum name="headOpenTagWithCloseTagFallback" value="2" />
-    </attribute>
-
     <collection addElement="option" removeElement="remove" clearElement="clear" allowDuplicates="false">
       <attribute name="name" type="string" isUniqueKey="true" required="true" validationType="nonEmptyString" />
       <attribute name="value" type="string" required="true" validationType="nonEmptyString" />

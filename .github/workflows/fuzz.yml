@@ -1,0 +1,53 @@
+name: fuzz
+
+# A short nightly run of every fuzz target, seeded with the inputs fuzzing found before. A crash
+# uploads the input that reproduces it: add it to lib/inject-browser-sdk/tests/data/regression
+# once fixed.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - "lib/inject-browser-sdk/src/injector/**"
+      - "lib/inject-browser-sdk/src/injector.rs"
+      - "lib/inject-browser-sdk/tests/harness/**"
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    container:
+      image: rustlang/rust:nightly
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz-html-scanner
+          - chunking_invariance
+          - oracle_differential
+          - injector_c_api
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Fuzz
+        run: |
+          mkdir -p corpus artifacts
+          cargo fuzz run ${{ matrix.target }} corpus lib/inject-browser-sdk/tests/data/regression -- \
+            -dict=fuzz/dictionaries/html.dict -max_len=4096 -max_total_time=60 \
+            -artifact_prefix=artifacts/
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: artifacts/

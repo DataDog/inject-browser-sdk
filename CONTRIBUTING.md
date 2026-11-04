@@ -29,6 +29,33 @@ changes outside `installer/`, `cmd/` and `fuzz/` count towards an IIS release.
 Merging the release-please PR releases the IIS injector. See
 [injector_IIS/README.md](injector_IIS/README.md#releases).
 
+## Injector tests and fuzzing
+
+`cargo test` runs the injector's corpus tests (`lib/inject-browser-sdk/tests/injection.rs`) over
+generated documents: real-world shaped fixtures written as the output they must produce
+(`tests/harness/fixtures.rs`), random markup, and the inputs fuzzing found in
+`tests/data/regression`. Each runs as a single chunk and as random chunkings, and is checked
+against [lol_html](https://github.com/cloudflare/lol-html) as an oracle for where the snippet goes.
+A failure prints its `SEED`:
+
+```bash
+SEED=<seed> cargo test -p inject-browser-sdk --test injection   # replay a failing run
+CHUNK_SIZE=7 cargo test -p inject-browser-sdk --test injection  # fixed-size chunks instead
+```
+
+The fuzz targets (`fuzz/`) need a nightly toolchain and `cargo install cargo-fuzz`:
+
+```bash
+cd fuzz
+cargo +nightly fuzz run oracle_differential ../lib/inject-browser-sdk/tests/data/regression -- \
+  -dict=dictionaries/html.dict -max_len=4096
+```
+
+`chunking_invariance`, `injector_c_api` and `fuzz-html-scanner` run the same way, and
+`.github/workflows/fuzz.yml` runs each for a minute nightly. Add what a fuzzer finds to
+`tests/data/regression`, as found. A deliberate difference from lol_html belongs in
+`tests/harness/oracle.rs` as an `Exception`.
+
 ## Linting
 
 Requires Docker. Install pre-commit hooks with [uv](https://docs.astral.sh/uv/):

@@ -1,0 +1,3 @@
+Inputs the fuzz targets (`fuzz/`) once found handled wrongly, kept byte for byte as found, one
+`.html` file each. `tests/injection.rs` runs every one through all the corpus checks: single and
+random chunkingAs, every split into two chunks, and the lol_html oracle.

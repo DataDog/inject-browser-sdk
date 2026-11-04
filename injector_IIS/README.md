@@ -8,7 +8,17 @@ intercepts responses and injects the Datadog RUM SDK in the response body for re
 * Response code is `2xx` `4xx` or `5xx`
 * HTTP Content-Type header begins with `text/html`
 * HTTP `x-datadog-rum-injected` header is not present
-* Body contains `<head></head>` tag
+* Body contains a `<head>` tag
+
+The snippet only ever goes within `<head>`:
+* if the `<head>` tag is within the first 1 KiB of the body, right after the last `<meta>` tag of the
+  head within that 1 KiB, or right after `<head>` if there is none;
+* otherwise, if that 1 KiB looks like an HTML document (it holds an `<html>` or a `<meta>` tag),
+  right after the first `<head>` tag that follows;
+* otherwise not at all: the response is served untouched.
+
+Only that first 1 KiB is held back; the rest of the response streams through uncopied. Earlier
+releases injected right before `</head>`.
 
 ## Build/installation steps
 1. Configure the project

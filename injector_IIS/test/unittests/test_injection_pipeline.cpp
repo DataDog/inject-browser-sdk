@@ -489,6 +489,10 @@ static void setupHtmlResponseMetadata(MockHttpContext& ctx, MockHttpResponse& re
       .WillRepeatedly(DoAll(Invoke([](_In_ PCSTR, _Out_ USHORT* len) { *len = 0; }), Return("")));
   EXPECT_CALL(resp, GetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _))
       .WillRepeatedly(DoAll(Invoke([](_In_ PCSTR, _Out_ USHORT* len) { *len = 0; }), Return("")));
+  // No announced length, unless a test announces one: its expectation, set later, wins.
+  EXPECT_CALL(resp, GetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _))
+      .WillRepeatedly(DoAll(Invoke([](_In_ PCSTR, _Out_ USHORT* len) { *len = 0; }),
+                            Return(static_cast<PCSTR>(nullptr))));
 
   EXPECT_CALL(resp, GetStatus(_, _, _, _, _, _, _, _, _))
       .WillRepeatedly(DoAll(Invoke([](_Out_ USHORT* pCode, _Out_ USHORT*, PCSTR*, _Out_ USHORT*,

@@ -10,6 +10,49 @@ intercepts responses and injects the Datadog RUM SDK in the response body for re
 * HTTP `x-datadog-rum-injected` header is not present
 * Body contains `<head></head>` tag
 
+## Configuration sources
+
+RUM settings come from two places, merged per key:
+
+1. **Stable configuration** — `application_monitoring.yaml`, read once when the
+   module loads. Both the local
+   (`C:\ProgramData\Datadog\application_monitoring.yaml`) and the fleet-managed
+   (`C:\ProgramData\Datadog\managed\datadog-agent\stable\application_monitoring.yaml`)
+   file are read, with the fleet-managed one taking precedence. Entries are
+   matched against `language: browser-sdk` and use the `DD_RUM_*` keys the agent
+   installer writes (`DD_RUM_APPLICATION_ID`, `DD_RUM_CLIENT_TOKEN`,
+   `DD_RUM_SITE`, `DD_RUM_ENABLED`, `DD_RUM_MAJOR_VERSION`, ...). This is what
+   lets a host be configured centrally, with no per-site step.
+2. **The per-site IIS section** — `system.webServer/datadogRum`, managed with
+   `New-Datadog-RUMConfiguration`. Every option set here overrides the
+   corresponding stable-configuration value for that site; options it doesn't
+   mention are inherited.
+
+A few things about the interaction are worth knowing:
+
+* `enabled="false"` on the IIS section is the per-site escape hatch and outranks
+  stable configuration. Conversely `DD_RUM_ENABLED: "false"` in
+  `application_monitoring.yaml` switches injection off for every site that hasn't
+  opted in through IIS.
+* The Browser SDK major version is 6 unless something says otherwise. The agent
+  installer does not write `DD_RUM_MAJOR_VERSION`, so set it in
+  `application_monitoring.yaml` (or `version` on the IIS section) to pin a
+  different one.
+* **Changes to `application_monitoring.yaml` need an application-pool recycle**
+  (or `iisreset`). The file lives outside IIS's own configuration tree, so IIS
+  never notifies the module that it changed. Edits to the IIS section are picked
+  up live, as before.
+* **The file must be readable by the IIS worker-process identity.** IIS worker
+  processes run as `ApplicationPoolIdentity` (or a custom pool identity), not as
+  `ddagentuser`, and `C:\ProgramData\Datadog` is not readable by them by
+  default. If the module logs `failed to read local config file: Access is
+  denied`, grant read access — e.g.
+  `icacls "%ProgramData%\Datadog\application_monitoring.yaml" /grant "*S-1-5-11:(RX)"`
+  for all authenticated users, or the specific pool identity.
+
+A broken or unreadable `application_monitoring.yaml` is logged and then ignored:
+sites configured through IIS keep injecting.
+
 ## Build/installation steps
 1. Configure the project
 ```sh

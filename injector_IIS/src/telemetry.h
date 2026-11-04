@@ -34,4 +34,24 @@ const extern datadog::telemetry::Counter injection_succeed;
 const extern datadog::telemetry::Counter injection_failed;
 const extern datadog::telemetry::Counter config_invalid;
 
+// Records that `datadog::telemetry::init` has completed. Call exactly once, and
+// only after it returns.
+void mark_ready();
+
+// Increments `counter` if and only if the telemetry subsystem was initialised.
+//
+// Never call datadog::telemetry::counter::increment directly. dd-trace-cpp's
+// telemetry instance is a function-local static built from an
+// `Optional<Ctor_param>` that it dereferences unconditionally:
+//
+//     static TelemetryProxy telemetry(make_telemetry(*init));
+//
+// The static is constructed on the *first* call, so if that first call comes
+// from increment() rather than from init(), it dereferences an empty Optional
+// and takes down the worker process with an access violation. Two ways to reach
+// that: emitting during GlobalModule's constructor before init runs, or emitting
+// from a request after init was skipped because agent-config finalization
+// failed.
+void increment(const datadog::telemetry::Counter& counter, const std::vector<std::string>& tags);
+
 }  // namespace datadog::rum::telemetry

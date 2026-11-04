@@ -22,6 +22,9 @@ struct ModuleContext final : public IHttpStoredContext {
   Snippet* snippet = nullptr;
   Logger* logger = nullptr;
   IHttpServer* server = nullptr;
+  // Borrowed from GlobalModule, which outlives every context and never replaces
+  // the handle. Null when no usable stable configuration was read.
+  const StableConfig* stable_config = nullptr;
   std::string application_id_tag;
   std::string remote_config_tag;
   // Where the snippet is injected, resolved from the `datadogRum` section and applied when the

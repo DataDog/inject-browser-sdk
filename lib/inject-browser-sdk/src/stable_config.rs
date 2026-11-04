@@ -7,9 +7,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-#[cfg(test)]
-use libdd_library_config::ConfigRead;
-use libdd_library_config::LibraryConfig;
+use libdd_library_config::{io, ConfigRead, LibraryConfig, MAX_CONFIG_FILE_SIZE};
 
 use crate::configuration::{parse_bool, Configuration, ConfigurationOverlay};
 use crate::error::Error;
@@ -50,23 +48,22 @@ impl StableConfig {
         overlay: Option<&ConfigurationOverlay>,
         enabled: Option<bool>,
     ) -> StableConfigSnippet {
-        let application_id = overlay
-            .and_then(|value| return value.rum.application_id.clone())
-            .or_else(|| {
-                return self.lookup("DD_RUM_APPLICATION_ID").map(String::from);
-            });
-        let remote_configuration_id = overlay
-            .and_then(|value| return value.rum.remote_configuration_id.clone())
-            .or_else(|| {
-                return self
-                    .lookup("DD_RUM_REMOTE_CONFIGURATION_ID")
-                    .map(String::from);
-            });
+        let resolve_id = |key, value: Option<&String>| {
+            return value
+                .cloned()
+                .or_else(|| return self.lookup(key).map(String::from));
+        };
         return StableConfigSnippet {
             bytes: Vec::new(),
             enabled,
-            application_id,
-            remote_configuration_id,
+            application_id: resolve_id(
+                "DD_RUM_APPLICATION_ID",
+                overlay.and_then(|value| return value.rum.application_id.as_ref()),
+            ),
+            remote_configuration_id: resolve_id(
+                "DD_RUM_REMOTE_CONFIGURATION_ID",
+                overlay.and_then(|value| return value.rum.remote_configuration_id.as_ref()),
+            ),
         };
     }
 
@@ -80,6 +77,10 @@ impl StableConfig {
 
     /// Build a snippet from this configuration, with an optional overlay merged
     /// on top of it via [`Configuration::overlay`]. Does no I/O.
+    ///
+    /// Takes `&self` and mutates nothing, so a single handle may be shared by
+    /// concurrent callers — the IIS module relies on this to build per-site
+    /// snippets from worker threads off one process-wide read.
     ///
     /// Returns [`Error::StableConfigAbsent`] when there is nothing to build
     /// from: no entries matched and no overlay was supplied.
@@ -109,7 +110,15 @@ impl StableConfig {
             return Ok(self.disabled_snippet(overlay.as_ref(), enabled));
         }
 
-        let mut config = Configuration::from_lookup(|key| return self.lookup(key))?;
+        let mut config = Configuration::from_lookup(|key| {
+            if overlay
+                .as_ref()
+                .is_some_and(|value| return value.overrides_stable_key(key))
+            {
+                return None;
+            }
+            return self.lookup(key);
+        })?;
 
         if let Some(o) = overlay {
             config.overlay(o);
@@ -156,6 +165,43 @@ pub fn read_stable_config(language: &str, debug_logs: bool) -> Result<StableConf
     return stable_config_from_read(read);
 }
 
+/// Parse local and fleet-managed YAML contents without reading files.
+/// `None` represents an absent source; an empty slice represents an empty file.
+pub fn read_stable_config_from_contents(
+    language: &str,
+    debug_logs: bool,
+    local: Option<&[u8]>,
+    fleet: Option<&[u8]>,
+) -> Result<StableConfig, Error> {
+    struct ContentsReader<'a> {
+        local: Option<&'a [u8]>,
+        fleet: Option<&'a [u8]>,
+    }
+
+    impl ConfigRead for ContentsReader<'_> {
+        fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+            let contents = match path {
+                crate::platform::LOCAL_STABLE_CONFIGURATION_PATH => self.local,
+                crate::platform::FLEET_STABLE_CONFIGURATION_PATH => self.fleet,
+                _ => None,
+            }
+            .ok_or_else(|| return io::Error::from(io::ErrorKind::NotFound))?;
+            if contents.len() > MAX_CONFIG_FILE_SIZE {
+                return Err(io::ErrorKind::FileTooLarge.into());
+            }
+            return Ok(contents.to_vec());
+        }
+    }
+
+    let read = crate::platform::read_stable_configs_with_reader(
+        &ContentsReader { local, fleet },
+        language,
+        debug_logs,
+    )
+    .map_err(Error::StableConfig)?;
+    return stable_config_from_read(read);
+}
+
 /// Build a snippet from Datadog stable configuration files, with an optional overlay.
 ///
 /// Convenience wrapper over [`read_stable_config`] followed by
@@ -189,6 +235,21 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use serde_json::Value;
+
+    #[test]
+    fn oversized_contents_reject_partial_configuration() {
+        let oversized = alloc::vec![0; MAX_CONFIG_FILE_SIZE + 1];
+        let valid = b"apm_configuration_default:\n  DD_RUM_ENABLED: \"true\"\n";
+        for (local, fleet) in [
+            (oversized.as_slice(), valid.as_slice()),
+            (valid.as_slice(), oversized.as_slice()),
+        ] {
+            assert!(matches!(
+                read_stable_config_from_contents("browser-sdk", false, Some(local), Some(fleet)),
+                Err(Error::StableConfig(_))
+            ));
+        }
+    }
 
     /// Extract the JSON object passed to `DD_RUM.init(...)`, so tests assert on fields
     /// rather than on raw bytes that match by accident within the CDN URL ("us1" also
@@ -251,6 +312,77 @@ mod tests {
         assert_eq!(init["clientToken"], Value::from("tok-populated"));
     }
 
+    #[test]
+    fn overlay_replaces_invalid_stable_values_before_parsing() {
+        for (key, json) in [
+            ("DD_RUM_MAJOR_VERSION", r#"{"majorVersion":6}"#),
+            (
+                "DD_RUM_TRACK_USER_INTERACTIONS",
+                r#"{"rum":{"trackUserInteractions":false}}"#,
+            ),
+            (
+                "DD_RUM_TRACK_RESOURCES",
+                r#"{"rum":{"trackResources":false}}"#,
+            ),
+            (
+                "DD_RUM_TRACK_LONG_TASKS",
+                r#"{"rum":{"trackLongTasks":false}}"#,
+            ),
+            (
+                "DD_RUM_SESSION_SAMPLE_RATE",
+                r#"{"rum":{"sessionSampleRate":0.0}}"#,
+            ),
+            (
+                "DD_RUM_SESSION_REPLAY_SAMPLE_RATE",
+                r#"{"rum":{"sessionReplaySampleRate":0.0}}"#,
+            ),
+            ("DD_RUM_SITE", r#"{"rum":{"site":"datadoghq.eu"}}"#),
+        ] {
+            let contents = alloc::format!(
+                "apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-stable\n  DD_RUM_CLIENT_TOKEN: tok-stable\n  DD_RUM_SERVICE: svc-stable\n  {key}: invalid\n"
+            );
+            let reader = ContentReader(Some(contents.as_bytes()));
+            assert!(
+                snippet_from_stable_config_with_reader(&reader, "browser-sdk", false, None)
+                    .is_err()
+            );
+            assert!(
+                snippet_from_stable_config_with_reader(
+                    &reader,
+                    "browser-sdk",
+                    false,
+                    Some(ConfigurationOverlay::default())
+                )
+                .is_err(),
+                "an omitted override must not hide {key}"
+            );
+
+            let overlay =
+                crate::configuration::parse_configuration_overlay(json.as_bytes()).unwrap();
+            let snippet = snippet_from_stable_config_with_reader(
+                &reader,
+                "browser-sdk",
+                false,
+                Some(overlay),
+            )
+            .unwrap_or_else(|error| panic!("{key} should be overridden: {error:?}"));
+            let init = extract_init_json(&snippet.bytes);
+            assert_eq!(init["applicationId"], Value::from("app-stable"));
+            assert_eq!(init["clientToken"], Value::from("tok-stable"));
+            assert_eq!(init["service"], Value::from("svc-stable"));
+            let expected: Value = serde_json::from_str(json).unwrap();
+            if let Some(rum) = expected.get("rum") {
+                for (name, value) in rum.as_object().unwrap() {
+                    assert_eq!(&init[name], value, "{key}");
+                }
+            } else {
+                assert!(core::str::from_utf8(&snippet.bytes)
+                    .unwrap()
+                    .contains("/v6/"));
+            }
+        }
+    }
+
     /// Reader whose files always exceed the configurator's size gate, which reclassifies
     /// the read as `Ok(empty)` with a `TooLarge` diagnostic in the logs. On Windows stderr
     /// is a no-op, so those diagnostics have to reach the error message.
@@ -279,10 +411,10 @@ mod tests {
   DD_SERVICE: unrelated-service
 "#;
 
-    struct ContentReader(Option<&'static [u8]>);
+    struct ContentReader<'a>(Option<&'a [u8]>);
 
-    impl ConfigRead for ContentReader {
-        fn read(&self, path: &str) -> libdd_library_config::io::Result<alloc::vec::Vec<u8>> {
+    impl ConfigRead for ContentReader<'_> {
+        fn read(&self, path: &str) -> io::Result<Vec<u8>> {
             if path == libdd_library_config::Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
                 if let Some(contents) = self.0 {
                     return Ok(contents.into());
@@ -503,6 +635,146 @@ mod tests {
             msg.to_lowercase().contains("too large") || msg.contains("TooLarge"),
             "expected TooLarge diagnostic to be folded into error, got: {msg}"
         );
+    }
+
+    /// Exercises `read_stable_config_from_paths` against real files through the
+    /// real `PlatformConfigRead`, which the reader-injecting tests above bypass.
+    mod from_paths {
+        use super::*;
+        use pretty_assertions::assert_eq;
+        use std::fs;
+        use std::path::PathBuf;
+
+        struct Files(PathBuf);
+
+        impl Files {
+            fn new(name: &str, local: Option<&[u8]>, fleet: Option<&[u8]>) -> Self {
+                let dir = std::env::temp_dir().join(alloc::format!(
+                    "inject-browser-sdk-stable-config-{}-{name}",
+                    std::process::id()
+                ));
+                fs::create_dir_all(&dir).expect("temp dir");
+                let files = Self(dir);
+                for (name, contents) in [("local.yaml", local), ("fleet.yaml", fleet)] {
+                    if let Some(contents) = contents {
+                        fs::write(files.0.join(name), contents).expect("write config");
+                    }
+                }
+                return files;
+            }
+
+            fn read(&self) -> Result<StableConfig, Error> {
+                let local = self.0.join("local.yaml");
+                let fleet = self.0.join("fleet.yaml");
+                return stable_config_from_read(
+                    crate::platform::read_stable_configs_with_paths(
+                        &crate::platform::PlatformConfigRead,
+                        "browser-sdk",
+                        false,
+                        local.to_str().expect("UTF-8 temp path"),
+                        fleet.to_str().expect("UTF-8 temp path"),
+                    )
+                    .map_err(Error::StableConfig)?,
+                );
+            }
+        }
+
+        impl Drop for Files {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        #[test]
+        fn reads_a_real_local_file_written_with_a_utf8_bom() {
+            // The shape and encoding the IIS integration environment writes:
+            // PowerShell 5.1's `Set-Content -Encoding UTF8` always emits a BOM.
+            // Read through the real PlatformConfigRead so this covers the file
+            // path the module actually takes, not just an injected reader.
+            let mut bytes = alloc::vec![0xEFu8, 0xBB, 0xBF];
+            bytes.extend_from_slice(
+                br#"rules:
+- selectors:
+  - origin: language
+    matches: ["browser-sdk"]
+    operator: equals
+  configuration:
+    DD_RUM_APPLICATION_ID: app-bom
+    DD_RUM_CLIENT_TOKEN: tok-bom
+    DD_RUM_MAJOR_VERSION: 6
+"#,
+            );
+            let files = Files::new("bom", Some(&bytes), None);
+            let config = files
+                .read()
+                .expect("a BOM must not make a valid file unreadable");
+
+            assert!(!config.is_empty(), "the BOM must not hide the entries");
+            let snippet = config.build_snippet(None).expect("snippet should build");
+            let init = extract_init_json(&snippet.bytes);
+            assert_eq!(init["applicationId"], Value::from("app-bom"));
+            assert!(
+                core::str::from_utf8(&snippet.bytes)
+                    .expect("snippet is UTF-8")
+                    .contains("/v6/"),
+                "DD_RUM_MAJOR_VERSION behind the BOM must reach the CDN URL"
+            );
+        }
+
+        #[test]
+        fn reads_a_real_local_file() {
+            let files = Files::new("local", Some(
+                b"apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-file\n  DD_RUM_CLIENT_TOKEN: tok-file\n",
+            ), None);
+            let config = files.read().expect("a readable local file must not error");
+
+            assert!(!config.is_empty());
+            let snippet = config.build_snippet(None).expect("snippet should build");
+            let init = extract_init_json(&snippet.bytes);
+            assert_eq!(init["applicationId"], Value::from("app-file"));
+            assert_eq!(init["clientToken"], Value::from("tok-file"));
+        }
+
+        #[test]
+        fn fleet_file_overrides_the_local_one() {
+            let files = Files::new("fleet", Some(
+                b"apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-local\n  DD_RUM_CLIENT_TOKEN: tok-local\n",
+            ), Some(
+                b"apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-fleet\n  DD_RUM_CLIENT_TOKEN: tok-fleet\n",
+            ));
+            let config = files.read().expect("both files readable");
+
+            let snippet = config.build_snippet(None).expect("snippet should build");
+            let init = extract_init_json(&snippet.bytes);
+            assert_eq!(init["applicationId"], Value::from("app-fleet"));
+        }
+
+        #[test]
+        fn absent_paths_yield_an_empty_config_not_an_error() {
+            let files = Files::new("absent", None, None);
+            let config = files
+                .read()
+                .expect("missing files are ordinary absence, not a failure");
+
+            assert!(config.is_empty());
+            assert_eq!(
+                config.build_snippet(None).err().map(|e| return e.code()),
+                Some(10),
+                "nothing configured anywhere must stay the quiet code"
+            );
+        }
+
+        #[test]
+        fn broken_yaml_surfaces_as_a_read_error() {
+            let files = Files::new("broken", Some(b"::: not : yaml :::"), None);
+            let result = files.read();
+
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("a broken file must not be mistaken for absence"),
+            };
+            assert_eq!(error.code(), 6);
+        }
     }
 
     #[test]

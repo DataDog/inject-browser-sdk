@@ -183,6 +183,20 @@ injector_IIS_integration_test:
     - .\injector_IIS\scripts\setup-integration-test-env.ps1 -DllPath ".\${ARTIFACTS_DIR}\injector_IIS.dll" -RepoRoot "."
     - .\injector_IIS\scripts\run-integration-tests.ps1
 
+# Same environment as injector_IIS_integration_test plus a site with no IIS RUM
+# section. The runner installs a temporary local stable-config fixture and
+# restores any original file afterward. Both runs require no fleet-managed file.
+injector_IIS_integration_test_stable_config:
+  stage: test
+  tags: ["windows-v2:2022"]
+  extends: .IIS_build_when
+  needs: ["injector_IIS_build"]
+  variables:
+    DD_RUM_STABLE_CONFIG_TEST: "1"
+  script:
+    - .\injector_IIS\scripts\setup-integration-test-env.ps1 -DllPath ".\${ARTIFACTS_DIR}\injector_IIS.dll" -RepoRoot "." -StableConfig
+    - .\injector_IIS\scripts\run-integration-tests.ps1 -StableConfig
+
 injector_IIS_integration_test_msi:
   stage: test
   tags: ["windows-v2:2022"]

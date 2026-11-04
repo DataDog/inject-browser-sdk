@@ -16,6 +16,7 @@
 #include <datadog/telemetry/configuration.h>
 #include <datadog/telemetry/telemetry.h>
 #include <map>
+#include <memory>
 
 namespace datadog::rum {
 
@@ -24,6 +25,10 @@ class GlobalModule final : public CGlobalModule {
   IHttpServer* server_;
   std::shared_ptr<Logger> logger_;
   std::map<std::wstring, ModuleContext*> configurations_;
+  // Read before notifications are registered and never replaced: contexts
+  // borrow this immutable handle concurrently. YAML changes require an app-pool
+  // recycle because they do not trigger OnGlobalConfigurationChange.
+  std::unique_ptr<::StableConfig, StableConfigDeleter> stable_config_;
 
  public:
   GlobalModule(IHttpServer* server, DWORD server_version, std::shared_ptr<Logger> logger);
@@ -44,6 +49,10 @@ class GlobalModule final : public CGlobalModule {
 
  private:
   void update_server_log_level();
+  // Brings up dd-trace-cpp telemetry and arms telemetry::increment. Every
+  // failure path leaves emission disabled rather than half-initialised.
+  void init_telemetry(DWORD server_version);
+  void load_stable_config();
 };
 
 }  // namespace datadog::rum

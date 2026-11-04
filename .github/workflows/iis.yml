@@ -57,6 +57,8 @@ jobs:
           path: injector_IIS/build
       - name: Run Unit Tests
         run: .\injector_IIS\build\test\unittests\iis_injector_tests.exe
+      - name: Check stable-config test cleanup
+        run: .\injector_IIS\test\test_stable_configuration.ps1
       - name: Install Dependencies
         run: |
           choco install -y wixtoolset

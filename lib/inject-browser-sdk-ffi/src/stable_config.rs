@@ -11,11 +11,12 @@ use core::ffi::{c_char, CStr};
 use core::ptr::null;
 
 use inject_browser_sdk::{
-    error::Error, parse_configuration_overlay, read_stable_config, snippet_from_stable_config,
-    ConfigurationOverlay, StableConfig as CoreStableConfig,
+    error::Error, parse_configuration_overlay, read_stable_config,
+    read_stable_config_from_contents, snippet_from_stable_config, ConfigurationOverlay,
+    StableConfig as CoreStableConfig,
 };
 
-use crate::snippet::{Snippet, SnippetInternal};
+use crate::snippet::{error_message, Snippet, SnippetInternal};
 
 /// UTF-8 validates a borrowed `CStr`. The returned `&str` is tied to the
 /// `CStr`'s lifetime so callers cannot accidentally extend it.
@@ -23,6 +24,39 @@ fn cstr_to_str<'a>(cstr: &'a CStr, field: &str) -> Result<&'a str, Error> {
     return cstr
         .to_str()
         .map_err(|_| return Error::FfiInvalidUtf8(field.to_string()));
+}
+
+/// Borrows optional UTF-8 YAML contents; NULL represents an absent source.
+///
+/// # Safety
+///
+/// If `ptr` is non-null it must point to a valid NUL-terminated C string that
+/// outlives the returned slice.
+unsafe fn optional_contents<'a>(
+    ptr: *const c_char,
+    field: &str,
+) -> Result<Option<&'a [u8]>, Error> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    return cstr_to_str(CStr::from_ptr(ptr), field).map(|value| return Some(value.as_bytes()));
+}
+
+unsafe fn with_language<T>(
+    language: *const c_char,
+    read: impl FnOnce(&str) -> Result<T, Error>,
+) -> Result<T, Error> {
+    if language.is_null() {
+        return Err(Error::FfiNullPointer(String::from("language")));
+    }
+    return cstr_to_str(CStr::from_ptr(language), "language").and_then(read);
+}
+
+unsafe fn parse_overlay(json: *const c_char) -> Result<Option<ConfigurationOverlay>, Error> {
+    if json.is_null() {
+        return Ok(None);
+    }
+    return parse_configuration_overlay(CStr::from_ptr(json).to_bytes()).map(Some);
 }
 
 /// Create a snippet from Datadog stable configuration files, with an optional JSON overlay.
@@ -105,27 +139,9 @@ pub unsafe extern "C" fn snippet_create_from_stable_config(
     debug_logs: bool,
     json_overlay: *const c_char,
 ) -> *mut Snippet {
-    if language.is_null() {
-        return SnippetInternal::new(Err(Error::FfiNullPointer(String::from("language"))))
-            .into_public_ptr();
-    }
-
-    let language_cstr = CStr::from_ptr(language);
-    let language_str = match cstr_to_str(language_cstr, "language") {
-        Ok(s) => s,
-        Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
-    };
-
-    let overlay = if json_overlay.is_null() {
-        None
-    } else {
-        match parse_configuration_overlay(CStr::from_ptr(json_overlay).to_bytes()) {
-            Ok(o) => Some(o),
-            Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
-        }
-    };
-
-    let result = snippet_from_stable_config(language_str, debug_logs, overlay);
+    let result = with_language(language, |language| {
+        return snippet_from_stable_config(language, debug_logs, parse_overlay(json_overlay)?);
+    });
     return SnippetInternal::new_from_stable_config(result).into_public_ptr();
 }
 
@@ -154,34 +170,17 @@ struct StableConfigInternal {
 
 impl StableConfigInternal {
     fn new(result: Result<CoreStableConfig, Error>) -> Self {
-        match result {
-            Ok(config) => {
-                return Self {
-                    error_code: 0,
-                    error_message: null(),
-                    is_empty: config.is_empty(),
-                    inner: Ok(config),
-                    _error_message_storage: None,
-                }
-            }
-            Err(error) => {
-                let error_string = error.to_string().replace('\0', "\\0");
-                let error_message = CString::new(error_string).unwrap_or_else(|_| {
-                    return CString::new(
-                        "internal error: error message contained unrepresentable bytes",
-                    )
-                    .expect("static message has no NUL bytes");
-                });
-                let error_code = error.code();
-                return Self {
-                    error_code,
-                    error_message: error_message.as_ptr(),
-                    is_empty: true,
-                    inner: Err(error),
-                    _error_message_storage: Some(error_message),
-                };
-            }
-        }
+        let error = result.as_ref().err();
+        let message = error.map(error_message);
+        return Self {
+            error_code: error.map_or(0, Error::code),
+            error_message: message
+                .as_ref()
+                .map_or(null(), |message| return message.as_ptr()),
+            is_empty: result.as_ref().map_or(true, CoreStableConfig::is_empty),
+            inner: result,
+            _error_message_storage: message,
+        };
     }
 
     fn into_public_ptr(self) -> *mut StableConfig {
@@ -216,19 +215,38 @@ pub unsafe extern "C" fn stable_config_read(
     language: *const c_char,
     debug_logs: bool,
 ) -> *mut StableConfig {
-    if language.is_null() {
-        return StableConfigInternal::new(Err(Error::FfiNullPointer(String::from("language"))))
-            .into_public_ptr();
-    }
+    let result = with_language(language, |language| {
+        return read_stable_config(language, debug_logs);
+    });
+    return StableConfigInternal::new(result).into_public_ptr();
+}
 
-    let language_cstr = CStr::from_ptr(language);
-    let language_str = match cstr_to_str(language_cstr, "language") {
-        Ok(s) => s,
-        Err(e) => return StableConfigInternal::new(Err(e)).into_public_ptr(),
-    };
-
-    return StableConfigInternal::new(read_stable_config(language_str, debug_logs))
-        .into_public_ptr();
+/// Parse local and fleet-managed UTF-8 YAML contents without reading files.
+/// NULL represents an absent source; an empty string represents an empty file.
+/// The contents are consumed before returning and need not outlive the handle.
+///
+/// # Memory ownership
+///
+/// All input pointers are owned by the caller. The returned `StableConfig` must
+/// be freed with [`stable_config_cleanup`].
+///
+/// # Safety
+///
+/// Each non-NULL pointer must point to a valid NUL-terminated C string. A NULL
+/// `language` is tolerated and returns error code 7.
+#[no_mangle]
+pub unsafe extern "C" fn stable_config_read_from_contents(
+    language: *const c_char,
+    debug_logs: bool,
+    local_yaml: *const c_char,
+    fleet_yaml: *const c_char,
+) -> *mut StableConfig {
+    let result = with_language(language, |language| {
+        let local = optional_contents(local_yaml, "local_yaml")?;
+        let fleet = optional_contents(fleet_yaml, "fleet_yaml")?;
+        return read_stable_config_from_contents(language, debug_logs, local, fleet);
+    });
+    return StableConfigInternal::new(result).into_public_ptr();
 }
 
 /// Build a snippet from an already-read [`StableConfig`]. Does no file I/O.
@@ -240,8 +258,8 @@ pub unsafe extern "C" fn stable_config_read(
 ///
 /// # Safety
 ///
-/// - `config` must be a non-NULL pointer returned by [`stable_config_read`] and
-///   not yet passed to [`stable_config_cleanup`].
+/// - `config` must be a non-NULL handle returned by [`stable_config_read`] or
+///   [`stable_config_read_from_contents`], not yet passed to [`stable_config_cleanup`].
 /// - If `json_overlay` is non-null, it must point to a valid NUL-terminated C
 ///   string.
 #[no_mangle]
@@ -254,30 +272,22 @@ pub unsafe extern "C" fn stable_config_snippet_create(
             .into_public_ptr();
     }
 
-    let overlay: Option<ConfigurationOverlay> = if json_overlay.is_null() {
-        None
-    } else {
-        match parse_configuration_overlay(CStr::from_ptr(json_overlay).to_bytes()) {
-            Ok(o) => Some(o),
-            Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
-        }
-    };
-
     let internal = StableConfigInternal::borrow_public_ptr(config);
-    let result = match &internal.inner {
-        Ok(stable_config) => stable_config.build_snippet(overlay),
-        Err(error) => Err(error.clone()),
-    };
+    let result = parse_overlay(json_overlay).and_then(|overlay| {
+        return match &internal.inner {
+            Ok(stable_config) => stable_config.build_snippet(overlay),
+            Err(error) => Err(error.clone()),
+        };
+    });
     return SnippetInternal::new_from_stable_config(result).into_public_ptr();
 }
 
-/// Free a [`StableConfig`] created by [`stable_config_read`]. Existing snippets
-/// remain valid.
+/// Free a [`StableConfig`] handle. Existing snippets remain valid.
 ///
 /// # Safety
 ///
-/// `config` must be a pointer returned by [`stable_config_read`] and not
-/// already freed. NULL is tolerated and does nothing.
+/// `config` must be returned by [`stable_config_read`] or [`stable_config_read_from_contents`]
+/// and not already freed. NULL is tolerated and does nothing.
 #[no_mangle]
 pub unsafe extern "C" fn stable_config_cleanup(config: *mut StableConfig) {
     if config.is_null() {
@@ -293,7 +303,7 @@ mod tests {
     use pretty_assertions::{assert_eq, assert_ne};
     use std::ptr::null_mut;
 
-    use crate::snippet::{snippet_cleanup, SnippetInternal};
+    use crate::snippet::SnippetInternal;
     use crate::test_utils::cstr_ptr;
 
     #[test]
@@ -301,7 +311,7 @@ mod tests {
         let snippet =
             unsafe { snippet_create_from_stable_config(cstr_ptr(b"browser-sdk\0"), false, null()) };
         assert_ne!(snippet, null_mut());
-        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
         assert_eq!(s.error_code, 10);
         let msg = unsafe { CStr::from_ptr(s.error_message) }
             .to_string_lossy()
@@ -310,25 +320,22 @@ mod tests {
             msg.contains("no stable-config entries found"),
             "unexpected message: {msg}"
         );
-        unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]
     fn null_language() {
         let snippet = unsafe { snippet_create_from_stable_config(null(), false, null()) };
         assert_ne!(snippet, null_mut());
-        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
         assert_eq!(s.error_code, 7);
-        unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]
     fn empty_language() {
         let snippet = unsafe { snippet_create_from_stable_config(cstr_ptr(b"\0"), false, null()) };
         assert_ne!(snippet, null_mut());
-        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
         assert_eq!(s.error_code, 10);
-        unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]
@@ -336,9 +343,8 @@ mod tests {
         let snippet =
             unsafe { snippet_create_from_stable_config(cstr_ptr(&[0xFFu8, 0u8]), false, null()) };
         assert_ne!(snippet, null_mut());
-        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
         assert_eq!(s.error_code, 8);
-        unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]
@@ -351,7 +357,7 @@ mod tests {
             )
         };
         assert_ne!(snippet, null_mut());
-        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
         assert_eq!(s.error_code, 0, "unexpected error: {:?}", unsafe {
             s.error_message.as_ref().map(|_| {
                 return CStr::from_ptr(s.error_message)
@@ -360,7 +366,6 @@ mod tests {
             })
         });
         assert!(s.length > 0);
-        unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]
@@ -373,35 +378,32 @@ mod tests {
             )
         };
         assert_ne!(snippet, null_mut());
-        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
         assert_eq!(s.error_code, 1);
-        unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]
     fn handle_read_on_a_host_without_stable_config_is_not_an_error() {
         let config = unsafe { stable_config_read(cstr_ptr(b"browser-sdk\0"), false) };
         assert_ne!(config, null_mut());
-        let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
+        let c = unsafe { StableConfigInternal::from_public_ptr(config) };
         assert_eq!(c.error_code, 0, "absent files must not be a read error");
         assert!(c.is_empty);
-        unsafe { stable_config_cleanup(config) };
     }
 
     #[test]
     fn handle_null_language() {
         let config = unsafe { stable_config_read(null(), false) };
         assert_ne!(config, null_mut());
-        let c = unsafe { StableConfigInternal::borrow_public_ptr(config) };
+        let c = unsafe { StableConfigInternal::from_public_ptr(config) };
         assert_eq!(c.error_code, 7);
-        unsafe { stable_config_cleanup(config) };
     }
 
     #[test]
     fn failed_handle_preserves_error_when_building_a_snippet() {
         let config = unsafe { stable_config_read(null(), false) };
         let snippet = unsafe { stable_config_snippet_create(config, null()) };
-        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
 
         assert_eq!(s.error_code, 7);
         assert_eq!(
@@ -409,7 +411,6 @@ mod tests {
             "FFI error: language is NULL"
         );
 
-        unsafe { snippet_cleanup(snippet) };
         unsafe { stable_config_cleanup(config) };
     }
 
@@ -428,7 +429,7 @@ mod tests {
             ),
         ] {
             let snippet = unsafe { stable_config_snippet_create(config, cstr_ptr(&overlay)) };
-            let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+            let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
             assert_eq!(s.error_code, 0);
             assert!(s.length > 0);
             assert_ne!(s.application_id, null());
@@ -443,7 +444,6 @@ mod tests {
                 crate::snippet::RUM_ENABLED_UNSET,
                 "nothing set DD_RUM_ENABLED"
             );
-            unsafe { snippet_cleanup(snippet) };
         }
 
         unsafe { stable_config_cleanup(config) };
@@ -460,7 +460,7 @@ mod tests {
         };
         unsafe { stable_config_cleanup(config) };
 
-        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
         assert_eq!(s.error_code, 0);
         assert_eq!(
             unsafe { CStr::from_ptr(s.application_id) }
@@ -468,21 +468,144 @@ mod tests {
                 .unwrap(),
             "app-1"
         );
-        unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]
     fn handle_snippet_create_rejects_null_config() {
         let snippet = unsafe { stable_config_snippet_create(null(), null()) };
         assert_ne!(snippet, null_mut());
-        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
         assert_eq!(s.error_code, 7);
-        unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]
     fn cleanup_tolerates_null() {
         unsafe { stable_config_cleanup(null_mut()) };
+    }
+
+    mod from_contents {
+        use super::*;
+        use alloc::ffi::CString;
+        use pretty_assertions::assert_eq;
+
+        #[test]
+        fn parsed_handle_outlives_inputs_and_preserves_fleet_precedence() {
+            let config = {
+                let local = CString::new(
+                    "\u{feff}apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-local\n  DD_RUM_CLIENT_TOKEN: tok-local\n",
+                ).unwrap();
+                let fleet = CString::new(
+                    "apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-fleet\n",
+                )
+                .unwrap();
+                unsafe {
+                    stable_config_read_from_contents(
+                        cstr_ptr(b"browser-sdk\0"),
+                        false,
+                        local.as_ptr(),
+                        fleet.as_ptr(),
+                    )
+                }
+            };
+            let c = unsafe { StableConfigInternal::from_public_ptr(config) };
+            assert_eq!(c.error_code, 0);
+            assert!(!c.is_empty);
+            let snippet =
+                unsafe { stable_config_snippet_create(core::ptr::from_ref(&*c).cast(), null()) };
+            let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
+            assert_eq!(s.error_code, 0);
+            assert!(s.length > 0);
+            assert!(!s.application_id.is_null());
+            assert_eq!(
+                unsafe { CStr::from_ptr(s.application_id) }
+                    .to_str()
+                    .unwrap(),
+                "app-fleet"
+            );
+        }
+
+        #[test]
+        fn absent_and_empty_sources_remain_distinct() {
+            for (local, expected_error) in [(null(), 10), (cstr_ptr(b"\0"), 6)] {
+                let config = unsafe {
+                    stable_config_read_from_contents(
+                        cstr_ptr(b"browser-sdk\0"),
+                        false,
+                        local,
+                        null(),
+                    )
+                };
+                let c = unsafe { StableConfigInternal::from_public_ptr(config) };
+                assert_eq!(c.error_code, 0);
+                assert!(c.is_empty);
+                let snippet = unsafe {
+                    stable_config_snippet_create(core::ptr::from_ref(&*c).cast(), null())
+                };
+                let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
+                assert_eq!(s.error_code, expected_error);
+            }
+        }
+
+        #[test]
+        fn caller_supplied_filename_is_never_read() {
+            let path = std::env::temp_dir().join(std::format!(
+                "inject-browser-sdk-ffi-path-regression-{}.yaml",
+                std::process::id()
+            ));
+            std::fs::write(&path,
+                "apm_configuration_default:\n  DD_RUM_APPLICATION_ID: app-file\n  DD_RUM_CLIENT_TOKEN: tok-file\n"
+            ).unwrap();
+            let filename = CString::new(path.to_str().unwrap()).unwrap();
+            let config = unsafe {
+                stable_config_read_from_contents(
+                    cstr_ptr(b"browser-sdk\0"),
+                    false,
+                    filename.as_ptr(),
+                    null(),
+                )
+            };
+            let c = unsafe { StableConfigInternal::from_public_ptr(config) };
+            assert_eq!(
+                c.error_code, 6,
+                "the filename must be parsed as YAML, never opened"
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+
+        #[test]
+        fn broken_yaml_surfaces_error_code_6() {
+            let config = unsafe {
+                stable_config_read_from_contents(
+                    cstr_ptr(b"browser-sdk\0"),
+                    false,
+                    cstr_ptr(b"::: not : yaml :::\0"),
+                    null(),
+                )
+            };
+            let c = unsafe { StableConfigInternal::from_public_ptr(config) };
+            assert_eq!(c.error_code, 6);
+        }
+
+        #[test]
+        fn null_language_is_reported() {
+            let config = unsafe { stable_config_read_from_contents(null(), false, null(), null()) };
+            let c = unsafe { StableConfigInternal::from_public_ptr(config) };
+            assert_eq!(c.error_code, 7);
+        }
+
+        #[test]
+        fn invalid_utf8_contents_are_reported() {
+            let config = unsafe {
+                stable_config_read_from_contents(
+                    cstr_ptr(b"browser-sdk\0"),
+                    false,
+                    cstr_ptr(&[0xFFu8, 0u8]),
+                    null(),
+                )
+            };
+            let c = unsafe { StableConfigInternal::from_public_ptr(config) };
+            assert_eq!(c.error_code, 8);
+        }
     }
 
     #[test]
@@ -495,8 +618,7 @@ mod tests {
             )
         };
         assert_ne!(snippet, null_mut());
-        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        let s = unsafe { SnippetInternal::from_public_ptr(snippet) };
         assert_eq!(s.error_code, 1);
-        unsafe { snippet_cleanup(snippet) };
     }
 }

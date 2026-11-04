@@ -59,7 +59,8 @@ pub struct Snippet {
     /// The snippet bytes length.
     pub length: u32,
     /// Resolved `DD_RUM_ENABLED`, using the `RUM_ENABLED_*` constants below.
-    /// Plain JSON snippets always report [`RUM_ENABLED_UNSET`].
+    /// Plain JSON snippets always report [`RUM_ENABLED_UNSET`]: the JSON shape
+    /// accepted by [`snippet_create_from_json`] has no `enabled` key.
     pub rum_enabled: u8,
     /// Resolved `applicationId`, or `NULL` when unset.
     pub application_id: *const c_char,
@@ -93,43 +94,23 @@ pub(crate) struct SnippetInternal {
 
 impl SnippetInternal {
     pub(crate) fn new(result: Result<Vec<u8>, Error>) -> Self {
-        match result {
-            Ok(content) => {
-                return Self {
-                    error_message: null(),
-                    error_code: 0,
-                    length: content.len() as u32,
-                    rum_enabled: RUM_ENABLED_UNSET,
-                    application_id: null(),
-                    remote_configuration_id: null(),
-                    inner: Ok(content),
-                    owned_ids: [None, None],
-                }
-            }
-            Err(error) => {
-                // Error messages can embed user-controlled strings (e.g. raw bytes
-                // from libdd-library-config). Scrub NUL bytes so CString::new
-                // cannot fail; fall back to a static message if it still does,
-                // because panicking here brings down the host web server.
-                let error_string = error.to_string().replace('\0', "\\0");
-                let error_message = CString::new(error_string).unwrap_or_else(|_| {
-                    return CString::new(
-                        "internal error: error message contained unrepresentable bytes",
-                    )
-                    .expect("static message has no NUL bytes");
-                });
-                return Self {
-                    error_message: error_message.as_ptr(),
-                    error_code: error.code(),
-                    length: 0,
-                    rum_enabled: RUM_ENABLED_UNSET,
-                    application_id: null(),
-                    remote_configuration_id: null(),
-                    inner: Err(error_message),
-                    owned_ids: [None, None],
-                };
-            }
-        }
+        let error_code = result.as_ref().err().map_or(0, Error::code);
+        let inner = result.map_err(|error| return error_message(&error));
+        return Self {
+            error_message: inner
+                .as_ref()
+                .err()
+                .map_or(null(), |message| return message.as_ptr()),
+            error_code,
+            length: inner
+                .as_ref()
+                .map_or(0, |content| return content.len() as u32),
+            rum_enabled: RUM_ENABLED_UNSET,
+            application_id: null(),
+            remote_configuration_id: null(),
+            inner,
+            owned_ids: [None, None],
+        };
     }
 
     pub(crate) fn new_from_stable_config(result: Result<StableConfigSnippet, Error>) -> Self {
@@ -163,13 +144,21 @@ impl SnippetInternal {
         return Box::into_raw(Box::new(self)) as *mut Snippet;
     }
 
-    unsafe fn from_public_ptr(snippet: *const Snippet) -> Box<Self> {
+    pub(crate) unsafe fn from_public_ptr(snippet: *const Snippet) -> Box<Self> {
         return Box::from_raw(snippet as *mut SnippetInternal);
     }
 
     pub unsafe fn borrow_public_ptr(snippet: *const Snippet) -> &'static Self {
         return &*(snippet as *mut SnippetInternal);
     }
+}
+
+// Scrub user-controlled NUL bytes before exposing an error to C callers.
+pub(crate) fn error_message(error: &Error) -> CString {
+    return CString::new(error.to_string().replace('\0', "\\0")).unwrap_or_else(|_| {
+        return CString::new("internal error: error message contained unrepresentable bytes")
+            .expect("static message has no NUL bytes");
+    });
 }
 
 /// Create a snippet from a C string representing a JSON-encoded object.
@@ -242,10 +231,20 @@ pub unsafe extern "C" fn snippet_create_from_json(json: *const c_char) -> *mut S
     }
     let json_bytes = CStr::from_ptr(json).to_bytes();
 
-    let result = parse_configuration(json_bytes)
-        .and_then(|configuration| return generate_snippet(&configuration));
+    // Report the resolved ids the same way the stable-config path does, so
+    // hosts can derive telemetry tags from the snippet regardless of which
+    // constructor produced it. `enabled` has no place in this JSON shape, so
+    // `rum_enabled` stays RUM_ENABLED_UNSET.
+    let result = parse_configuration(json_bytes).and_then(|configuration| {
+        return Ok(StableConfigSnippet {
+            bytes: generate_snippet(&configuration)?,
+            enabled: None,
+            application_id: configuration.rum.application_id.clone(),
+            remote_configuration_id: configuration.rum.remote_configuration_id.clone(),
+        });
+    });
 
-    return SnippetInternal::new(result).into_public_ptr();
+    return SnippetInternal::new_from_stable_config(result).into_public_ptr();
 }
 
 /// Free the [`Snippet`] associated memory.
@@ -272,6 +271,49 @@ mod tests {
         let snippet =
             unsafe { snippet_create_from_json(cstr_ptr(b"{\"majorVersion\":5,\"rum\":{}}\0")) };
         assert_ne!(snippet, null_mut());
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn json_snippet_reports_resolved_ids() {
+        // The IIS module derives its telemetry tags from these fields, so both
+        // snippet constructors have to populate them.
+        let snippet = unsafe {
+            snippet_create_from_json(
+                cstr_ptr(b"{\"majorVersion\":5,\"rum\":{\"applicationId\":\"app-json\",\"clientToken\":\"tok-json\",\"remoteConfigurationId\":\"rc-json\"}}\0"),
+            )
+        };
+        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_eq!(s.error_code, 0);
+        assert_eq!(
+            unsafe { CStr::from_ptr(s.application_id) }
+                .to_str()
+                .unwrap(),
+            "app-json"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(s.remote_configuration_id) }
+                .to_str()
+                .unwrap(),
+            "rc-json"
+        );
+        assert_eq!(
+            s.rum_enabled, RUM_ENABLED_UNSET,
+            "the JSON shape has no enabled key"
+        );
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn json_snippet_without_ids_reports_null() {
+        let snippet = unsafe {
+            snippet_create_from_json(
+                cstr_ptr(b"{\"majorVersion\":5,\"rum\":{\"applicationId\":\"app\",\"clientToken\":\"tok\"}}\0"),
+            )
+        };
+        let s = unsafe { SnippetInternal::borrow_public_ptr(snippet) };
+        assert_eq!(s.error_code, 0);
+        assert_eq!(s.remote_configuration_id, null());
         unsafe { snippet_cleanup(snippet) };
     }
 

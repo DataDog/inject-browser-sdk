@@ -891,8 +891,7 @@ TEST(InjectionPipeline, DisabledRumDoesNothing) {
   mod.global->Terminate();
 }
 
-// A module set up for one test of how it rebuilds a response: default configuration, unless
-// `strategy` is given.
+// A module set up, with the default configuration, for one test of how it rebuilds a response.
 class ModuleUnderTest {
  public:
   MockRumConfigElement rumConfig;
@@ -905,10 +904,7 @@ class ModuleUnderTest {
   MockHttpResponse httpResp;
   MockMetadataInfo metadata{L"MACHINE/WEBROOT/APPHOST/Default Web Site"};
 
-  explicit ModuleUnderTest(std::optional<InjectionStrategy> strategy = std::nullopt) {
-    if (strategy) {
-      rumConfig.SetInjectionStrategy(*strategy);
-    }
+  ModuleUnderTest() {
     EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
     mod = registerModule(mockServer);
     MockAppStartProvider appStart(app);
@@ -931,7 +927,9 @@ TEST(InjectionPipeline, ChunksNotInMemory) {
   for (const bool before : {false, true}) {
     SCOPED_TRACE(before ? "before the injection point" : "after the injection point");
     ModuleUnderTest module;
-    const std::vector<std::string> bodies = {"<html><head><title>t</title></head>", "file"};
+    // Long enough for the head window to be decided within the chunk in memory.
+    const std::string head = "<html><head><title>t</title></head>" + std::string(2000, 'x');
+    const std::vector<std::string> bodies = {head, "file"};
     PreparedChunkedResponse pr;
     setupChunkedHtmlResponse(module.httpCtx, module.httpResp, &module.app, &module.metadata, pr,
                              before ? std::vector<std::string>{"file", bodies[0]} : bodies);
@@ -955,14 +953,14 @@ TEST(InjectionPipeline, ChunksNotInMemory) {
       EXPECT_EQ(pr.raw.EntityChunkCount, 2);
     } else {
       // Every chunk before the file one is in memory: the head, with the snippet in.
-      std::string head;
+      std::string served;
       for (int i = 0; i < file_at; i++) {
         const auto& chunk = pr.raw.pEntityChunks[i];
-        head.append(static_cast<const char*>(chunk.FromMemory.pBuffer),
+        served.append(static_cast<const char*>(chunk.FromMemory.pBuffer),
                     chunk.FromMemory.BufferLength);
       }
-      EXPECT_NE(head.find("DD_RUM"), std::string::npos);
-      EXPECT_TRUE(head.ends_with("</head>")) << head;
+      EXPECT_NE(served.find("DD_RUM"), std::string::npos);
+      EXPECT_TRUE(served.ends_with(head.substr(head.size() - 100))) << served;
     }
   }
 }
@@ -989,7 +987,7 @@ TEST(InjectionPipeline, RefusedChunkWriteLeavesTheResponseUntouched) {
 // document: the injector is not ended on it, so the snippet cannot go in ahead of a declaration the
 // next part may hold.
 TEST(InjectionPipeline, FirstPartShorterThanTheHeadWindowIsNotInjected) {
-  ModuleUnderTest module(InjectionStrategy::HeadOpenTagWithCloseTagFallback);
+  ModuleUnderTest module;
   PreparedChunkedResponse pr;
   setupChunkedHtmlResponse(module.httpCtx, module.httpResp, &module.app, &module.metadata, pr,
                            {"<html><head><title>t</title>"});

@@ -168,8 +168,9 @@ pub enum Exception {
     /// insertion mode closes the head. lol_html only pops elements its stack holds, and keeps the
     /// head open when it holds none of those.
     EndTagClosingHead,
-    /// The injector stops its walk at a `<![CDATA[`, whose end it cannot tell without tracking
-    /// foreign content, so its point is earlier.
+    /// The injector stops at a `<![CDATA[`, whose end it cannot tell without tracking foreign
+    /// content: before the `<head>` tag it then never injects, within the head its point is earlier.
+    /// lol_html reads one outside foreign content as the bogus comment it is there.
     CdataSection,
     /// The injector keeps the snippet behind a character encoding declaration the browser's
     /// prescan honours, which lol_html knows nothing about: within a raw text or inert element
@@ -225,6 +226,10 @@ pub fn exception(
         // Declined: the declaration lies somewhere past the `<head>` tag, possibly behind a CDATA
         // section or an unclosed element the walk stops at, so possibly before `oracle` too.
         (None, Some(_)) => {
+            let head_start = observed.heads.first().map_or(0, |head| return head.start);
+            if contains(&lower[..head_start], b"<![cdata[") {
+                return Some(Exception::CdataSection);
+            }
             let head_end = observed.heads.first().map_or(0, |head| return head.end);
             if contains(&window[head_end.min(window.len())..], b"charset") {
                 return Some(Exception::EncodingDeclaration);

@@ -25,6 +25,9 @@ const MAX_RECENT: usize = 11;
 /// Elements whose content is text rather than markup, so a `<head>` written within one is not a tag.
 ///
 /// `noscript` is among them as browsers run with scripting enabled, and so does lol_html.
+/// What follows the `<!` of a CDATA section opener.
+const CDATA_SECTION_OPEN: &[u8] = b"[CDATA[";
+
 const RAW_TEXT_ELEMENTS: &[&[u8]] = &[
     b"script",
     b"style",
@@ -76,6 +79,10 @@ enum State {
     MarkupDeclarationOpen {
         dashes: u8,
     },
+    /// Within the `[CDATA[` of a `<![CDATA[`, holding how many of its bytes were read.
+    CdataSectionOpen {
+        matched: usize,
+    },
     /// Within a comment: `run` is the number of dashes just read, capped at two, `content_run` the
     /// part of them that is comment content rather than the `<!--` opener, and `bang` whether a `!`
     /// followed two content dashes.
@@ -92,6 +99,10 @@ enum State {
     },
     /// Past a `<plaintext>` tag, which nothing ends.
     Plaintext,
+    /// Past a `<![CDATA[`, whose end cannot be told without tracking foreign content: it runs to
+    /// `]]>` within `svg` or `math` and to the first `>` anywhere else. Guessing wrong would find a
+    /// `<head>` written in CDATA text, so nothing is looked for past it, as the window walk does.
+    CdataSection,
     /// The `<head>` start tag was found; nothing is left to look for.
     Found,
 }
@@ -164,6 +175,15 @@ impl HeadOpenTagLocator {
         };
     }
 
+    /// Whether a `<head>` tag may still be found in what follows: not once it has been, nor past
+    /// markup that ends the search, a `<plaintext>` tag or a CDATA section.
+    pub(super) fn is_searching(&self) -> bool {
+        return !matches!(
+            self.state,
+            State::Found | State::Plaintext | State::CdataSection
+        );
+    }
+
     /// Scans the next chunk of the document, and returns the `<head>` start tag if it ends within it.
     /// Only the first one is ever returned.
     pub(super) fn scan(&mut self, chunk: &[u8]) -> Option<HeadOpenTag> {
@@ -184,7 +204,7 @@ impl HeadOpenTagLocator {
     /// Consumes one byte at `offset`, and returns whether it is the `>` closing the `<head>` tag.
     fn step(&mut self, byte: u8, offset: usize) -> bool {
         self.state = match self.state {
-            State::Found | State::Plaintext => self.state,
+            State::Found | State::Plaintext | State::CdataSection => self.state,
 
             State::Data => match byte {
                 b'<' => self.open_markup(offset),
@@ -240,6 +260,7 @@ impl HeadOpenTagLocator {
             }
 
             State::MarkupDeclarationOpen { dashes } => match (dashes, byte) {
+                (0, b'[') => State::CdataSectionOpen { matched: 1 },
                 (0, b'-') => State::MarkupDeclarationOpen { dashes: 1 },
                 (_, b'-') => State::Comment {
                     run: 2,
@@ -279,6 +300,18 @@ impl HeadOpenTagLocator {
                     bang: false,
                 },
             },
+
+            State::CdataSectionOpen { matched } => {
+                match (CDATA_SECTION_OPEN[matched] == byte, byte) {
+                    (true, _) if matched + 1 == CDATA_SECTION_OPEN.len() => State::CdataSection,
+                    (true, _) => State::CdataSectionOpen {
+                        matched: matched + 1,
+                    },
+                    // Any other `<![…` is a bogus comment, which the very next `>` ends.
+                    (false, b'>') => State::Data,
+                    (false, _) => State::BogusComment,
+                }
+            }
 
             State::BogusComment => match byte {
                 b'>' => State::Data,
@@ -546,7 +579,17 @@ mod tests {
         assert_eq!(find("<!x <head>"), None);
         assert_eq!(find("</3 <head>"), None);
         assert_eq!(find("</><head>"), Some((3, 9)));
+        // A CDATA section ends the search, whatever follows it.
         assert_eq!(find("<![CDATA[<head>]]>"), None);
+        assert_eq!(find("<![CDATA[x]]><head>"), None);
+        assert_eq!(
+            find("<svg><text><![CDATA[><head>x]]></text></svg><head>"),
+            None
+        );
+        // Anything else is a bogus comment.
+        assert_eq!(find("<![CDATAx><head>"), Some((10, 16)));
+        assert_eq!(find("<![cdata[><head>"), Some((10, 16)));
+        assert_eq!(find("<![><head>"), Some((4, 10)));
     }
 
     #[test]

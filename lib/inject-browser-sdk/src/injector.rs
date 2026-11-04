@@ -303,6 +303,9 @@ impl<'snippet> Injector<'snippet> {
     /// Whether a `<head>` tag found in what follows may still be injected after, see
     /// [`Injector::may_inject_after`]. Once it may not, scanning the rest of the document is pointless.
     fn may_find_injection_point(&self) -> bool {
+        if !self.head_locator.is_searching() {
+            return false;
+        }
         return self.window_holds_html_evidence()
             || self
                 .head_locator

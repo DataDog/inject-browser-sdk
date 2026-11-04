@@ -16,12 +16,14 @@ use inject_browser_sdk_ffi::*;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    // The first byte picks the chunk size and how the document ends.
+    // The first byte picks the chunk size, how the document ends, and whether the injector is
+    // flushed after the first chunk, as a server sending what it has now would.
     let Some((&selector, document)) = data.split_first() else {
         return;
     };
-    let chunk_size = usize::from(selector >> 1).max(1);
+    let chunk_size = usize::from(selector >> 2).max(1);
     let padded = selector & 1 == 0;
+    let flush = selector & 2 != 0;
 
     let json = CString::new(r#"{"majorVersion":6,"rum":{"applicationId":"a","clientToken":"t"}}"#)
         .unwrap();
@@ -40,9 +42,13 @@ fuzz_target!(|data: &[u8]| {
             }
             injected |= result.injected;
         };
-        for chunk in document.chunks(chunk_size) {
+        for (index, chunk) in document.chunks(chunk_size).enumerate() {
             consume(injector_write(injector, chunk.as_ptr(), chunk.len() as u32));
             assert!(injector_held_back_length(injector) as usize <= 1024);
+            if flush && index == 0 {
+                consume(injector_flush(injector));
+                assert_eq!(injector_held_back_length(injector), 0);
+            }
         }
         consume(match padded {
             true => injector_end(injector),

@@ -160,6 +160,11 @@ impl HeadOpenTagLocator {
         return self.html_evidence;
     }
 
+    /// Number of bytes scanned so far, across every chunk.
+    pub(super) fn scanned(&self) -> usize {
+        return self.offset;
+    }
+
     /// Offset of the `<` of the tag being read, while it may still turn out to be a `<head>`, a
     /// `<html>` or a `<meta>` start tag: more data is needed to tell.
     pub(super) fn pending_tag_start(&self) -> Option<usize> {

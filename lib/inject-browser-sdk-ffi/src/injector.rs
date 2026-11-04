@@ -197,6 +197,25 @@ pub unsafe extern "C" fn injector_extend_content_length(
     };
 }
 
+/// Hand back everything the [`Injector`] holds back, for a server that has to send what it has
+/// now, such as a page streamed in pieces that waits on more data, which would otherwise stall until
+/// the first 1024 bytes are in. Never injects; past those bytes there is nothing to hand back.
+///
+/// The head window is given up in exchange: a `<head>` tag in what is handed back, or starting later
+/// within the first 1024 bytes, is not injected after anymore. One starting past them still is, if
+/// those bytes look like an HTML document.
+///
+/// This function should not be called while another [`InjectorResult`] from the same `Injector` is
+/// still being processed. See [`InjectorResult`] for the memory ownership of the result.
+#[no_mangle]
+pub unsafe extern "C" fn injector_flush(injector: *mut Injector) -> InjectorResult {
+    if injector.is_null() {
+        return InjectorResult::empty();
+    }
+    let injector = &mut *injector;
+    return InjectorResult::new(injector.inner.flush(), &mut injector.slices_memory_storage);
+}
+
 /// Notify the [`Injector`] that the full HTML document has been written.
 ///
 /// If the injection did not happen yet, a slice of the same size as the snippet containing only
@@ -540,6 +559,29 @@ mod tests {
         assert!(!unsafe {
             injector_extend_content_length(injector, value.as_ptr(), 3, core::ptr::null_mut())
         });
+
+        unsafe { injector_cleanup(injector) };
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn injector_flush_hands_the_head_window_back() {
+        assert_eq!(unsafe { injector_flush(null_mut()) }.slices_length, 0);
+
+        let snippet = test_snippet();
+        let injector = unsafe { injector_create(snippet) };
+        let head = b"<html><head>";
+        unsafe { injector_write(injector, head.as_ptr(), head.len() as u32) };
+        let result = unsafe { injector_flush(injector) };
+        assert!(!result.injected);
+        assert_eq!(result.slices_length, 1);
+        let slice = unsafe { &*result.slices };
+        assert!(!slice.from_incoming_chunk);
+        assert_eq!(
+            unsafe { slice::from_raw_parts(slice.start, slice.length as usize) },
+            head
+        );
+        assert_eq!(unsafe { injector_held_back_length(injector) }, 0);
 
         unsafe { injector_cleanup(injector) };
         unsafe { snippet_cleanup(snippet) };

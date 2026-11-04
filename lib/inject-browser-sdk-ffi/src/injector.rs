@@ -216,6 +216,21 @@ pub unsafe extern "C" fn injector_flush(injector: *mut Injector) -> InjectorResu
     return InjectorResult::new(injector.inner.flush(), &mut injector.slices_memory_storage);
 }
 
+/// Whether the [`Injector`] may still inject the snippet into data yet to be written: it has
+/// neither injected nor given up. Passing `NULL` returns false.
+///
+/// Once the first 1024 bytes are past, a pending injector holds nothing back
+/// ([`injector_held_back_length`] is 0), so a server that sends a document in several parts can
+/// let each part go out as soon as it is written, and keep writing the next ones to the same
+/// injector: the snippet goes into whichever part holds the `<head>` tag.
+#[no_mangle]
+pub unsafe extern "C" fn injector_is_pending(injector: *const Injector) -> bool {
+    if injector.is_null() {
+        return false;
+    }
+    return (*injector).inner.is_pending();
+}
+
 /// Notify the [`Injector`] that the full HTML document has been written.
 ///
 /// If the injection did not happen yet, a slice of the same size as the snippet containing only
@@ -585,6 +600,11 @@ mod tests {
 
         unsafe { injector_cleanup(injector) };
         unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn injector_is_pending_null_injector_returns_false() {
+        assert!(!unsafe { injector_is_pending(null()) });
     }
 
     #[test]

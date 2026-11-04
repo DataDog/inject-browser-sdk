@@ -37,6 +37,9 @@ class Payload:
     body: bytes
     # Index the snippet goes in at, or None when the response must be served untouched.
     injected_at: Optional[int]
+    # Whether the response says it was injected. One injected in a later part cannot: its
+    # headers went out with the first part.
+    announces_injection: bool = True
 
 
 LARGE = Payload(
@@ -53,13 +56,20 @@ LARGE = Payload(
 def _payloads() -> list[Payload]:
     payloads = []
 
-    def add(name, before, after=None):
+    def add(name, before, after=None, announces_injection=True):
         """`before` then `after` is the document; the snippet goes between them, unless `after`
         is None, in which case `before` is the whole document and nothing is injected."""
         if after is None:
             payloads.append(Payload(name, before.encode(), None))
         else:
-            payloads.append(Payload(name, (before + after).encode(), len(before.encode())))
+            payloads.append(
+                Payload(
+                    name,
+                    (before + after).encode(),
+                    len(before.encode()),
+                    announces_injection,
+                )
+            )
 
     add(
         "metas",
@@ -68,8 +78,7 @@ def _payloads() -> list[Payload]:
         "<title>t</title></head><body><p>hi</p></body></html>",
     )
     add("no meta", "<html><head>", "<title>t</title></head><body>hi</body></html>")
-    # Under the 256 KiB ARR hands IIS in one part; for one in several, see
-    # test_large_proxied_response.
+    # Under the 256 KiB ARR hands IIS in one part.
     add(
         "large body",
         "<html><head><meta charset='utf-8'>",
@@ -95,6 +104,22 @@ def _payloads() -> list[Payload]:
         "script before head",
         "<html><script>document.write('<head>')</script><head>",
         "<title>t</title></head><body>hi</body></html>",
+    )
+    # Past it, IIS gets the response in several parts.
+    add(
+        "body in several parts",
+        "<html><head><meta charset='utf-8'>",
+        "</head><body>" + "<p>lorem ipsum dolor</p>\n" * 40_000 + "</body></html>",
+    )
+    add(
+        "head in a later part",
+        "<!DOCTYPE html><html lang='en'><!-- " + "c" * 600_000 + " --><head lang='en'>",
+        "<meta charset='utf-8'><title>t</title></head><body>hi</body></html>",
+        announces_injection=False,
+    )
+    add(
+        "head in a later part, without HTML evidence",
+        '{"data": "' + "x" * 600_000 + '", "html": "<html><head></head></html>"}',
     )
     add("no head", "<html><body>" + "<p>no head here</p>" * 500 + "</body></html>")
     add("fragment", "<div class='x'>" + "<span>fragment</span>" * 200 + "</div>")
@@ -164,8 +189,8 @@ def _check(payload: Payload, response: requests.Response) -> Optional[str]:
 
     before = payload.body[: payload.injected_at]
     after = payload.body[payload.injected_at :]
-    if not injected:
-        return "not injected"
+    if injected != payload.announces_injection:
+        return f"x-datadog-rum-injected is {'' if injected else 'not '}set"
     if len(body) <= len(payload.body) or not body.startswith(before) or not body.endswith(after):
         return f"snippet not at byte {payload.injected_at}, or body corrupted ({len(body)} bytes)"
     snippet = body[len(before) : len(body) - len(after)]

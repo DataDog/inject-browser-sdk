@@ -148,6 +148,17 @@ impl<'snippet> Injector<'snippet> {
         return announced?.checked_add(u64::try_from(self.snippet.len()).ok()?);
     }
 
+    /// Whether the snippet may still go into data yet to be written: the injector has neither
+    /// injected nor given up. Past the head window it holds nothing back while it still is, so a
+    /// server that sends the document in several parts can keep writing them to the same injector,
+    /// each part on its own.
+    pub fn is_pending(&self) -> bool {
+        return matches!(
+            self.injector_state,
+            InjectorState::BufferingHeadWindow | InjectorState::ScanningForHeadOpenTag
+        );
+    }
+
     pub fn write<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
         match self.injector_state {
             InjectorState::BufferingHeadWindow => {
@@ -775,6 +786,26 @@ mod tests {
             let mut injector = Injector::new(b"{{SNIPPET}}");
             injector.write(filler().as_bytes());
             assert_eq!(injector.injector_state, InjectorState::PassingThrough);
+        }
+
+        #[test]
+        fn is_pending_until_injected_or_given_up() {
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            assert!(injector.is_pending());
+            injector.write(format!("<html>{}", filler()).as_bytes());
+            assert!(injector.is_pending());
+            assert_eq!(injector.held_back(), 0);
+            assert!(injector.write(b"<head>").injected);
+            assert!(!injector.is_pending());
+
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            injector.write(filler().as_bytes());
+            assert!(!injector.is_pending());
+
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            injector.write(b"<head>");
+            injector.end_without_padding();
+            assert!(!injector.is_pending());
         }
 
         #[test]

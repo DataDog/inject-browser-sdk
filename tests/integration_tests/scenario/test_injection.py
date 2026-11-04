@@ -107,10 +107,12 @@ def test_large_proxied_response_is_served_whole(upstream_server, chunked):
     r = requests.get("http://localhost:8080" + path, timeout=60)
 
     assert r.status_code == 200
-    # Sent in several parts, an injected response loses its Content-Length and goes out chunked.
     assert r.headers["x-datadog-rum-injected"] == "1"
     body = r.content
-    if "content-length" in r.headers:
+    # The announced length grows by the snippet, and a chunked response stays chunked.
+    if chunked:
+        assert "content-length" not in r.headers
+    else:
         assert int(r.headers["content-length"]) == len(body)
     # Wherever the snippet went, the rest of the page is there, once and in order.
     prefix = 0

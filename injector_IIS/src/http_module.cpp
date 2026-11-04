@@ -10,6 +10,8 @@
 #include "telemetry.h"
 #include <algorithm>
 #include <cassert>
+#include <charconv>
+#include <cstdint>
 #include <datadog/telemetry/telemetry.h>
 #include <format>
 #include <limits>
@@ -36,6 +38,37 @@ std::string_view get_header(const IHttpResponse& http_response, const char* head
   }
 
   return {data, length};
+}
+
+// Adds `added` bytes to the length the response announces in its Content-Length, if it announces
+// one. A header that cannot be read or updated is removed instead, and the response goes out
+// chunked: no length is better than a wrong one.
+void extend_content_length(IHttpResponse& http_response, size_t added, Logger& logger) {
+  const std::string_view announced = get_header(http_response, "Content-Length");
+  if (announced.empty()) {
+    return;
+  }
+
+  uint64_t length = 0;
+  const char* const end = announced.data() + announced.size();
+  const auto [parsed_end, error] = std::from_chars(announced.data(), end, length);
+  if (error == std::errc{} && parsed_end == end &&
+      length <= (std::numeric_limits<uint64_t>::max)() - added) {
+    const std::string extended = std::to_string(length + added);
+    HRESULT const result = http_response.SetHeader("Content-Length", extended.c_str(),
+                                                   static_cast<USHORT>(extended.size()), TRUE);
+    if (SUCCEEDED(result)) {
+      return;
+    }
+    logger.error("Error updating Content-Length: " + std::system_category().message(result));
+  } else {
+    logger.error("Unexpected Content-Length '" + std::string(announced) + "', removing it");
+  }
+
+  HRESULT const result = http_response.DeleteHeader("Content-Length");
+  if (FAILED(result)) {
+    logger.error("Error removing Content-Length: " + std::system_category().message(result));
+  }
 }
 
 // Returns the per-location context if cached on the metadata container,
@@ -491,13 +524,10 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
   if (more_data) {
     // The rest of the body is still to come, in later sends: flushing here and finishing the
     // request would drop it. IIS sends this part as the module left it, and the next ones as they
-    // are. The length the response announces no longer holds once the snippet is in, so it is
-    // dropped and the response goes out chunked.
+    // are. The headers go out with this part, and the snippet is all the injection adds, so the
+    // length the response announces grows by exactly that.
     if (injected) {
-      HRESULT const result = pHttpResponse.DeleteHeader("Content-Length");
-      if (FAILED(result)) {
-        logger.error("Error removing Content-Length: " + std::system_category().message(result));
-      }
+      extend_content_length(pHttpResponse, snippet->length, logger);
     }
     return RQ_NOTIFICATION_CONTINUE;
   }

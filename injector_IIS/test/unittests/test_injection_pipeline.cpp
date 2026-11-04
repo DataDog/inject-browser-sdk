@@ -759,22 +759,33 @@ TEST(InjectionPipeline, UnresolvedHeadCloseTagLeavesTheResponseUntouched) {
 // send. Flushing and finishing the request on one that more data follows would cut the response
 // there, so those are left to IIS whether or not the snippet went in, and the parts after the
 // first, which do not carry the headers or the start of the document, are not even looked at.
+// The headers go out with the first part, so that is where the announced length grows by the
+// snippet; a length that cannot be read is removed rather than left wrong.
 TEST(InjectionPipeline, ResponseSentInSeveralParts) {
+  enum class LengthUpdate { Unchanged, Extended, Removed };
   struct TestCase {
     std::string name;
     BOOL headers_being_sent;
     DWORD flags;
     std::string body;
     bool injects;
+    std::optional<std::string> content_length;  // nullopt: the response announces none
+    LengthUpdate length_update;
   };
+  const std::string head = "<html><head><title>t</title></head><body>";
   const std::vector<TestCase> cases = {
-      {"first part", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
-       "<html><head><title>t</title></head><body>", true},
+      {"first part", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA, head, true, "2621440",
+       LengthUpdate::Extended},
+      {"first part of a chunked response", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA, head, true,
+       std::nullopt, LengthUpdate::Unchanged},
+      {"first part with an unreadable length", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA, head, true,
+       "12x", LengthUpdate::Removed},
       {"first part without an injection point", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
-       "<html><body><p>no head here</p>", false},
+       "<html><body><p>no head here</p>", false, "2621440", LengthUpdate::Unchanged},
       {"later part", FALSE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
-       "<p>more</p><head><title>t</title></head>", false},
-      {"last part", FALSE, 0, "<p>more</p><head><title>t</title></head></html>", false},
+       "<p>more</p><head><title>t</title></head>", false, "2621440", LengthUpdate::Unchanged},
+      {"last part", FALSE, 0, "<p>more</p><head><title>t</title></head></html>", false, "2621440",
+       LengthUpdate::Unchanged},
   };
 
   for (const auto& test_case : cases) {
@@ -801,12 +812,25 @@ TEST(InjectionPipeline, ResponseSentInSeveralParts) {
     PreparedChunkedResponse pr;
     setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, {test_case.body});
 
+    const std::string announced = test_case.content_length.value_or("");
+    EXPECT_CALL(httpResp, GetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _))
+        .WillRepeatedly(DoAll(Invoke([&announced](_In_ PCSTR, _Out_ USHORT* len) {
+                                *len = static_cast<USHORT>(announced.size());
+                              }),
+                              Return(test_case.content_length ? announced.c_str() : nullptr)));
+
     EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
         .Times(test_case.injects ? 1 : 0)
         .WillRepeatedly(Return(S_OK));
-    // The announced length no longer holds once the snippet is in.
+    std::string extended_to;
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _, _, _))
+        .Times(test_case.length_update == LengthUpdate::Extended ? 1 : 0)
+        .WillRepeatedly(DoAll(Invoke([&extended_to](PCSTR, PCSTR value, USHORT length, BOOL) {
+                                extended_to.assign(value, length);
+                              }),
+                              Return(S_OK)));
     EXPECT_CALL(httpResp, DeleteHeader(Matcher<PCSTR>(StrEq("Content-Length"))))
-        .Times(test_case.injects ? 1 : 0)
+        .Times(test_case.length_update == LengthUpdate::Removed ? 1 : 0)
         .WillRepeatedly(Return(S_OK));
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
 
@@ -817,6 +841,11 @@ TEST(InjectionPipeline, ResponseSentInSeveralParts) {
     if (test_case.injects) {
       EXPECT_NE(body.find("DD_RUM"), std::string::npos) << body;
       EXPECT_EQ(body.substr(body.size() - std::string("</head><body>").size()), "</head><body>");
+      if (test_case.length_update == LengthUpdate::Extended) {
+        // The snippet is exactly what the injection added to this part.
+        const auto snippet_length = body.size() - test_case.body.size();
+        EXPECT_EQ(extended_to, std::to_string(2621440 + snippet_length));
+      }
     } else {
       EXPECT_EQ(body, test_case.body);
     }

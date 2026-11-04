@@ -29,8 +29,10 @@ class HttpModule : public CHttpModule {
 
   bool ShouldAttemptInjection(IHttpResponse& pHttpResponse, const ModuleContext& ctx) const;
 
+  // `more_data`: more sends of the same response follow this one, see OnSendResponse.
   REQUEST_NOTIFICATION_STATUS PerformInjection(IHttpContext& pHttpContext,
-                                               IHttpResponse& pHttpResponse, ModuleContext& ctx);
+                                               IHttpResponse& pHttpResponse, ModuleContext& ctx,
+                                               bool more_data);
 };
 
 class HttpModuleFactory : public IHttpModuleFactory {

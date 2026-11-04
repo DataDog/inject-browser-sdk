@@ -149,12 +149,21 @@ HttpModule::OnBeginRequest(IN IHttpContext* http_context, IN IHttpEventProvider*
 }
 
 REQUEST_NOTIFICATION_STATUS
-HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvider*) {
+HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvider* provider) {
   assert(http_context != nullptr);
   auto* http_response = http_context->GetResponse();
   if (!http_response) {
     return RQ_NOTIFICATION_CONTINUE;
   }
+
+  // A response can reach the module in several sends, as when ARR streams a large upstream
+  // response, each one with the next part of the body. Only the first carries the headers and the
+  // start of the document, where the snippet goes: the later ones are passed through as they are.
+  if (provider != nullptr && provider->GetHeadersBeingSent() == FALSE) {
+    return RQ_NOTIFICATION_CONTINUE;
+  }
+  const bool more_data =
+      provider != nullptr && (provider->GetFlags() & HTTP_SEND_RESPONSE_FLAG_MORE_DATA) != 0;
 
   // Get app-level context (always needed for logger, server, tags).
   auto* app = http_context->GetApplication();
@@ -190,7 +199,7 @@ HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvid
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  return PerformInjection(*http_context, *http_response, *ctx);
+  return PerformInjection(*http_context, *http_response, *ctx, more_data);
 }
 
 bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
@@ -247,7 +256,7 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
 
 REQUEST_NOTIFICATION_STATUS
 HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpResponse,
-                             ModuleContext& ctx) {
+                             ModuleContext& ctx, bool more_data) {
   assert(ctx.snippet != nullptr);
   assert(ctx.logger != nullptr);
   const Snippet* snippet = ctx.snippet;
@@ -478,6 +487,20 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
   }
 
   injector_cleanup(injector);
+
+  if (more_data) {
+    // The rest of the body is still to come, in later sends: flushing here and finishing the
+    // request would drop it. IIS sends this part as the module left it, and the next ones as they
+    // are. The length the response announces no longer holds once the snippet is in, so it is
+    // dropped and the response goes out chunked.
+    if (injected) {
+      HRESULT const result = pHttpResponse.DeleteHeader("Content-Length");
+      if (FAILED(result)) {
+        logger.error("Error removing Content-Length: " + std::system_category().message(result));
+      }
+    }
+    return RQ_NOTIFICATION_CONTINUE;
+  }
 
   logger.debug("Writing new response");
 

@@ -755,6 +755,114 @@ TEST(InjectionPipeline, UnresolvedHeadCloseTagLeavesTheResponseUntouched) {
   mod.global->Terminate();
 }
 
+// A response sent in several parts, as ARR streams a large upstream response: the module sees each
+// send. Flushing and finishing the request on one that more data follows would cut the response
+// there, so those are left to IIS whether or not the snippet went in, and the parts after the
+// first, which do not carry the headers or the start of the document, are not even looked at.
+TEST(InjectionPipeline, ResponseSentInSeveralParts) {
+  struct TestCase {
+    std::string name;
+    BOOL headers_being_sent;
+    DWORD flags;
+    std::string body;
+    bool injects;
+  };
+  const std::vector<TestCase> cases = {
+      {"first part", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
+       "<html><head><title>t</title></head><body>", true},
+      {"first part without an injection point", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
+       "<html><body><p>no head here</p>", false},
+      {"later part", FALSE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
+       "<p>more</p><head><title>t</title></head>", false},
+      {"last part", FALSE, 0, "<p>more</p><head><title>t</title></head></html>", false},
+  };
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+
+    MockRumConfigElement rumConfig;
+    MockAdminManager adminManager(&rumConfig);
+    MockServer mockServer;
+    EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+    auto mod = registerModule(mockServer);
+    ASSERT_NE(mod.global, nullptr);
+
+    MockAppWithContext app;
+    MockAppStartProvider appStart(app);
+    ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+
+    CHttpModule* httpMod = nullptr;
+    ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+    MockHttpContext httpCtx;
+    MockHttpResponse httpResp;
+    MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+    PreparedChunkedResponse pr;
+    setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, {test_case.body});
+
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+        .Times(test_case.injects ? 1 : 0)
+        .WillRepeatedly(Return(S_OK));
+    // The announced length no longer holds once the snippet is in.
+    EXPECT_CALL(httpResp, DeleteHeader(Matcher<PCSTR>(StrEq("Content-Length"))))
+        .Times(test_case.injects ? 1 : 0)
+        .WillRepeatedly(Return(S_OK));
+    EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
+
+    MockSendResponseProvider provider(test_case.headers_being_sent, test_case.flags);
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, &provider), RQ_NOTIFICATION_CONTINUE);
+
+    const std::string body = assembleResponseBody(pr);
+    if (test_case.injects) {
+      EXPECT_NE(body.find("DD_RUM"), std::string::npos) << body;
+      EXPECT_EQ(body.substr(body.size() - std::string("</head><body>").size()), "</head><body>");
+    } else {
+      EXPECT_EQ(body, test_case.body);
+    }
+
+    mod.factory->Terminate();
+    mod.global->Terminate();
+  }
+}
+
+// The single send of a whole response is still flushed and finished, with the snippet in.
+TEST(InjectionPipeline, ResponseSentAtOnceIsFlushed) {
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  ASSERT_NE(mod.global, nullptr);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+
+  CHttpModule* httpMod = nullptr;
+  ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  PreparedChunkedResponse pr;
+  setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr,
+                           {"<html><head><title>t</title></head><body>hi</body></html>"});
+
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .WillOnce(Return(S_OK));
+  EXPECT_CALL(httpResp, DeleteHeader(Matcher<PCSTR>(_))).Times(0);
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+  MockSendResponseProvider provider(TRUE, 0);
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, &provider), RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_NE(assembleResponseBody(pr).find("DD_RUM"), std::string::npos);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
 // A response with no injection point at all leaves the injector padding the body with spaces to
 // keep its length constant. The buffering path must not serve that padding: like the streaming
 // path, it leaves the queued chunks as they are when nothing was injected.

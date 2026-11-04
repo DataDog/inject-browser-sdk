@@ -223,6 +223,25 @@ class MockEventProvider : public IHttpEventProvider {
   MOCK_METHOD(VOID, SetErrorStatus, (HRESULT hrError), (override));
 };
 
+// One send of a response: whether it carries the headers, which only the first one does, and its
+// HTTP_SEND_RESPONSE_FLAG_* flags.
+class MockSendResponseProvider : public ISendResponseProvider {
+  BOOL headers_being_sent_;
+  DWORD flags_;
+
+ public:
+  MockSendResponseProvider(BOOL headers_being_sent, DWORD flags)
+      : headers_being_sent_(headers_being_sent), flags_(flags) {}
+
+  MOCK_METHOD(VOID, SetErrorStatus, (HRESULT hrError), (override));
+  BOOL GetHeadersBeingSent() const override { return headers_being_sent_; }
+  DWORD GetFlags() const override { return flags_; }
+  MOCK_METHOD(VOID, SetFlags, (DWORD dwFlags), (override));
+  MOCK_METHOD(HTTP_LOG_DATA*, GetLogData, (), (const, override));
+  MOCK_METHOD(HRESULT, SetLogData, (HTTP_LOG_DATA * pLogData), (override));
+  MOCK_METHOD(BOOL, GetReadyToLogData, (), (const, override));
+};
+
 class MockHttpRequest : public IHttpRequest {
  public:
   const HTTP_REQUEST* GetRawHttpRequest() const override { return nullptr; }

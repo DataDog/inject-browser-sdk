@@ -74,6 +74,51 @@ def test_proxy_injection(upstream_server):
     __assert_rum_injection(r.headers, r.content)
 
 
+LARGE_HTML = (
+    "<html><head><title>Large</title></head><body>"
+    + "<p>lorem ipsum dolor sit amet</p>\n" * 80_000
+    + "</body></html>"
+).encode()
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_large_proxied_response_is_served_whole(upstream_server, chunked):
+    """
+    Verify a proxied page of a few megabytes is injected and served whole.
+    IIS hands such a response to the module in several parts; finishing the
+    request after the first one used to cut it after 256 KiB.
+    """
+
+    async def upstream_handler(request):
+        if not chunked:
+            return web.Response(body=LARGE_HTML, content_type="text/html")
+        response = web.StreamResponse()
+        response.content_type = "text/html"
+        response.enable_chunked_encoding()
+        await response.prepare(request)
+        for offset in range(0, len(LARGE_HTML), 65536):
+            await response.write(LARGE_HTML[offset : offset + 65536])
+        await response.write_eof()
+        return response
+
+    path = "/large-chunked" if chunked else "/large"
+    upstream_server.add_route(path, upstream_handler)
+
+    r = requests.get("http://localhost:8080" + path, timeout=60)
+
+    assert r.status_code == 200
+    __assert_rum_injection(r.headers, r.content)
+    body = r.content
+    # Wherever the snippet went, the rest of the page is there, once and in order.
+    prefix = 0
+    while prefix < len(LARGE_HTML) and body[prefix] == LARGE_HTML[prefix]:
+        prefix += 1
+    suffix = len(LARGE_HTML) - prefix
+    assert len(body) > len(LARGE_HTML)
+    assert body[len(body) - suffix :] == LARGE_HTML[prefix:]
+    assert b"datadog-rum" in body[prefix : len(body) - suffix]
+
+
 def test_injection_only_for_html_content(upstream_server):
     """
     Assess the RUM Browser SDK is injected only when the content has the

@@ -280,8 +280,8 @@ std::optional<Injection> write_response(Injector& injector, const HTTP_RESPONSE&
 const char* apply_injection(IHttpContext& http_context, IHttpResponse& http_response,
                             HTTP_RESPONSE& response, const Injection& injection,
                             const Injector& injector, bool headers_gone, Logger& logger) {
-  if (const char* error =
-          splice_injection(http_context, response, injection.point, injection.result)) {
+  if (const char* error = splice_injection(http_context, http_response, response, injection.point,
+                                           injection.result)) {
     return error;
   }
   if (headers_gone) {

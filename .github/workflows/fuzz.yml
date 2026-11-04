@@ -37,12 +37,13 @@ jobs:
           - injector_c_api
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # rust-toolchain.toml pins a stable toolchain for the build, while fuzzing needs nightly.
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --version 0.13.2 --locked
+        run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - name: Fuzz
         run: |
           mkdir -p corpus artifacts
-          cargo fuzz run ${{ matrix.target }} corpus lib/inject-browser-sdk/tests/data/regression -- \
+          cargo +nightly fuzz run ${{ matrix.target }} corpus lib/inject-browser-sdk/tests/data/regression -- \
             -dict=fuzz/dictionaries/html.dict -max_len=4096 -max_total_time=60 \
             -artifact_prefix=artifacts/
       - name: Upload crashes

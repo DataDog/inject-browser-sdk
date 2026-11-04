@@ -41,6 +41,12 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - name: Fuzz
+        # The release profile's LTO drops the sanitizer coverage symbols at link time
+        # (`undefined symbol: __sancov_gen_`), so the fuzz build goes without it.
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+          CARGO_PROFILE_RELEASE_STRIP: "false"
         run: |
           mkdir -p corpus artifacts
           cargo +nightly fuzz run ${{ matrix.target }} corpus lib/inject-browser-sdk/tests/data/regression -- \

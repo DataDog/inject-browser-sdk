@@ -28,7 +28,7 @@ namespace {
 // benefits from RUM comes anywhere near it.
 constexpr size_t k_max_buffered_response_length = size_t{8} * 1024 * 1024;
 
-std::string_view get_header(IHttpResponse& http_response, const char* header) {
+std::string_view get_header(const IHttpResponse& http_response, const char* header) {
   USHORT length = 0;
   PCSTR data = http_response.GetHeader(header, &length);
   if (!data) {
@@ -87,7 +87,7 @@ ModuleContext* try_cache_per_location_context(IHttpContext& http_context, Module
   if (new_ctx->application_id_tag.empty()) new_ctx->application_id_tag = app_ctx.application_id_tag;
   if (new_ctx->remote_config_tag.empty()) new_ctx->remote_config_tag = app_ctx.remote_config_tag;
 
-  auto hr = meta_container->SetModuleContext(new_ctx.get(), g_module_id);
+  const auto hr = meta_container->SetModuleContext(new_ctx.get(), g_module_id);
   if (SUCCEEDED(hr)) {
     return new_ctx.release();  // container owns it now
   }
@@ -133,7 +133,7 @@ HttpModule::OnBeginRequest(IN IHttpContext* http_context, IN IHttpEventProvider*
   // Best-effort per-location check: if a prior request to this location
   // already cached its context (in OnSendResponse), use it. On the first
   // request to a location, we fall back to the app-level context.
-  ModuleContext* ctx = resolve_cached_context(*http_context, app_ctx);
+  const ModuleContext* ctx = resolve_cached_context(*http_context, app_ctx);
 
   if (!ctx->snippet) {
     return RQ_NOTIFICATION_CONTINUE;
@@ -220,7 +220,7 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
     return false;
   }
 
-  if (auto content_encoding = get_header(pHttpResponse, "Content-Encoding");
+  if (const auto content_encoding = get_header(pHttpResponse, "Content-Encoding");
       !content_encoding.empty()) {
     datadog::telemetry::counter::increment(
         telemetry::injection_skipped,
@@ -253,7 +253,7 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
   const Snippet* snippet = ctx.snippet;
   auto& logger = *ctx.logger;
 
-  HTTP_RESPONSE* pResponseStruct = pHttpResponse.GetRawHttpResponse();
+  const HTTP_RESPONSE* pResponseStruct = pHttpResponse.GetRawHttpResponse();
   if (!pResponseStruct) {
     logger.debug("Raw HTTP response was null");
     return RQ_NOTIFICATION_CONTINUE;
@@ -295,9 +295,9 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
         return RQ_NOTIFICATION_CONTINUE;
       }
 
-      auto chunkLength = dataChunk.FromMemory.BufferLength;
+      const auto chunkLength = dataChunk.FromMemory.BufferLength;
 
-      auto injectorResult =
+      const auto injectorResult =
           injector_write(injector, (uint8_t*)dataChunk.FromMemory.pBuffer, chunkLength);
 
       size_t emitted = 0;
@@ -415,7 +415,7 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
     auto* const end = (uint8_t*)buffer + total_length;
     // Each result must be consumed before the next call: consecutive calls reuse the same slice
     // storage, and a slice may point into the chunk we just handed over.
-    auto append = [&](const InjectorResult& result) {
+    const auto append = [&](const InjectorResult& result) {
       for (size_t i = 0; i < result.slices_length; ++i) {
         const auto& slice = result.slices[i];
         if (offset + slice.length > end) {

@@ -36,14 +36,14 @@ GlobalModule::GlobalModule(IHttpServer* server, DWORD server_version,
     datadog::tracing::DatadogAgentConfig const agent_cfg_for_telemetry;
     auto finalized_agent_cfg_result =
         datadog::tracing::finalize_config(agent_cfg_for_telemetry, logger_, clock);
-    if (auto* error = finalized_agent_cfg_result.if_error()) {
+    if (const auto* error = finalized_agent_cfg_result.if_error()) {
       logger_->log_error(
           error->with_prefix("Failed to finalize agent settings for "
                              "telemetry, no telemetry will be sent."));
 
       return;
     }
-    datadog::tracing::FinalizedDatadogAgentConfig const dac = *finalized_agent_cfg_result;
+    const auto& dac = *finalized_agent_cfg_result;
 
     if (!dac.http_client) {
       logger_->error("HTTPClient for telemetry is null, no telemetry will be sent");
@@ -94,7 +94,7 @@ GlobalModule::OnGlobalApplicationStart(IHttpApplicationStartProvider* provider) 
     logger_->error("Module context container is null for application");
     return GL_NOTIFICATION_CONTINUE;
   }
-  auto hr = app_container->SetModuleContext(ctx.get(), g_module_id);
+  const auto hr = app_container->SetModuleContext(ctx.get(), g_module_id);
   if (FAILED(hr)) {
     logger_->error(
         std::format("Failed to set app module context: {}", std::system_category().message(hr)));
@@ -110,7 +110,7 @@ GlobalModule::OnGlobalApplicationStart(IHttpApplicationStartProvider* provider) 
 
 GLOBAL_NOTIFICATION_STATUS
 GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider* provider) {
-  auto* app = provider->GetApplication();
+  const auto* app = provider->GetApplication();
   if (!app) {
     return GL_NOTIFICATION_CONTINUE;
   }
@@ -123,7 +123,7 @@ GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider* provider) {
   // and will free it via CleanupStoredContext(). Setting to nullptr ensures
   // OnGlobalConfigurationChange won't dereference a dangling pointer if it
   // fires after stop for the same application during shutdown.
-  auto it = configurations_.find(cfg_path);
+  const auto it = configurations_.find(cfg_path);
   if (it != configurations_.end()) {
     it->second = nullptr;
   }

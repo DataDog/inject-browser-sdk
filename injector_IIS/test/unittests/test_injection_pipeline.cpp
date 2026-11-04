@@ -514,13 +514,19 @@ static void setupChunkedHtmlResponse(MockHttpContext& ctx, MockHttpResponse& res
   EXPECT_CALL(resp, GetRawHttpResponse()).WillRepeatedly(Return(&pr.raw));
 }
 
-// The body IIS would send: every entity chunk at whatever length the module left it at.
-static std::string assembleResponseBody(const PreparedChunkedResponse& pr) {
+// The body IIS would send: the entity chunks the raw response points to once the module is done,
+// which may be a list the module rebuilt, at whatever length it left them.
+static std::string responseBody(const HTTP_RESPONSE& raw) {
   std::string body;
-  for (const auto& chunk : pr.chunks) {
+  for (USHORT i = 0; i < raw.EntityChunkCount; i++) {
+    const auto& chunk = raw.pEntityChunks[i];
     body.append(static_cast<const char*>(chunk.FromMemory.pBuffer), chunk.FromMemory.BufferLength);
   }
   return body;
+}
+
+static std::string assembleResponseBody(const PreparedChunkedResponse& pr) {
+  return responseBody(pr.raw);
 }
 
 // ---------------------------------------------------------------------------
@@ -567,8 +573,7 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
 
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
 
-  const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                           pr.chunk.FromMemory.BufferLength);
+  const std::string output = responseBody(pr.raw);
   EXPECT_NE(output.find("DD_RUM"), std::string::npos) << "Expected DD_RUM in output, got:\n"
                                                       << output;
   EXPECT_NE(output.find("test-app-id"), std::string::npos);
@@ -580,32 +585,39 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
   mod.global->Terminate();
 }
 
-// The `injectionStrategy` attribute reaches the injector. Without it the module would be stuck on
-// the `</head>` strategy and the head-open strategies would be unreachable from IIS.
+// The `injectionStrategy` attribute reaches the injector, and without it the module injects right
+// before `</head>`. The title separates the strategies: the head-open ones inject before it,
+// `</head>` after it.
 TEST(InjectionPipeline, InjectionStrategyFromConfig) {
   struct TestCase {
     std::string name;
-    InjectionStrategy strategy;
+    std::optional<InjectionStrategy> configured;  // nullopt: no `injectionStrategy` attribute
+    InjectionStrategy expected_strategy;
     std::string expected_before_snippet;
   };
 
-  const std::string html = "<html><head><meta charset='utf-8'></head><body>hi</body></html>";
+  const std::string html =
+      "<html><head><meta charset='utf-8'><title>t</title></head><body>hi</body></html>";
 
   const std::vector<TestCase> cases = {
-      // The default: the snippet lands right before `</head>`.
-      {"head close tag", InjectionStrategy::HeadCloseTag, "<html><head><meta charset='utf-8'>"},
-      // Injects right after the encoding declaration instead. Reaching this at all needs the
-      // buffering path in PerformInjection, since a short response emits nothing until
-      // `injector_end`.
+      // The default: right before `</head>`.
+      {"default", std::nullopt, InjectionStrategy::HeadCloseTag,
+       "<html><head><meta charset='utf-8'><title>t</title>"},
+      // Right after the encoding declaration instead. A response this short is held back in full
+      // by the head window and only resolves at `injector_end`.
       {"head open tag", InjectionStrategy::HeadOpenTagWithCloseTagFallback,
-       "<html><head><meta charset='utf-8'>"},
+       InjectionStrategy::HeadOpenTagWithCloseTagFallback, "<html><head><meta charset='utf-8'>"},
+      {"head close tag", InjectionStrategy::HeadCloseTag, InjectionStrategy::HeadCloseTag,
+       "<html><head><meta charset='utf-8'><title>t</title>"},
   };
 
   for (const auto& test_case : cases) {
     SCOPED_TRACE(test_case.name);
 
     MockRumConfigElement rumConfig;
-    rumConfig.SetInjectionStrategy(test_case.strategy);
+    if (test_case.configured) {
+      rumConfig.SetInjectionStrategy(*test_case.configured);
+    }
     MockAdminManager adminManager(&rumConfig);
     MockServer mockServer;
     EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
@@ -621,7 +633,7 @@ TEST(InjectionPipeline, InjectionStrategyFromConfig) {
         static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
     ASSERT_NE(ctx, nullptr);
     ASSERT_NE(ctx->snippet, nullptr);
-    EXPECT_EQ(ctx->injection_strategy, test_case.strategy);
+    EXPECT_EQ(ctx->injection_strategy, test_case.expected_strategy);
 
     CHttpModule* httpMod = nullptr;
     ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
@@ -638,13 +650,11 @@ TEST(InjectionPipeline, InjectionStrategyFromConfig) {
 
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
 
-    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                             pr.chunk.FromMemory.BufferLength);
+    const std::string output = responseBody(pr.raw);
+    // The snippet starts on its own line.
+    const size_t snippet_at = output.find("\n<script");
     ASSERT_NE(output.find("DD_RUM"), std::string::npos) << "no snippet in output:\n" << output;
-    EXPECT_EQ(output.substr(0, test_case.expected_before_snippet.size()),
-              test_case.expected_before_snippet)
-        << "full output:\n"
-        << output;
+    EXPECT_EQ(output.substr(0, snippet_at), test_case.expected_before_snippet) << output;
     EXPECT_NE(output.find("<body>hi</body></html>"), std::string::npos) << output;
 
     mod.factory->Terminate();
@@ -669,6 +679,7 @@ TEST(InjectionPipeline, HeadCloseTagSplitAcrossEntityChunks) {
     SCOPED_TRACE("chunk boundary at byte " + std::to_string(split));
 
     MockRumConfigElement rumConfig;
+    rumConfig.SetInjectionStrategy(InjectionStrategy::HeadCloseTag);
     MockAdminManager adminManager(&rumConfig);
     MockServer mockServer;
     EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
@@ -725,6 +736,7 @@ TEST(InjectionPipeline, UnresolvedHeadCloseTagLeavesTheResponseUntouched) {
   const std::vector<std::string> bodies = {"<html><body>hi</body>", "</he"};
 
   MockRumConfigElement rumConfig;
+  rumConfig.SetInjectionStrategy(InjectionStrategy::HeadCloseTag);
   MockAdminManager adminManager(&rumConfig);
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
@@ -951,9 +963,9 @@ TEST(InjectionPipeline, ResponseSentAtOnceIsFlushed) {
   mod.global->Terminate();
 }
 
-// A response with no injection point at all leaves the injector padding the body with spaces to
-// keep its length constant. The buffering path must not serve that padding: like the streaming
-// path, it leaves the queued chunks as they are when nothing was injected.
+// A response with no injection point at all, held back in full by the head window: nothing is
+// injected, so the queued chunks are served as they are, without the padding `injector_end` would
+// add to keep the length constant.
 TEST(InjectionPipeline, UninjectedBufferedResponseLeavesTheResponseUntouched) {
   const std::vector<std::string> bodies = {"<body><pre>hel", "lo"};
 
@@ -990,9 +1002,10 @@ TEST(InjectionPipeline, UninjectedBufferedResponseLeavesTheResponseUntouched) {
   mod.global->Terminate();
 }
 
-// The head-open strategies buffer the whole body, so a response too large to copy is passed through
-// uninstrumented rather than doubling the worker process' memory for it.
-TEST(InjectionPipeline, OversizedResponseIsNotBuffered) {
+// The head-open strategies hold back no more than the head window: past the injection point the
+// response streams, so a large one is injected without being copied. Only the rebuilt chunk list
+// and the bytes the injector held (the window and the snippet) are allocated.
+TEST(InjectionPipeline, LargeResponseStreamsAfterHeadWindow) {
   MockRumConfigElement rumConfig;
   rumConfig.SetInjectionStrategy(InjectionStrategy::HeadOpenTagWithCloseTagFallback);
   MockAdminManager adminManager(&rumConfig);
@@ -1009,8 +1022,9 @@ TEST(InjectionPipeline, OversizedResponseIsNotBuffered) {
   CHttpModule* httpMod = nullptr;
   ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
 
-  // One byte past the 8 MiB the module is willing to buffer.
-  std::string html = "<html><head><title>t</title></head><body>";
+  // Past the 8 MiB the module used to buffer at most, in a single chunk.
+  const std::string head = "<html><head>";
+  std::string html = head + "<title>t</title></head><body>";
   html.resize(8 * 1024 * 1024 + 1, 'a');
 
   MockHttpContext httpCtx;
@@ -1019,11 +1033,230 @@ TEST(InjectionPipeline, OversizedResponseIsNotBuffered) {
   PreparedChunkedResponse pr;
   setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, {html});
 
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .WillOnce(Return(S_OK));
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_TRUE(httpCtx.AllocationGuardIntact()) << "wrote past the end of the injection buffer";
+  EXPECT_LT(httpCtx.AllocatedSize(), size_t{64} * 1024) << "the response was copied";
+
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  ASSERT_NE(ctx, nullptr);
+  const std::string body = assembleResponseBody(pr);
+  ASSERT_EQ(body.size(), html.size() + ctx->snippet->length);
+  EXPECT_EQ(body.substr(0, head.size()), head);
+  EXPECT_NE(body.find("DD_RUM"), std::string::npos);
+  EXPECT_EQ(body.substr(head.size() + ctx->snippet->length), html.substr(head.size()));
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// The head window straddling entity chunks: whatever the injector held back from the chunks before
+// the injection point comes back out with the snippet, so it must be dropped from those chunks or
+// it would be served twice, and the chunks after must stay as they are.
+TEST(InjectionPipeline, HeadOpenTagAcrossEntityChunks) {
+  const std::string html =
+      "<!DOCTYPE html><html><head><meta charset='utf-8'><title>t</title></head><body>hi</body>"
+      "</html>";
+  const std::string before_snippet = "<!DOCTYPE html><html><head><meta charset='utf-8'>";
+
+  // Split into three chunks at every pair of points.
+  for (size_t first = 1; first < html.size(); first += 7) {
+    for (size_t second = first + 1; second < html.size(); second += 11) {
+      SCOPED_TRACE("chunk boundaries at bytes " + std::to_string(first) + " and " +
+                   std::to_string(second));
+
+      MockRumConfigElement rumConfig;
+      rumConfig.SetInjectionStrategy(InjectionStrategy::HeadOpenTagWithCloseTagFallback);
+      MockAdminManager adminManager(&rumConfig);
+      MockServer mockServer;
+      EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+      auto mod = registerModule(mockServer);
+      ASSERT_NE(mod.global, nullptr);
+
+      MockAppWithContext app;
+      MockAppStartProvider appStart(app);
+      ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+      auto* ctx =
+          static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+      ASSERT_NE(ctx, nullptr);
+      ASSERT_EQ(ctx->injection_strategy, InjectionStrategy::HeadOpenTagWithCloseTagFallback);
+
+      CHttpModule* httpMod = nullptr;
+      ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+      MockHttpContext httpCtx;
+      MockHttpResponse httpResp;
+      MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+      PreparedChunkedResponse pr;
+      setupChunkedHtmlResponse(
+          httpCtx, httpResp, &app, &metadata, pr,
+          {html.substr(0, first), html.substr(first, second - first), html.substr(second)});
+
+      EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+          .WillOnce(Return(S_OK));
+      EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+      EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+      EXPECT_TRUE(httpCtx.AllocationGuardIntact()) << "wrote past the end of the injection buffer";
+
+      const std::string body = assembleResponseBody(pr);
+      ASSERT_EQ(body.size(), html.size() + ctx->snippet->length) << "body:\n" << body;
+      EXPECT_EQ(body.substr(0, before_snippet.size()), before_snippet) << body;
+      EXPECT_EQ(body.substr(before_snippet.size() + ctx->snippet->length),
+                html.substr(before_snippet.size()))
+          << body;
+
+      mod.factory->Terminate();
+      mod.global->Terminate();
+    }
+  }
+}
+
+// Runs `html`, split into entity chunks at `boundaries`, through the module with `strategy`, and
+// checks the snippet went in at byte `at` of the original document with every other byte served
+// once, in order. With `max_allocation`, also checks no more than that much request memory was
+// allocated.
+static void expectInjectedAt(InjectionStrategy strategy, const std::string& html,
+                             const std::vector<size_t>& boundaries, size_t at,
+                             std::optional<size_t> max_allocation = std::nullopt) {
+  std::string trace = "chunk boundaries at bytes";
+  std::vector<std::string> bodies;
+  size_t start = 0;
+  for (const size_t boundary : boundaries) {
+    trace += " " + std::to_string(boundary);
+    bodies.push_back(html.substr(start, boundary - start));
+    start = boundary;
+  }
+  bodies.push_back(html.substr(start));
+  SCOPED_TRACE(trace);
+
+  MockRumConfigElement rumConfig;
+  rumConfig.SetInjectionStrategy(strategy);
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  ASSERT_NE(mod.global, nullptr);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+  auto* ctx =
+      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  ASSERT_NE(ctx, nullptr);
+  ASSERT_NE(ctx->snippet, nullptr);
+
+  CHttpModule* httpMod = nullptr;
+  ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  PreparedChunkedResponse pr;
+  setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, bodies);
+
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .WillOnce(Return(S_OK));
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_TRUE(httpCtx.AllocationGuardIntact()) << "wrote past the end of the injection buffer";
+  if (max_allocation) {
+    EXPECT_LE(httpCtx.AllocatedSize(), *max_allocation) << "copied more than the head window";
+  }
+
+  const std::string body = assembleResponseBody(pr);
+  const size_t snippet_length = ctx->snippet->length;
+  ASSERT_EQ(body.size(), html.size() + snippet_length) << body;
+  EXPECT_EQ(body.substr(0, at), html.substr(0, at)) << body;
+  EXPECT_NE(body.substr(at, snippet_length).find("DD_RUM"), std::string::npos) << body;
+  EXPECT_EQ(body.substr(at + snippet_length), html.substr(at)) << body;
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// The head window filled by a later chunk: the injection is found while writing, with what the
+// earlier chunks contributed to the window held back and copied, the rest of the writing chunk
+// referenced in place, and the chunks after it left alone. Only the window and the snippet are
+// copied.
+TEST(InjectionPipeline, HeadOpenTagInjectedWhenLaterChunkFillsTheWindow) {
+  const std::string before = "<!DOCTYPE html><html><head><meta charset='utf-8'>";
+  const std::string html =
+      before + "<title>" + std::string(1500, 'x') + "</title></head><body>hi</body></html>";
+  for (size_t first = 1; first < 1100; first += 97) {
+    for (size_t second = first + 1; second < html.size(); second += 233) {
+      expectInjectedAt(InjectionStrategy::HeadOpenTagWithCloseTagFallback, html, {first, second},
+                       before.size(), size_t{16} * 1024);
+    }
+  }
+}
+
+// No `<head>` within the head window: after giving up on it, the strategy streams for `</head>`,
+// including a tag split across the chunk that ends the window and the next.
+TEST(InjectionPipeline, HeadOpenTagFallsBackToHeadCloseTag) {
+  const std::string html = "<!-- " + std::string(1100, 'c') +
+                           " --><html><head><title>t</title></head><body>hi</body></html>";
+  const size_t tag_start = html.find("</head>");
+  for (size_t first = 1000; first < 1100; first += 13) {
+    for (size_t second = tag_start - 2; second <= tag_start + 8; second++) {
+      expectInjectedAt(InjectionStrategy::HeadOpenTagWithCloseTagFallback, html, {first, second},
+                       tag_start);
+    }
+  }
+}
+
+// A partial `</head>` held across three chunks, with more chunks after the one that completes it.
+TEST(InjectionPipeline, HeadCloseTagAcrossThreeChunksWithFollowingChunks) {
+  const std::string html =
+      "<!DOCTYPE html><html><head><title>t</title></head><body>hi</body><p>more</p></html>";
+  const size_t tag_start = html.find("</head>");
+  for (size_t first = tag_start; first < tag_start + 5; first++) {
+    for (size_t second = first + 1; second <= tag_start + 7; second++) {
+      expectInjectedAt(InjectionStrategy::HeadCloseTag, html, {first, second, html.size() - 4},
+                       tag_start);
+    }
+  }
+}
+
+// Without request memory for the rebuilt chunks, the response is passed through as it was.
+TEST(InjectionPipeline, AllocationFailureLeavesTheResponseUntouched) {
+  const std::vector<std::string> bodies = {"<html><head><title>t</title>",
+                                           "</head><body>hi</body>"};
+
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  auto mod = registerModule(mockServer);
+  ASSERT_NE(mod.global, nullptr);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+
+  CHttpModule* httpMod = nullptr;
+  ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+  MockHttpContext httpCtx;
+  httpCtx.FailAllocations();
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  PreparedChunkedResponse pr;
+  setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, bodies);
+
   EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _)).Times(0);
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
 
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
-  EXPECT_EQ(assembleResponseBody(pr), html);
+  EXPECT_EQ(assembleResponseBody(pr), bodies[0] + bodies[1]);
 
   mod.factory->Terminate();
   mod.global->Terminate();
@@ -1064,8 +1297,7 @@ TEST(InjectionPipeline, DisabledConfig) {
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
 
   // Body unchanged.
-  const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                           pr.chunk.FromMemory.BufferLength);
+  const std::string output = responseBody(pr.raw);
   EXPECT_EQ(output, html);
 
   mod.factory->Terminate();
@@ -1121,8 +1353,7 @@ TEST(InjectionPipeline, PerLocationConfig) {
 
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
 
-    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                             pr.chunk.FromMemory.BufferLength);
+    const std::string output = responseBody(pr.raw);
     EXPECT_NE(output.find("service-a"), std::string::npos)
         << "Root path should inject with service-a, got:\n"
         << output;
@@ -1139,8 +1370,7 @@ TEST(InjectionPipeline, PerLocationConfig) {
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE)
         << "/api path should skip injection (location override disabled RUM)";
 
-    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                             pr.chunk.FromMemory.BufferLength);
+    const std::string output = responseBody(pr.raw);
     EXPECT_EQ(output, html) << "/api path response should be unchanged";
   }
 
@@ -1193,8 +1423,7 @@ TEST(InjectionPipeline, MetadataCacheHit) {
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
 
-    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                             pr.chunk.FromMemory.BufferLength);
+    const std::string output = responseBody(pr.raw);
     EXPECT_NE(output.find("DD_RUM"), std::string::npos);
   }
 
@@ -1276,8 +1505,7 @@ TEST(InjectionPipeline, SetModuleContextFailure) {
 
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
 
-  const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                           pr.chunk.FromMemory.BufferLength);
+  const std::string output = responseBody(pr.raw);
   EXPECT_EQ(output, html);
 
   mod.factory->Terminate();
@@ -1405,8 +1633,7 @@ TEST(InjectionPipeline, TwoEnabledLocationsDistinctConfig) {
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
-    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                             pr.chunk.FromMemory.BufferLength);
+    const std::string output = responseBody(pr.raw);
     EXPECT_NE(output.find("svc-alpha"), std::string::npos);
     EXPECT_EQ(output.find("svc-beta"), std::string::npos);
   }
@@ -1423,8 +1650,7 @@ TEST(InjectionPipeline, TwoEnabledLocationsDistinctConfig) {
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
-    const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                             pr.chunk.FromMemory.BufferLength);
+    const std::string output = responseBody(pr.raw);
     EXPECT_NE(output.find("svc-beta"), std::string::npos);
     EXPECT_EQ(output.find("svc-alpha"), std::string::npos);
   }
@@ -1551,8 +1777,7 @@ TEST(InjectionPipeline, MissingConfig) {
 
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
 
-  const std::string output(static_cast<const char*>(pr.chunk.FromMemory.pBuffer),
-                           pr.chunk.FromMemory.BufferLength);
+  const std::string output = responseBody(pr.raw);
   EXPECT_EQ(output, html);
 
   mod.factory->Terminate();

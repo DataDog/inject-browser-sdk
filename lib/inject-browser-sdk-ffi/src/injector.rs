@@ -190,6 +190,22 @@ pub unsafe extern "C" fn injector_write(
     );
 }
 
+/// How many bytes of the document written so far the [`Injector`] holds back, not returned in
+/// any [`InjectorResult`] yet.
+///
+/// They are always the end of what was written, and come back out in later results, in slices
+/// whose `from_incoming_chunk` is false. A server that queues the chunks it writes can leave them
+/// as they are until a result injects, then drop this many bytes (read before that call) from the
+/// end of the chunks already queued, and serve the result's slices in place of the chunk just
+/// written. Passing `NULL` returns 0.
+#[no_mangle]
+pub unsafe extern "C" fn injector_held_back_length(injector: *const Injector) -> u32 {
+    if injector.is_null() {
+        return 0;
+    }
+    return (*injector).inner.held_back() as u32;
+}
+
 /// Notify the [`Injector`] that the full HTML document has been written.
 ///
 /// If the injection did not happen yet, a slice of the same size as the snippet containing only
@@ -546,6 +562,51 @@ mod tests {
                 b"{\"majorVersion\":5,\"rum\":{\"applicationId\":\"a\",\"clientToken\":\"t\"}}\0",
             ))
         };
+    }
+
+    #[test]
+    fn injector_held_back_length_null_injector_returns_zero() {
+        assert_eq!(unsafe { injector_held_back_length(null()) }, 0);
+    }
+
+    /// The head window is held back until it fills, then comes back out in slices that are not
+    /// flagged as coming from the chunk just written, ahead of the snippet.
+    #[test]
+    fn injector_held_back_length_reports_the_head_window() {
+        let snippet = test_snippet();
+        let injector = unsafe {
+            injector_create_with_strategy(
+                snippet,
+                InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+            )
+        };
+        assert!(!injector.is_null());
+
+        let head = b"<html><head>";
+        let result = unsafe { injector_write(injector, head.as_ptr(), head.len() as u32) };
+        assert_eq!(result.slices_length, 0);
+        assert_eq!(
+            unsafe { injector_held_back_length(injector) },
+            head.len() as u32
+        );
+
+        let rest = [b'x'; 2048];
+        let result = unsafe { injector_write(injector, rest.as_ptr(), rest.len() as u32) };
+        assert!(result.injected);
+        let slices =
+            unsafe { core::slice::from_raw_parts(result.slices, result.slices_length as usize) };
+        assert!(
+            !slices[0].from_incoming_chunk,
+            "the held-back window is not part of this chunk"
+        );
+        assert_eq!(
+            unsafe { core::slice::from_raw_parts(slices[0].start, slices[0].length as usize) },
+            head
+        );
+        assert_eq!(unsafe { injector_held_back_length(injector) }, 0);
+
+        unsafe { injector_cleanup(injector) };
+        unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]

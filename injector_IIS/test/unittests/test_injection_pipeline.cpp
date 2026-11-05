@@ -704,7 +704,8 @@ TEST(InjectionPipeline, ResponseSentInSeveralParts) {
     std::optional<std::string> content_length;  // nullopt: the response announces none
     LengthUpdate length_update;
   };
-  const std::string head = "<html><head><title>t</title></head><body>";
+  // Long enough to fill the head window, which a part more data follows has to.
+  const std::string head = "<html><head><title>t</title></head><body>" + std::string(2000, 'x');
   const std::vector<TestCase> cases = {
       {"first part", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA, head, true, "2621440",
        LengthUpdate::Extended},
@@ -772,7 +773,11 @@ TEST(InjectionPipeline, ResponseSentInSeveralParts) {
     const std::string body = assembleResponseBody(pr);
     if (test_case.injects) {
       EXPECT_NE(body.find("DD_RUM"), std::string::npos) << body;
-      EXPECT_EQ(body.substr(body.size() - std::string("</head><body>").size()), "</head><body>");
+      // Right after `<head>`, and nothing else moves.
+      const size_t after_head = std::string("<html><head>").size();
+      EXPECT_EQ(body.substr(0, after_head), test_case.body.substr(0, after_head));
+      EXPECT_EQ(body.substr(body.size() - (test_case.body.size() - after_head)),
+                test_case.body.substr(after_head));
       if (test_case.length_update == LengthUpdate::Extended) {
         // The snippet is exactly what the injection added to this part.
         const auto snippet_length = body.size() - test_case.body.size();
@@ -957,7 +962,7 @@ TEST(InjectionPipeline, ChunksNotInMemory) {
       for (int i = 0; i < file_at; i++) {
         const auto& chunk = pr.raw.pEntityChunks[i];
         served.append(static_cast<const char*>(chunk.FromMemory.pBuffer),
-                    chunk.FromMemory.BufferLength);
+                      chunk.FromMemory.BufferLength);
       }
       EXPECT_NE(served.find("DD_RUM"), std::string::npos);
       EXPECT_TRUE(served.ends_with(head.substr(head.size() - 100))) << served;

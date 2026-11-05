@@ -1035,13 +1035,6 @@ class PartedResponse {
     ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
     ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
     EXPECT_CALL(httpCtx, GetModuleContextContainer()).WillRepeatedly(Return(&requestContainer));
-    EXPECT_CALL(httpResp, GetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _))
-        .WillRepeatedly(DoAll(Invoke([this](_In_ PCSTR, _Out_ USHORT* len) {
-                                *len = static_cast<USHORT>(content_length.value_or("").size());
-                              }),
-                              Invoke([this](_In_ PCSTR, _Out_ USHORT*) -> PCSTR {
-                                return content_length ? content_length->c_str() : nullptr;
-                              })));
     EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _, _, _))
         .WillRepeatedly(DoAll(Invoke([this](PCSTR, PCSTR value, USHORT length, BOOL) {
                                 extended_to.assign(value, length);
@@ -1060,6 +1053,15 @@ class PartedResponse {
   std::string send(const Part& part) {
     PreparedChunkedResponse pr;
     setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, {part.body});
+    // After the setup, whose default is no announced length.
+    EXPECT_CALL(httpResp, GetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _))
+        .WillRepeatedly(DoAll(Invoke([this](_In_ PCSTR, _Out_ USHORT* len) {
+                                *len = static_cast<USHORT>(content_length.value_or("").size());
+                              }),
+                              Invoke([this](_In_ PCSTR, _Out_ USHORT*) -> PCSTR {
+                                return content_length ? content_length->c_str() : nullptr;
+                              })));
+
     MockSendResponseProvider provider(part.headers,
                                       part.more ? HTTP_SEND_RESPONSE_FLAG_MORE_DATA : 0);
     EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, &provider), RQ_NOTIFICATION_CONTINUE);

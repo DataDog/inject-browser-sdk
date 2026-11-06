@@ -561,38 +561,26 @@ HttpModule::OnBeginRequest(IN IHttpContext* http_context, IN IHttpEventProvider*
     return RQ_NOTIFICATION_CONTINUE;
   }
 
+  // The same configuration the response is injected with: RUM may be on for this location only.
+  const ModuleContext* ctx = resolve_module_context(*http_context);
+  if (ctx == nullptr) {
+    return RQ_NOTIFICATION_CONTINUE;
+  }
+
+  if (!ctx->snippet) {
+    // RUM disabled: nothing else is done for the request.
+    return RQ_NOTIFICATION_CONTINUE;
+  }
+
   // Before this module sets it for the server it forwards to: a request that already has it comes
-  // from an injector downstream.
+  // from an injector downstream. Only looked at with RUM on, so that a request costs nothing more
+  // with it off.
   USHORT pending_length = 0;
   if (http_request->GetHeader(k_injection_pending_header, &pending_length) != nullptr &&
       pending_length != 0) {
     if (auto* state = request_state(*http_context, true)) {
       state->downstream_injector = true;
     }
-  }
-
-  auto* app = http_context->GetApplication();
-  if (!app) {
-    return RQ_NOTIFICATION_CONTINUE;
-  }
-  auto* app_container = app->GetModuleContextContainer();
-  if (!app_container) {
-    return RQ_NOTIFICATION_CONTINUE;
-  }
-  auto* app_opaque = app_container->GetModuleContext(g_module_id);
-  if (!app_opaque) {
-    return RQ_NOTIFICATION_CONTINUE;
-  }
-
-  auto& app_ctx = *static_cast<ModuleContext*>(app_opaque);
-
-  // Best-effort per-location check: if a prior request to this location
-  // already cached its context (in OnSendResponse), use it. On the first
-  // request to a location, we fall back to the app-level context.
-  const ModuleContext* ctx = resolve_cached_context(*http_context, app_ctx);
-
-  if (!ctx->snippet) {
-    return RQ_NOTIFICATION_CONTINUE;
   }
 
   HRESULT const result = http_request->SetHeader(k_injection_pending_header, "1", 1, TRUE);

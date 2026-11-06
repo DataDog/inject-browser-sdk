@@ -20,15 +20,25 @@ var InstallerVersion = "0.2.0"
 var IntegrationVersion = "unset"
 var IntegrationName = "unset"
 
-func validateInput(proxyKind, appID, site, clientToken, arch, remoteConfigurationId string, sessionSampleRate, sessionReplaySampleRate int) error {
+func validateInput(
+	proxyKind, appID, site, clientToken, arch, remoteConfigurationId string,
+	sessionSampleRate, sessionReplaySampleRate int,
+	uninstall bool,
+) error {
 
 	log.Debug("Validating input arguments")
 
-	if arch != "amd64" && arch != "arm64" {
-		return NewInstallerError(ArgumentError, fmt.Errorf("arch must be either 'amd64' or 'arm64', found '%s'", arch))
-	}
 	if proxyKind != "nginx" && proxyKind != "httpd" {
 		return NewInstallerError(ArgumentError, fmt.Errorf("proxyKind must be either 'nginx' or 'httpd', found '%s'", proxyKind))
+	}
+
+	if uninstall {
+		// Uninstalling doesn't require any other arguments
+		return nil
+	}
+
+	if arch != "amd64" && arch != "arm64" {
+		return NewInstallerError(ArgumentError, fmt.Errorf("arch must be either 'amd64' or 'arm64', found '%s'", arch))
 	}
 	if appID == "" {
 		return NewInstallerError(ArgumentError, fmt.Errorf("--appId is required"))
@@ -56,8 +66,16 @@ func validateInput(proxyKind, appID, site, clientToken, arch, remoteConfiguratio
 	return nil
 }
 
-func handleError(err error, sender *TelemetrySender, appId, remoteConfigId string, dryRun bool) {
+func handleError(err error, sender *TelemetrySender, appId, remoteConfigId string, dryRun, uninstall bool) {
 	log.Error(err)
+
+	if uninstall {
+		log.Info("An error was encountered during uninstallation. " +
+			"For manual uninstallation instructions, please refer to the appropriate section at " +
+			"https://docs.datadoghq.com/real_user_monitoring/browser/setup/server/")
+
+		os.Exit(1)
+	}
 
 	if !dryRun {
 		var errorType ErrorType
@@ -98,6 +116,43 @@ func handleError(err error, sender *TelemetrySender, appId, remoteConfigId strin
 
 var start time.Time
 
+func runInstall(
+	configurator ProxyConfigurator,
+	sender *TelemetrySender,
+	proxyKind, appID, site, clientToken, arch, remoteConfigId, agentUri string,
+	sessionSampleRate, sessionReplaySampleRate int,
+	skipVerify, dryRun bool,
+) {
+	if err := configurator.DownloadAndInstallModule(arch, skipVerify); err != nil {
+		handleError(err, sender, appID, remoteConfigId, dryRun, false)
+	}
+
+	if err := configurator.ModifyConfig(remoteConfigId, appID, site, clientToken, agentUri, sessionSampleRate, sessionReplaySampleRate, dryRun); err != nil {
+		handleError(err, sender, appID, remoteConfigId, dryRun, false)
+	}
+
+	if !dryRun {
+		if err := configurator.ValidateConfig(); err != nil {
+			handleError(err, sender, appID, remoteConfigId, dryRun, false)
+		}
+
+		log.Info("Datadog " + proxyKind + " module has been successfully installed and configured. " + configurator.GetFinalConfigMessage())
+	}
+
+	if !dryRun {
+		elapsed := time.Since(start)
+		log.Debug("Sending installation telemetry")
+
+		if err := sender.SendInstallationCount("success", ""); err != nil {
+			log.Error("Error sending installation success count: ", err)
+		}
+
+		if err := sender.SendInstallationTime("success", "", elapsed.Milliseconds()); err != nil {
+			log.Error("Error sending installation success distribution: ", err)
+		}
+	}
+}
+
 func main() {
 	start = time.Now()
 
@@ -118,10 +173,17 @@ func main() {
 	verbose := flag.Bool("verbose", false, "Verbose output")
 	dryRun := flag.Bool("dryRun", false, "Dry run (no changes made)")
 	skipDownload := flag.Bool("skipDownload", false, "Skip the download of this installer and use a local binary instead")
+	uninstall := flag.Bool("uninstall", false, "Uninstall the module")
 
 	log.Info("Starting installer version ", InstallerVersion)
 
 	flag.Parse()
+
+	if *uninstall {
+		log.Info("Running in uninstall mode")
+	} else {
+		log.Info("Running in install mode")
+	}
 
 	if *skipDownload {
 		log.Info("Download was skipped, used local binary")
@@ -136,15 +198,25 @@ func main() {
 
 	sender, err := NewTelemetrySender(*agentUri, "rum-installer-"+*proxyKind, "prod")
 	if err != nil {
-		handleError(err, sender, "", "", *dryRun)
+		handleError(err, sender, "", "", *dryRun, *uninstall)
 	}
 
 	if *dryRun {
 		log.Info("Dry run enabled. No changes will be made.")
 	}
 
-	if err := validateInput(*proxyKind, *appID, *site, *clientToken, *arch, *remoteConfigId, *sessionSampleRate, *sessionReplaySampleRate); err != nil {
-		handleError(err, sender, *appID, *remoteConfigId, *dryRun)
+	if err := validateInput(
+		*proxyKind,
+		*appID,
+		*site,
+		*clientToken,
+		*arch,
+		*remoteConfigId,
+		*sessionSampleRate,
+		*sessionReplaySampleRate,
+		*uninstall,
+	); err != nil {
+		handleError(err, sender, *appID, *remoteConfigId, *dryRun, *uninstall)
 	}
 
 	var configurator ProxyConfigurator
@@ -154,11 +226,11 @@ func main() {
 	case "httpd":
 		configurator = &HttpdConfigurator{}
 	default:
-		handleError(NewInstallerError(ArgumentError, fmt.Errorf("--proxyKind unexpected value")), sender, *appID, *remoteConfigId, *dryRun)
+		handleError(NewInstallerError(ArgumentError, fmt.Errorf("--proxyKind unexpected value")), sender, *appID, *remoteConfigId, *dryRun, *uninstall)
 	}
 
 	if err := configurator.VerifyRequirements(); err != nil {
-		handleError(err, sender, *appID, *remoteConfigId, *dryRun)
+		handleError(err, sender, *appID, *remoteConfigId, *dryRun, *uninstall)
 	}
 
 	// TODO: Re-enable once we again have signatures available
@@ -167,32 +239,29 @@ func main() {
 		*skipVerify = true
 	}
 
-	if err := configurator.DownloadAndInstallModule(*arch, *skipVerify); err != nil {
-		handleError(err, sender, *appID, *remoteConfigId, *dryRun)
-	}
-
-	if err := configurator.ModifyConfig(*remoteConfigId, *appID, *site, *clientToken, *agentUri, *sessionSampleRate, *sessionReplaySampleRate, *dryRun); err != nil {
-		handleError(err, sender, *appID, *remoteConfigId, *dryRun)
-	}
-
-	if !*dryRun {
-		if err := configurator.ValidateConfig(); err != nil {
-			handleError(err, sender, *appID, *remoteConfigId, *dryRun)
+	if *uninstall {
+		if err := configurator.Uninstall(*dryRun); err != nil {
+			handleError(err, sender, *appID, *remoteConfigId, *dryRun, *uninstall)
 		}
 
-		log.Info("Datadog " + *proxyKind + " module has been successfully installed and configured. " + configurator.GetFinalConfigMessage())
-	}
-
-	if !*dryRun {
-		elapsed := time.Since(start)
-		log.Debug("Sending installation telemetry")
-
-		if err := sender.SendInstallationCount("success", ""); err != nil {
-			log.Error("Error sending installation success count: ", err)
+		if !*dryRun {
+			log.Info("Datadog " + *proxyKind + " module has been successfully uninstalled. " + configurator.GetFinalConfigMessage())
 		}
-
-		if err := sender.SendInstallationTime("success", "", elapsed.Milliseconds()); err != nil {
-			log.Error("Error sending installation success distribution: ", err)
-		}
+	} else {
+		runInstall(
+			configurator,
+			sender,
+			*proxyKind,
+			*appID,
+			*site,
+			*clientToken,
+			*arch,
+			*remoteConfigId,
+			*agentUri,
+			*sessionSampleRate,
+			*sessionReplaySampleRate,
+			*skipVerify,
+			*dryRun,
+		)
 	}
 }

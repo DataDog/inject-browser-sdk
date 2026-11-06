@@ -5,141 +5,245 @@
 #
 # Copyright 2024-Present Datadog, Inc.
 
-"""
-This script collects and outputs licenses from third-party dependencies in CSV format.
+"""Generate/check attribution from tracked source, Cargo metadata and manual entries."""
 
-It relies on the following dependencies:
-   - cargo-license (<https://github.com/onur/cargo-license>)
-   - get_licenses_copyrights (<https://github.com/DataDog/ospo-tools/tree/v0.2.0-beta>)
-
-Usage:
-======
-# Clone the ospo-tools repository
-# To print 3rd deps licenses
-./scripts/license.py --licenses-script ~/dev/ospo-tools/src/ospo_tools/cli/get_licenses_copyrights.py
-
-If what you are looking for is to add the license to the beginning of files, you can
-use addlicense (https://github.com/google/addlicense). Example:
-
-addlicense -f NOTICE -ignore "**/*.yml" .
-"""
-
-from license_tools import manual_mappings, ThirdParty, merge_dependencies
-from typing import List
-import csv
-import sys
-import glob
-import subprocess
-import json
-import typing
-import os
 import argparse
-import re
-
+import csv
+import difflib
+import io
+import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-
-def run_cmd(cmd: str) -> typing.Any:
-    return subprocess.run(cmd, shell=True, capture_output=True, check=True)
-
-def process_licenses(name: str, licenses: str) -> List[str]:
-    if not licenses or licenses.upper() == "UNKNOWN":
-        return []
-
-    normalized = []
-
-    for license in re.split(r';; | OR | AND |, ', licenses.translate(str.maketrans('', '', '"[]()\''))):
-        normalized.append(license)
-
-    return normalized
+ROOT = Path(__file__).resolve().parents[1]
+FIELDS = ("Component", "Origin", "License", "Copyright")
+# These contain attribution data, rather than copies of third-party source.
+INVENTORIES = {"LICENSE-3rdparty.csv", "licenses/manual.csv", "licenses/source-files.json"}
 
 
-def process_copyright(copyright_str: str) -> List[str]:
-    if not copyright_str or copyright_str.upper() == "UNKNOWN" or copyright_str.upper() == "NONE":
-        return []
-    split_values = re.split(r"\||', '", copyright_str)
-    return [value.translate(str.maketrans('', '', '"[]()\'')) for value in split_values]
+def read_csv(path):
+    with path.open(newline="", encoding="utf-8") as stream:
+        reader = csv.DictReader(stream)
+        if reader.fieldnames != list(FIELDS):
+            raise ValueError(f"{path}: expected columns {FIELDS}")
+        rows = list(reader)
+    for row in rows:
+        if set(row) != set(FIELDS) or any(not isinstance(value, str) or not value.strip() for value in row.values()):
+            raise ValueError(f"{path}: incomplete attribution: {row}")
+    return rows
 
-def cargo_licenses() -> typing.Dict[str, ThirdParty]:
-    """
-    Rely on `cargo-license`.
-    """
-    workspace_cargo = os.path.join(PROJECT_DIR, "Cargo.toml")
-    r = run_cmd(
-        f"cargo-license -j --manifest-path {workspace_cargo}",
-    )
-    j = json.loads(r.stdout)
 
-    res = dict()
-    for x in j:
-        if x["name"] not in res:
-            if x["license"] is not None:
-                x["license"] = x["license"].translate(str.maketrans('', '', '"[]()\''))
+def render(rows):
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream, quoting=csv.QUOTE_ALL, lineterminator="\n")
+    writer.writerow(FIELDS)
+    writer.writerows(sorted({tuple(row[field] for field in FIELDS) for row in rows}))
+    return stream.getvalue()
 
-            res[x["name"]] = ThirdParty(
-                component=x["name"],
-                origin=x["repository"],
-                license=process_licenses(x["name"], x["license"]),
-                copyright=process_copyright(x["authors"])
-            )
-    return res
 
-def dd_licenses(script_path: str) -> typing.Dict[str, ThirdParty]:
-    """
-    Rely on `get_licenses_copyrights`.
-    
-    Args:
-        script_path: Path to the get_licenses_copyrights.py script.
-    """
-    res = dict()
-    if not os.path.exists(script_path):
-        raise FileNotFoundError(f"Could not find script at {script_path}")
+def notices(files):
+    return sorted({notice["copyright"] for file in files for notice in file.get("copyrights", [])})
 
-    r = run_cmd(f"python {script_path} https://github.com/DataDog/inject-browser-sdk")
 
-    reader = csv.reader(r.stdout.decode().splitlines())
-    next(reader)  # Skip header
-    
-    for row in reader:
-        if not row:
+def expressions(files):
+    found = {
+        detection["license_expression_spdx"]
+        for file in files for detection in file.get("license_detections", [])
+        if detection.get("license_expression_spdx")
+    }
+    # ScanCode interprets "Unless explicitly stated otherwise" in our header
+    # as an unknown reference alongside the explicitly named Apache license.
+    boilerplate = "LicenseRef-scancode-unknown-license-reference AND Apache-2.0"
+    return sorted({"Apache-2.0" if value == boilerplate else value for value in found})
+
+
+def rust_records(packages, scans):
+    rows = []
+    for index, package in enumerate(packages):
+        origin = package.get("repository") or package.get("homepage")
+        license_expression = package.get("license")
+        if not origin or not license_expression:
+            raise ValueError(f"{package['name']}: missing Cargo origin/license; review upstream metadata")
+        copyrights = notices([file for path, file in scans.items() if path.startswith(f"rust/{index}/")])
+        # Match Datadog's rust-license-tool fallback when upstream omits notices.
+        copyright_text = "; ".join(copyrights) or ", ".join(package["authors"]) or f"The {package['name']} Authors"
+        rows.append(dict(zip(FIELDS, (package["name"], origin, license_expression, copyright_text))))
+    return rows
+
+
+def source_records(scans, config):
+    owners = {}
+    for component, attribution in config["third_party"].items():
+        for path in attribution["files"]:
+            if path in owners:
+                raise ValueError(f"{path}: listed under multiple components")
+            owners[path] = component
+            if f"source/{path}" not in scans:
+                raise ValueError(f"{path}: attributed source file is missing")
+    reviewed = config.get("first_party", {})
+    for path, review in reviewed.items():
+        if path in owners or f"source/{path}" not in scans or not review.get("reason"):
+            raise ValueError(f"{path}: invalid first-party review")
+    for path, file in scans.items():
+        if not path.startswith("source/"):
             continue
+        path = path.removeprefix("source/")
+        if path in INVENTORIES or path in owners or Path(path).name == "package-lock.json":
+            continue
+        holders = [holder["holder"] for holder in file.get("holders", [])]
+        foreign = [holder for holder in holders if "datadog" not in holder.lower()]
+        licenses = expressions([file])
+        if path in reviewed:
+            if foreign or licenses != sorted(reviewed[path]["licenses"]):
+                raise ValueError(f"{path}: reviewed first-party notices changed; review licenses/source-files.json")
+            continue
+        if foreign or any(license_id != "Apache-2.0" for license_id in licenses):
+            raise ValueError(
+                f"{path}: unregistered source attribution: holders={foreign}, licenses={licenses}. "
+                "Review and register third-party files in licenses/source-files.json."
+            )
+    rows = []
+    for component, attribution in config["third_party"].items():
+        files = [scans[f"source/{path}"] for path in attribution["files"]]
+        licenses, copyrights = expressions(files), notices(files)
+        if not licenses or not copyrights:
+            raise ValueError(f"{component}: source scan did not find both a license and copyright")
+        rows.append(dict(zip(FIELDS, (component, attribution["origin"], " AND ".join(f"({license_id})" for license_id in licenses) if len(licenses) > 1 else licenses[0], "; ".join(copyrights)))))
+    return rows
 
-        res[row[0]] = ThirdParty(
-            component=row[0],
-            origin=row[1],
-            license=process_licenses(row[0], row[2]),
-            copyright=process_copyright(row[3])
-        )
 
-    return res
-
-
-def print_csv(deps: typing.Dict[str, ThirdParty]) -> None:
-    print('"Component","Origin","License","Copyright"')
-    for x in deps.values():
-        print(f'"{x.component}","{x.origin}","{x.license}","{x.copyright}"')
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Collect and output licenses from third-party dependencies")
-    parser.add_argument(
-        "--licenses-script",
-        required=True,
-        help="Path to the get_licenses_copyrights.py"
+def tracked_files(root):
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=root, check=True, capture_output=True,
     )
-    return parser.parse_args()
+    return sorted(set(os.fsdecode(result.stdout).strip("\0").split("\0")))
 
 
-def main() -> int:
-    args = parse_args()
+def scan(root, packages, paths, stage, report):
+    source_paths = {}
+    expected = set()
+    for index, name in enumerate(paths):
+        source = root / name
+        if source.is_symlink() and not source.resolve().is_relative_to(root):
+            raise ValueError(f"{name}: symlink points outside the repository")
+        if source.is_file():
+            # Neutral names ensure ScanCode also scans VCS metadata (such as
+            # .gitignore), which its inventory would otherwise always skip.
+            staged_name = f"source/{index}{source.suffix}"
+            source_paths[staged_name] = f"source/{name}"
+            expected.add(f"source/{name}")
+            target = stage / staged_name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+    for index, package in enumerate(packages):
+        directory = Path(package["manifest_path"]).parent
+        candidates = {
+            path for path in directory.iterdir()
+            if path.is_file() and path.name.lower().startswith(("license", "copying", "copyright", "notice", "readme"))
+        }
+        if package.get("license_file"):
+            candidates.add(directory / package["license_file"])
+        for number, source in enumerate(sorted(candidates)):
+            target = stage / "rust" / str(index) / f"{number}-{source.name}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            expected.add(target.relative_to(stage).as_posix())
+    environment = os.environ.copy()
+    environment.setdefault("SCANCODE_CACHE", str(root / ".cache" / "scancode"))
+    subprocess.run(
+        ["scancode", "--license", "--copyright", "--strip-root", "--processes", "2", "--json-pp", str(report), str(stage)],
+        check=True, env=environment, stdout=sys.stderr,
+    )
+    result = json.loads(report.read_text())
+    files = {
+        source_paths.get(file["path"], file["path"]): file
+        for file in result["files"] if file["type"] == "file"
+    }
+    for path, file in files.items():
+        if file.get("scan_errors"):
+            raise ValueError(f"{path}: scan failed: {file['scan_errors']}")
+    if expected - files.keys():
+        raise ValueError(f"ScanCode skipped files: {sorted(expected - files.keys())}")
+    return files
 
-    deps_licenses = dd_licenses(args.licenses_script)
-    merge_dependencies(deps_licenses, cargo_licenses())
-    deps_licenses.update(manual_mappings(deps_licenses))
-    print_csv(deps_licenses)
 
-    return 0
+def generate(root):
+    manual = read_csv(root / "licenses/manual.csv")
+    config = json.loads((root / "licenses/source-files.json").read_text())
+    metadata = json.loads(subprocess.run(
+        ["cargo", "metadata", "--locked", "--all-features", "--format-version", "1"],
+        cwd=root, check=True, capture_output=True, text=True,
+    ).stdout)
+    # No target filter: include Windows/Wasm as well as build and test dependencies.
+    packages = sorted(
+        (package for package in metadata["packages"] if package["source"] is not None),
+        key=lambda package: (package["name"], package["version"], package["source"]),
+    )
+    with tempfile.TemporaryDirectory(prefix="license-check-") as directory:
+        directory = Path(directory)
+        stage = directory / "input"
+        scans = scan(root, packages, tracked_files(root), stage, directory / "scan.json")
+        rows = rust_records(packages, scans) + source_records(scans, config)
+    automatic_names = {row["Component"] for row in rows}
+    collisions = automatic_names & {row["Component"] for row in manual}
+    if collisions:
+        raise ValueError(f"Remove automatically generated components from licenses/manual.csv: {sorted(collisions)}")
+    return render(manual + rows)
+
+
+def write_inventory(target, content):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=target.parent,
+            prefix=f".{target.name}.", delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(target.stat().st_mode & 0o777 if target.exists() else 0o644)
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--write", action="store_true", help="Update LICENSE-3rdparty.csv instead of checking it")
+    mode.add_argument("--licenses-script", metavar="PATH", help="Deprecated: emit CSV to stdout; the external script is no longer used")
+    args = parser.parse_args()
+    if args.licenses_script is not None:
+        print("--licenses-script is deprecated; use --write to update the inventory. The external script is no longer used.", file=sys.stderr)
+    try:
+        expected = generate(ROOT)
+        if args.licenses_script is not None:
+            sys.stdout.write(expected)
+            return 0
+        target = ROOT / "LICENSE-3rdparty.csv"
+        if args.write:
+            write_inventory(target, expected)
+            print("Updated LICENSE-3rdparty.csv")
+            return 0
+        actual = target.read_text(encoding="utf-8") if target.exists() else ""
+        if actual != expected:
+            sys.stdout.writelines(difflib.unified_diff(actual.splitlines(True), expected.splitlines(True), fromfile=str(target.name), tofile="generated"))
+            print("Run python scripts/license.py --write and commit LICENSE-3rdparty.csv.", file=sys.stderr)
+            return 1
+        print("LICENSE-3rdparty.csv is up to date (repository source and all Rust dependencies).")
+        return 0
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        print(f"License check failed: {error}", file=sys.stderr)
+        if isinstance(error, subprocess.CalledProcessError) and error.stderr:
+            print(error.stderr, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

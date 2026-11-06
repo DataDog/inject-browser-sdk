@@ -70,9 +70,17 @@ fn merge_flag(value: &mut ngx_flag_t, prev: ngx_flag_t) {
     }
 }
 
+/// Whether any location of the configuration being loaded turns injection on. Without one the
+/// filters are not even installed: with RUM disabled everywhere, a request costs nothing more than
+/// without the module. Locations are merged before `postconfiguration`, which reads it.
+static ANY_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 impl Merge for LocationConf {
     fn merge(&mut self, prev: &Self) -> Result<(), MergeConfigError> {
         merge_flag(&mut self.enable, prev.enable);
+        if self.enable == 1 {
+            ANY_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
         merge_flag(&mut self.sendfile, prev.sendfile);
         Ok(())
     }
@@ -96,7 +104,16 @@ impl HttpModule for Module {
         unsafe { &*ptr::addr_of!(ngx_http_rum_inject_module) }
     }
 
+    unsafe extern "C" fn preconfiguration(_cf: *mut ngx_conf_t) -> ngx_int_t {
+        // Each configuration load, a reload included, decides afresh.
+        ANY_ENABLED.store(false, core::sync::atomic::Ordering::Relaxed);
+        NGX_OK
+    }
+
     unsafe extern "C" fn postconfiguration(_cf: *mut ngx_conf_t) -> ngx_int_t {
+        if !ANY_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+            return NGX_OK;
+        }
         // Build the snippet in the master, before workers fork.
         let _ = bench_common::snippet();
         unsafe {

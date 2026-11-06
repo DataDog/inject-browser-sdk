@@ -29,10 +29,17 @@ class HttpModule : public CHttpModule {
 
   bool ShouldAttemptInjection(IHttpResponse& pHttpResponse, const ModuleContext& ctx) const;
 
-  // `more_data`: more sends of the same response follow this one, see OnSendResponse.
+  // Where a send carrying the start of the body stands in the response, see OnSendResponse.
+  struct Send {
+    // More sends of the response follow this one.
+    bool more_data;
+    // The headers went out with an earlier send, which carried no body: they can no longer change.
+    bool headers_gone;
+  };
+
   REQUEST_NOTIFICATION_STATUS PerformInjection(IHttpContext& pHttpContext,
                                                IHttpResponse& pHttpResponse, ModuleContext& ctx,
-                                               bool more_data);
+                                               Send send);
 };
 
 class HttpModuleFactory : public IHttpModuleFactory {

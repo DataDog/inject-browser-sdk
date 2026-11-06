@@ -855,6 +855,65 @@ TEST(InjectionPipeline, ResponseSentInSeveralParts) {
   }
 }
 
+// An application that flushes the headers before any body, as ASP.NET's `Response.Flush()` does:
+// the first send has headers but no body, and the next one, with the start of the body, has no
+// headers. That one is injected into, without touching the headers that are gone, unless they
+// announced a length the snippet would make wrong. The sends after it are later parts.
+TEST(InjectionPipeline, HeadersFlushedBeforeTheBody) {
+  for (const bool announced : {false, true}) {
+    SCOPED_TRACE(announced ? "with a Content-Length" : "chunked");
+
+    MockRumConfigElement rumConfig;
+    MockAdminManager adminManager(&rumConfig);
+    MockServer mockServer;
+    EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+    auto mod = registerModule(mockServer);
+    MockAppWithContext app;
+    MockAppStartProvider appStart(app);
+    ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+    CHttpModule* httpMod = nullptr;
+    ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+    MockHttpContext httpCtx;
+    MockHttpResponse httpResp;
+    MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+    MockModuleContextContainer requestContainer;
+    EXPECT_CALL(httpCtx, GetModuleContextContainer()).WillRepeatedly(Return(&requestContainer));
+    // The headers are gone after the first send: nothing may set any.
+    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(_), _, _, _)).Times(0);
+    EXPECT_CALL(httpResp, DeleteHeader(Matcher<PCSTR>(_))).Times(0);
+    EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
+
+    const auto send = [&](const std::vector<std::string>& bodies, BOOL headers, DWORD flags) {
+      PreparedChunkedResponse pr;
+      setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, bodies);
+      const std::string length = "100000";
+      EXPECT_CALL(httpResp, GetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _))
+          .WillRepeatedly(DoAll(Invoke([announced, length](_In_ PCSTR, _Out_ USHORT* len) {
+                                  *len = announced ? static_cast<USHORT>(length.size()) : 0;
+                                }),
+                                Return(announced ? "100000" : static_cast<PCSTR>(nullptr))));
+      MockSendResponseProvider provider(headers, flags);
+      EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, &provider), RQ_NOTIFICATION_CONTINUE);
+      return assembleResponseBody(pr);
+    };
+
+    EXPECT_EQ(send({}, TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA), "");
+    const std::string head = "<html><head><title>t</title></head><body>";
+    const std::string body = send({head}, FALSE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA);
+    EXPECT_EQ(body.find("DD_RUM") != std::string::npos, !announced) << body;
+    if (announced) {
+      EXPECT_EQ(body, head);
+    }
+    // A later part: the body started already.
+    const std::string later = "<p>hi</p><head></head></body></html>";
+    EXPECT_EQ(send({later}, FALSE, 0), later);
+
+    mod.factory->Terminate();
+    mod.global->Terminate();
+  }
+}
+
 // The single send of a whole response is still flushed and finished, with the snippet in.
 TEST(InjectionPipeline, ResponseSentAtOnceIsFlushed) {
   MockRumConfigElement rumConfig;

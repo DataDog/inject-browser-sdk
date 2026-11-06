@@ -126,6 +126,7 @@ def tracked_files(root):
 
 def scan(root, packages, paths, stage, report):
     source_paths = {}
+    expected = set()
     for index, name in enumerate(paths):
         source = root / name
         if source.is_symlink() and not source.resolve().is_relative_to(root):
@@ -135,6 +136,7 @@ def scan(root, packages, paths, stage, report):
             # .gitignore), which its inventory would otherwise always skip.
             staged_name = f"source/{index}{source.suffix}"
             source_paths[staged_name] = f"source/{name}"
+            expected.add(f"source/{name}")
             target = stage / staged_name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
@@ -150,11 +152,12 @@ def scan(root, packages, paths, stage, report):
             target = stage / "rust" / str(index) / f"{number}-{source.name}"
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
+            expected.add(target.relative_to(stage).as_posix())
     environment = os.environ.copy()
     environment.setdefault("SCANCODE_CACHE", str(root / ".cache" / "scancode"))
     subprocess.run(
         ["scancode", "--license", "--copyright", "--strip-root", "--processes", "2", "--json-pp", str(report), str(stage)],
-        check=True, env=environment,
+        check=True, env=environment, stdout=sys.stderr,
     )
     result = json.loads(report.read_text())
     files = {
@@ -164,7 +167,6 @@ def scan(root, packages, paths, stage, report):
     for path, file in files.items():
         if file.get("scan_errors"):
             raise ValueError(f"{path}: scan failed: {file['scan_errors']}")
-    expected = {f"source/{path}" for path in paths if (root / path).is_file()}
     if expected - files.keys():
         raise ValueError(f"ScanCode skipped files: {sorted(expected - files.keys())}")
     return files
@@ -194,15 +196,40 @@ def generate(root):
     return render(manual + rows)
 
 
+def write_inventory(target, content):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=target.parent,
+            prefix=f".{target.name}.", delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(target.stat().st_mode & 0o777 if target.exists() else 0o644)
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--write", action="store_true", help="Update LICENSE-3rdparty.csv instead of checking it")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--write", action="store_true", help="Update LICENSE-3rdparty.csv instead of checking it")
+    mode.add_argument("--licenses-script", metavar="PATH", help="Deprecated: emit CSV to stdout; the external script is no longer used")
     args = parser.parse_args()
+    if args.licenses_script is not None:
+        print("--licenses-script is deprecated; use --write to update the inventory. The external script is no longer used.", file=sys.stderr)
     try:
         expected = generate(ROOT)
+        if args.licenses_script is not None:
+            sys.stdout.write(expected)
+            return 0
         target = ROOT / "LICENSE-3rdparty.csv"
         if args.write:
-            target.write_text(expected, encoding="utf-8")
+            write_inventory(target, expected)
             print("Updated LICENSE-3rdparty.csv")
             return 0
         actual = target.read_text(encoding="utf-8") if target.exists() else ""

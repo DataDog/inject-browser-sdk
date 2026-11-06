@@ -32,4 +32,6 @@ jobs:
       - name: Test attribution checks
         run: python -m unittest discover -s scripts/tests
       - name: Check source and Rust attributions
-        run: python scripts/license.py
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          python scripts/license.py

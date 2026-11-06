@@ -91,6 +91,11 @@ the non-Rust dependency graphs.
 The scanner checks declared notices; it cannot establish the provenance of
 unmarked copied code.
 
+For a transition period, `scripts/license.py --licenses-script PATH` still emits
+CSV on stdout, with a deprecation warning on stderr. The old external script is
+no longer executed. Existing imports of `scripts/license_tools.py` also remain
+available as deprecated compatibility helpers; the new checker does not use them.
+
 ## Code complexity
 
 GitLab runs advisory [LM-CC jobs](https://github.com/DataDog/dd-repo-tools/tree/main/shared/llm-cc)

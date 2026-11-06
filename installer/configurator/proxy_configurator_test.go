@@ -61,7 +61,7 @@ func TestTransformNginxConfigSnapshot(t *testing.T) {
 				ModulesPath: modulesPath,
 			}
 
-			transformed, err := transformConfig(configurator, input, remoteConfigId, agentUri, appId, clientToken, site, sessionSampleRate, sessionReplaySampleRate, tmpFile.Name())
+			transformed, err := addDatadogToConfig(configurator, input, remoteConfigId, agentUri, appId, clientToken, site, sessionSampleRate, sessionReplaySampleRate, tmpFile.Name())
 			if tc.IsError {
 				require.Error(t, err, "Expected an error transforming the configuration, it succeeded instead")
 				return
@@ -84,6 +84,42 @@ func TestTransformNginxConfigSnapshot(t *testing.T) {
 
 				assert.Equal(t, string(expected), string(transformed), "Transformed config does not match snapshot")
 			}
+		})
+		t.Run(tc.Filename, func(t *testing.T) {
+			snapshotFile := filepath.Join("testdata", filepath.Base(tc.Filename)+".snap")
+			if tc.IsError {
+				snapshotFile = tc.Filename
+			}
+
+			// Read the snapshot file (with Datadog config)
+			input, err := os.ReadFile(snapshotFile)
+			require.NoError(t, err, "Failed to read snapshot file")
+
+			// Create a temporary file for the output
+			tmpFile, err := os.CreateTemp("", "nginx-config-*.conf")
+			require.NoError(t, err, "Failed to create temporary file")
+			defer os.Remove(tmpFile.Name())
+
+			configurator := &NginxConfigurator{
+				ModulesPath: modulesPath,
+			}
+
+			// Apply removeDatadogFromConfig to get back the original config
+			transformed, err := removeDatadogFromConfig(configurator, input, tmpFile.Name())
+
+			if tc.IsError {
+				require.Error(t, err, "Expected an error removing the Datadog configuration, it succeeded instead")
+				return
+			}
+
+			require.NoError(t, err, "Failed to remove Datadog from config")
+
+			// Get the original file (without Datadog config) to compare against
+			expected, err := os.ReadFile(tc.Filename)
+			require.NoError(t, err, "Failed to read original file")
+
+			// Compare the transformed config with the original file
+			assert.Equal(t, string(expected), string(transformed), "Config after Datadog removal does not match original config")
 		})
 	}
 }

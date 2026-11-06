@@ -134,6 +134,7 @@ main() {
     SKIP_DOWNLOAD=false
     EXPLICIT_AGENT_URI=""
     HELP=false
+    UNINSTALL=false
 
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -141,13 +142,14 @@ main() {
             --skipDownload) SKIP_DOWNLOAD=true; shift 1;;
             --help) HELP=true; shift 1;;
             --agentUri) EXPLICIT_AGENT_URI="$2"; shift 2;;
+            --uninstall) UNINSTALL=true; shift 1;;
             *) shift 1;;
         esac
     done
 
     resolve_agent_uri
 
-    if [ $HELP = false ] ; then
+    if [ $HELP = false ] && [ $UNINSTALL = false ] ; then
         verify_connection
     fi
 

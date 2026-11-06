@@ -1008,7 +1008,7 @@ TEST(InjectionPipeline, FirstPartShorterThanTheHeadWindowIsNotInjected) {
 // One part of a response sent in several, through the module: `headers` for the first one, `more`
 // unless it is the last. The response announces `content_length`, if any.
 struct Part {
-  std::string body;
+  std::string body;  // none, rather than an empty chunk, when empty
   BOOL headers;
   bool more;
 };
@@ -1052,7 +1052,9 @@ class PartedResponse {
   // Sends `part` and returns the body IIS would send for it.
   std::string send(const Part& part) {
     PreparedChunkedResponse pr;
-    setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, {part.body});
+    setupChunkedHtmlResponse(
+        httpCtx, httpResp, &app, &metadata, pr,
+        part.body.empty() ? std::vector<std::string>{} : std::vector<std::string>{part.body});
     // After the setup, whose default is no announced length.
     EXPECT_CALL(httpResp, GetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _))
         .WillRepeatedly(DoAll(Invoke([this](_In_ PCSTR, _Out_ USHORT* len) {
@@ -1158,6 +1160,32 @@ TEST(InjectionPipeline, CarriedInjectionPadsTheLastPart) {
     EXPECT_EQ(response.send(last), last.body + padding);
     response.stop();
   }
+}
+
+// The headers flushed alone before the body: the first send with a body carries the injector over
+// like any first part, and a `<head>` in a later one is injected after, all without touching the
+// headers that are gone. Chunked: a length they announced would have ruled the injection out.
+TEST(InjectionPipeline, CarriedOverAfterTheHeadersWentAlone) {
+  PartedResponse response;
+  response.start();
+  EXPECT_CALL(response.httpResp, SetHeader(Matcher<PCSTR>(_), _, _, _)).Times(0);
+  EXPECT_CALL(response.httpResp, DeleteHeader(Matcher<PCSTR>(_))).Times(0);
+
+  const Part headers{"", TRUE, true};
+  const Part first{"<html><!-- " + std::string(2000, 'c') + " -->", FALSE, true};
+  const Part second{"<p>x</p><head><meta name=a>", FALSE, true};
+  const Part last{"</head><body>hi</body></html>", FALSE, false};
+
+  EXPECT_EQ(response.send(headers), "");
+  EXPECT_EQ(response.send(first), first.body);
+  const std::string body = response.send(second);
+  const std::string before = "<p>x</p><head>";
+  EXPECT_EQ(body.size(), second.body.size() + response.snippet_length()) << body;
+  EXPECT_EQ(body.substr(0, before.size()), before);
+  EXPECT_NE(body.find("DD_RUM"), std::string::npos) << body;
+  // Not padded either: no length was announced.
+  EXPECT_EQ(response.send(last), last.body);
+  response.stop();
 }
 
 // Without HTML evidence in the first part, nothing is carried over: the later `<head>` is left

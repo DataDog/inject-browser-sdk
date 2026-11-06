@@ -537,6 +537,10 @@ static std::string responseBody(const HTTP_RESPONSE& raw) {
   std::string body;
   for (USHORT i = 0; i < raw.EntityChunkCount; i++) {
     const auto& chunk = raw.pEntityChunks[i];
+    if (chunk.DataChunkType == HttpDataChunkFromFileHandle) {
+      body += "[file]";
+      continue;
+    }
     body.append(static_cast<const char*>(chunk.FromMemory.pBuffer), chunk.FromMemory.BufferLength);
   }
   return body;
@@ -1011,6 +1015,7 @@ struct Part {
   std::string body;  // none, rather than an empty chunk, when empty
   BOOL headers;
   bool more;
+  bool file = false;  // a file chunk follows the body, which serves as "[file]"
 };
 
 class PartedResponse {
@@ -1052,9 +1057,20 @@ class PartedResponse {
   // Sends `part` and returns the body IIS would send for it.
   std::string send(const Part& part) {
     PreparedChunkedResponse pr;
-    setupChunkedHtmlResponse(
-        httpCtx, httpResp, &app, &metadata, pr,
-        part.body.empty() ? std::vector<std::string>{} : std::vector<std::string>{part.body});
+    std::vector<std::string> bodies;
+    if (!part.body.empty()) {
+      bodies.push_back(part.body);
+    }
+    if (part.file) {
+      bodies.emplace_back("file");
+    }
+    setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, bodies);
+    if (part.file) {
+      HTTP_DATA_CHUNK& file = pr.chunks[bodies.size() - 1];
+      file = {};
+      file.DataChunkType = HttpDataChunkFromFileHandle;
+      file.FromFileHandle.FileHandle = reinterpret_cast<HANDLE>(0x1234);
+    }
     // After the setup, whose default is no announced length.
     EXPECT_CALL(httpResp, GetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _))
         .WillRepeatedly(DoAll(Invoke([this](_In_ PCSTR, _Out_ USHORT* len) {
@@ -1106,10 +1122,10 @@ TEST(InjectionPipeline, InjectionCarriedOverToALaterPart) {
   response.stop();
 }
 
-// A first part shorter than the head window is flushed rather than given up: the injector carries
-// over, and a `<head>` past the window, in a later part, is injected after. One within the window
-// is not, the window having been cut short.
-TEST(InjectionPipeline, ShortFirstPartIsCarriedOver) {
+// A first part shorter than the head window is held back rather than sent: the injector hands it
+// back with the part that completes the window, or ends the document, and decides on the whole
+// window as if it had come in one piece, the snippet then in place wherever the `<head>` is.
+TEST(InjectionPipeline, ShortFirstPartIsHeldBack) {
   for (const bool head_past_the_window : {true, false}) {
     SCOPED_TRACE(head_past_the_window ? "head past the window" : "head within the window");
     PartedResponse response;
@@ -1122,21 +1138,47 @@ TEST(InjectionPipeline, ShortFirstPartIsCarriedOver) {
     const Part second{preamble + "<head><meta name=a>", FALSE, true};
     const Part last{"</head><body></body></html>", FALSE, false};
 
-    EXPECT_EQ(response.send(first), first.body);
+    EXPECT_EQ(response.send(first), "");
+    EXPECT_EQ(response.extended_to, std::to_string(100000 + response.snippet_length()));
     const std::string body = response.send(second);
     if (head_past_the_window) {
-      const std::string before = preamble + "<head>";
-      EXPECT_EQ(body.size(), second.body.size() + response.snippet_length()) << body;
+      // The window fills, without a `<head>`: the scan goes on past it, to the one in this part.
+      const std::string before = first.body + preamble + "<head>";
+      EXPECT_EQ(body.size(), first.body.size() + second.body.size() + response.snippet_length())
+          << body;
       EXPECT_EQ(body.substr(0, before.size()), before);
-      EXPECT_NE(body.find("DD_RUM"), std::string::npos);
+      EXPECT_EQ(body.substr(before.size() + response.snippet_length()), "<meta name=a>");
       EXPECT_EQ(response.send(last), last.body);
     } else {
-      EXPECT_EQ(body, second.body);
-      // The length counted the snippet from the first part, so the last part is padded to it.
-      EXPECT_EQ(response.send(last), last.body + std::string(response.snippet_length(), ' '));
+      // Still within the window: held back too, until the end of the document decides.
+      EXPECT_EQ(body, "");
+      const std::string rest = response.send(last);
+      const std::string before = first.body + "<head><meta name=a>";
+      EXPECT_EQ(rest.size(), before.size() + last.body.size() + response.snippet_length()) << rest;
+      EXPECT_EQ(rest.substr(0, before.size()), before);
+      EXPECT_NE(rest.find("DD_RUM"), std::string::npos);
+      EXPECT_EQ(rest.substr(before.size() + response.snippet_length()), last.body);
     }
     response.stop();
   }
+}
+
+// A chunk not in memory, which the injector cannot read, in a part after a held-back one: what was
+// held back goes out ahead of it, nothing lost, and the last part is padded to the announced
+// length.
+TEST(InjectionPipeline, HeldBackBytesGoOutAheadOfAChunkNotInMemory) {
+  PartedResponse response;
+  response.content_length = "100000";
+  response.start();
+
+  const Part first{"<!DOCTYPE html><html>", TRUE, true};
+  const Part second{"<head>", FALSE, true, true};
+  const Part last{"</head></html>", FALSE, false};
+
+  EXPECT_EQ(response.send(first), "");
+  EXPECT_EQ(response.send(second), first.body + second.body + "[file]");
+  EXPECT_EQ(response.send(last), last.body + std::string(response.snippet_length(), ' '));
+  response.stop();
 }
 
 // The carried injector never finds a `<head>`: the last part is padded to the length announced,

@@ -955,6 +955,49 @@ TEST(InjectionPipeline, HeadersFlushedBeforeTheBody) {
   }
 }
 
+// RUM disabled: the module does nothing for a response, however it is sent. It keeps no state on
+// the request, which a send without the headers would otherwise look for, and touches no header.
+TEST(InjectionPipeline, DisabledRumDoesNothing) {
+  MockRumConfigElement rumConfig(false, {{L"applicationId", L"test-app-id"},
+                                         {L"clientToken", L"test-client-token"},
+                                         {L"site", L"datadoghq.com"}});
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+  auto mod = registerModule(mockServer);
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+  CHttpModule* httpMod = nullptr;
+  ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  MockModuleContextContainer requestContainer;
+  EXPECT_CALL(httpCtx, GetModuleContextContainer()).WillRepeatedly(Return(&requestContainer));
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(_), _, _, _)).Times(0);
+  EXPECT_CALL(httpResp, DeleteHeader(Matcher<PCSTR>(_))).Times(0);
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
+
+  const auto send = [&](const std::vector<std::string>& bodies, BOOL headers, DWORD flags) {
+    PreparedChunkedResponse pr;
+    setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, bodies);
+    MockSendResponseProvider provider(headers, flags);
+    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, &provider), RQ_NOTIFICATION_CONTINUE);
+    return assembleResponseBody(pr);
+  };
+  const std::string page = "<html><head><title>t</title></head><body></body></html>";
+  EXPECT_EQ(send({page}, TRUE, 0), page);
+  EXPECT_EQ(send({}, TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA), "");
+  EXPECT_EQ(send({page}, FALSE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA), page);
+  EXPECT_EQ(send({page}, FALSE, 0), page);
+  EXPECT_EQ(requestContainer.GetModuleContext(nullptr), nullptr);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
 // A module set up for one test of how it rebuilds a response: default configuration, unless
 // `strategy` is given.
 class ModuleUnderTest {

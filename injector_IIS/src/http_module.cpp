@@ -421,15 +421,13 @@ HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvid
   }
 
   // A response can reach the module in several sends, as when ARR streams a large upstream
-  // response, each one with the next part of the body. Only the one with the start of the body is
-  // injected into: the later ones are passed through as they are.
+  // response, each one with the next part of the body. A send without the headers continues a
+  // response, and only one the module took on has anything left to do: any other, every one with
+  // RUM disabled among them, ends at this lookup.
   const bool headers = provider == nullptr || provider->GetHeadersBeingSent() != FALSE;
-  if (!starts_body(*http_context, http_response->GetRawHttpResponse(), headers)) {
+  if (!headers && request_state(*http_context, false) == nullptr) {
     return RQ_NOTIFICATION_CONTINUE;
   }
-  const Send send{
-      provider != nullptr && (provider->GetFlags() & HTTP_SEND_RESPONSE_FLAG_MORE_DATA) != 0,
-      !headers};
 
   // Get app-level context (always needed for logger, server, tags).
   auto* app = http_context->GetApplication();
@@ -457,9 +455,19 @@ HttpModule::OnSendResponse(IN IHttpContext* http_context, IN ISendResponseProvid
   }
 
   if (!ctx->snippet) {
-    ctx->logger->debug("Skipping RUM injection: disabled");
+    // RUM disabled: nothing else is done for the response, not even a debug line, whose message
+    // alone would cost an allocation every request.
     return RQ_NOTIFICATION_CONTINUE;
   }
+
+  // Only the send with the start of the body is injected into: the later ones are passed through
+  // as they are.
+  if (!starts_body(*http_context, http_response->GetRawHttpResponse(), headers)) {
+    return RQ_NOTIFICATION_CONTINUE;
+  }
+  const Send send{
+      provider != nullptr && (provider->GetFlags() & HTTP_SEND_RESPONSE_FLAG_MORE_DATA) != 0,
+      !headers};
 
   if (!ShouldAttemptInjection(*http_response, *ctx)) {
     return RQ_NOTIFICATION_CONTINUE;

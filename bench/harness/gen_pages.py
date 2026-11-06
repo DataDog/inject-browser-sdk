@@ -42,6 +42,9 @@ def perf_pages():
     # <head> past the first KiB, with HTML evidence (<html>) inside it.
     late = '<!doctype html>\n<html lang="en">\n<!-- ' + ("padding before the head " * 200) + "-->\n"
     pages["head_late_20k.html"] = sized(late + HEAD[len('<!doctype html>\n<html lang="en">\n'):], PARA, 20480)
+    # HTML evidence in the first KiB but no <head> at all (it is optional in HTML5): the library
+    # keeps looking for one through the whole document.
+    pages["html_nohead_1m.html"] = sized('<!doctype html>\n<html lang="en">\n<body>\n', PARA, 1 << 20)
     # Served as text/html but not HTML at all: pass-through plus padding.
     line = '{"id": 12345, "name": "not html", "values": [1, 2, 3, 4, 5, 6, 7, 8, 9]}\n'
     pages["text_as_html_100k.html"] = sized("", line, 102400, suffix="")

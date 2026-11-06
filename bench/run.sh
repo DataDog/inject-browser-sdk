@@ -10,7 +10,7 @@
 # into memory: nginx `filter_need_in_memory` like nginx-datadog, httpd `RUM_INJECT_WHOLE`).
 #
 #   SERVERS [nginx httpd]   VARIANTS [off on on-mem]   CONNS [16 64 256]   DURATION [10s]   SEEDS [4]
-#   PERF_PAGES [all of pages/perf]   SENDFILE [on]   WRK_CPUS [4-7]   SERVER_CPUS [0,1]
+#   PERF_PAGES [all of pages/perf]   SENDFILE [on]   HTTPD_MMAP [On]   WRK_CPUS [4-7]   SERVER_CPUS [0,1]
 #   MODULES_DIR [/opt/rum]  RESULTS [/results]
 set -euo pipefail
 
@@ -64,7 +64,7 @@ render() { # template server variant -> config file
     [ "$server" = httpd ] && { [ "$sendfile" = on ] && sendfile=On || sendfile=Off; }
     sed -e "s|@MODULE_LOAD@|$load|" -e "s|@MODULE_ON@|$on|" -e "s|@RUN@|$WORK/run|g" \
         -e "s|@PAGES@|$PAGES|g" -e "s|@PORT@|$PORT|g" -e "s|@UPSTREAM@|$UPSTREAM|g" \
-        -e "s|@SENDFILE@|$sendfile|g" "$template" > "$WORK/run/$server.conf"
+        -e "s|@SENDFILE@|$sendfile|g" -e "s|@MMAP@|${HTTPD_MMAP:-On}|g" "$template" > "$WORK/run/$server.conf"
 }
 
 wait_port() {

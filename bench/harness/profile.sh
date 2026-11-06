@@ -12,10 +12,11 @@ source <(sed -n '/^SERVERS=/,/^EXPECTED=/p;/^render()/,/^}/p;/^wait_port()/,/^}/
 [ -d "$PAGES/perf" ] || { python3 "$here/harness/gen_pages.py" "$PAGES"; chmod -R a+rX "$WORK"; }
 start "$server" "$variant"
 taskset -c "$WRK_CPUS" wrk -t4 -c"$conns" -d"$((seconds + 4))s" "http://127.0.0.1:$PORT/perf/$page" > /dev/null &
+load=$!
 sleep 2
 out="$RESULTS/profile-$server-$variant-$page"
 perf record -q -F 2999 -g -o "$out.data" -p "$(server_pids "$server")" -- sleep "$seconds" 2>/dev/null
-wait
+wait $load
 stop "$server"
 {
     echo "## $server $variant $page c=$conns: by DSO"

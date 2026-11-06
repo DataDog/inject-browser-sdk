@@ -1,0 +1,36 @@
+## profile-httpd-off-html_512.html (flat, self time)
+# by DSO
+    67.55%  [kernel.kallsyms]    
+    11.69%  libc.so.6            
+     8.65%  apache2              
+     7.27%  libapr-1.so.0.7.2    
+     3.07%  libaprutil-1.so.0.6.3
+     0.59%  mod_mpm_event.so     
+     0.39%  mod_mime.so          
+     0.37%  mod_proxy.so         
+# by symbol
+    13.83%  [kernel.kallsyms]      [k] futex_wake                               -      -            
+     6.78%  [kernel.kallsyms]      [k] local_daif_restore                       -      -            
+     6.44%  [kernel.kallsyms]      [k] wake_up_q                                -      -            
+     6.18%  [kernel.kallsyms]      [k] __wake_up_sync_key                       -      -            
+     2.52%  [kernel.kallsyms]      [k] __pv_queued_spin_lock_slowpath           -      -            
+     2.30%  libc.so.6              [.] open64                                   -      -            
+     1.62%  libapr-1.so.0.7.2      [.] apr_palloc                               -      -            
+     1.47%  [kernel.kallsyms]      [k] do_el0_svc                               -      -            
+     1.46%  [kernel.kallsyms]      [k] link_path_walk                           -      -            
+     1.15%  [kernel.kallsyms]      [k] schedule                                 -      -            
+     1.10%  [kernel.kallsyms]      [k] _raw_spin_unlock_irqrestore              -      -            
+     1.04%  [kernel.kallsyms]      [k] __arch_copy_to_user                      -      -            
+     1.01%  [kernel.kallsyms]      [k] arch_counter_get_cntvct                  -      -            
+     0.97%  [kernel.kallsyms]      [k] fdget                                    -      -            
+     0.94%  [kernel.kallsyms]      [k] generic_permission                       -      -            
+     0.93%  [kernel.kallsyms]      [k] kmem_cache_free                          -      -            
+     0.90%  [kernel.kallsyms]      [k] path_openat                              -      -            
+     0.84%  libc.so.6              [.] read                                     -      -            
+     0.70%  [kernel.kallsyms]      [k] do_epoll_ctl                             -      -            
+     0.70%  [kernel.kallsyms]      [k] inode_permission                         -      -            
+     0.66%  libc.so.6              [.] epoll_ctl                                -      -            
+     0.65%  [kernel.kallsyms]      [k] kmem_cache_alloc_noprof                  -      -            
+     0.64%  [kernel.kallsyms]      [k] percpu_counter_add_batch                 -      -            
+     0.58%  [kernel.kallsyms]      [k] net_rx_action                            -      -            
+     0.55%  [kernel.kallsyms]      [k] ovl_i_path_real                          -      -            

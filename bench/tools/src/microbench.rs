@@ -28,7 +28,9 @@ fn main() {
     for path in env::args().skip(1) {
         let page = fs::read(&path).unwrap();
         let name = Path::new(&path).file_name().unwrap().to_string_lossy().into_owned();
-        for chunk in [32 * 1024, 8000, page.len().max(1)] {
+        let mut chunks: Vec<usize> = [32 * 1024, 8000].into_iter().filter(|&c| c < page.len()).collect();
+        chunks.push(page.len().max(1));
+        for chunk in chunks {
             let iterations = (200_000_000 / page.len().max(1)).clamp(1_000, 2_000_000);
             for _ in 0..iterations / 10 {
                 black_box(run(&page, chunk));

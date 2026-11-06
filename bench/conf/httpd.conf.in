@@ -22,7 +22,7 @@ AddType "text/html; charset=utf-8" .html
 AddType "text/plain; charset=utf-8" .txt
 
 EnableSendfile @SENDFILE@
-EnableMMAP On
+EnableMMAP @MMAP@
 KeepAlive On
 MaxKeepAliveRequests 0
 KeepAliveTimeout 65

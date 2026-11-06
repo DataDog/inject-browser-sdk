@@ -23,7 +23,7 @@ __declspec(dllexport) HRESULT __stdcall RegisterModule(DWORD server_version,
   __debugbreak();
 #endif
 
-  auto logger = std::make_shared<datadog::rum::Logger>();
+  const auto logger = std::make_shared<datadog::rum::Logger>();
   logger->info(std::format("Registering Datadog RUM Injector v{}", FILE_VERSION_STRING));
 
   datadog::rum::g_module_id = module_info->GetId();

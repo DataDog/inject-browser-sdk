@@ -10,9 +10,13 @@ using namespace datadog::telemetry;
 
 namespace datadog::rum::telemetry {
 
+// Counter holds std::strings, so these can only throw bad_alloc while the DLL loads, which nothing
+// could recover from anyway.
+// NOLINTBEGIN(bugprone-throwing-static-initialization)
 const Counter injection_skipped = {"injection.skipped", "rum", true};
 const Counter injection_succeed = {"injection.succeed", "rum", true};
 const Counter injection_failed = {"injection.failed", "rum", true};
 const Counter config_invalid = {"config.invalid", "rum", true};
+// NOLINTEND(bugprone-throwing-static-initialization)
 
 }  // namespace datadog::rum::telemetry

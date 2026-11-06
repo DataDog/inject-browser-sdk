@@ -13,6 +13,8 @@ powershell -Command "Invoke-WebRequest -Uri 'https://github.com/wixtoolset/wix3/
 start /wait wix314.exe /install /quiet /norestart || exit /b 5
 set "PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.14\bin"
 
+python -m unittest discover -s injector_IIS/test/version_tests || exit /b 8
+
 pushd injector_iis
 invoke iis.build --out-dir %outdir% || exit /b 4
 popd
@@ -22,6 +24,8 @@ dir %outdir%
 if not exist %BUILD_OUTDIR% (mkdir %BUILD_OUTDIR%)
 copy /y %outdir%\*.msi %BUILD_OUTDIR% || exit /b 6
 copy /y %outdir%\*.dll %BUILD_OUTDIR% || exit /b 7
+copy /y %outdir%\injector_IIS.version %BUILD_OUTDIR% || exit /b 8
+copy /y %outdir%\injector_IIS.release %BUILD_OUTDIR% || exit /b 8
 
 goto :EOF
 

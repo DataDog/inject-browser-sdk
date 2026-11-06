@@ -81,10 +81,15 @@ jobs:
           - { proxy-kind: httpd, base-dockerfile: httpd.bookworm.Dockerfile }
           - { proxy-kind: httpd, base-dockerfile: httpd.alpine.Dockerfile }
           - { proxy-kind: httpd, base-dockerfile: httpd.al2023.Dockerfile }
+          # Distro-managed configs are frequently symlinks, which the installer has
+          # to write through rather than replace.
+          - { proxy-kind: nginx, base-dockerfile: nginx.bookworm.Dockerfile, config-symlink: 1 }
+          - { proxy-kind: httpd, base-dockerfile: httpd.bookworm.Dockerfile, config-symlink: 1 }
     env:
       DD_API_KEY: fakekey
       PROXY_KIND: ${{ matrix.proxy-kind }}
       PROXY_DOCKERFILE: ${{ matrix.base-dockerfile }}
+      CONFIG_SYMLINK: ${{ matrix.config-symlink }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download proxy-configurator (amd64)

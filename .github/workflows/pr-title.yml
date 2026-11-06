@@ -1,0 +1,32 @@
+name: PR Title
+
+# Squash merges use the PR title as the commit subject, and release-please
+# versions IIS releases from those subjects, so titles must be Conventional
+# Commits. Plain shell: the repository's Actions policy does not allow
+# third-party title-checking actions.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the title is a Conventional Commit
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          types='feat|fix|perf|deps|docs|refactor|test|build|ci|chore|revert'
+          if [[ "$TITLE" =~ ^($types)(\([^()]+\))?!?:\ [^[:space:]] ]]; then
+            echo "PR title is a Conventional Commit: $TITLE"
+          else
+            echo "::error::PR title must be 'type(optional-scope)!: description' with type one of ${types//|/, }. Got: $TITLE"
+            exit 1
+          fi

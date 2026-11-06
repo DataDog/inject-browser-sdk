@@ -7,19 +7,7 @@
 
 cmake_minimum_required(VERSION 3.24)
 
-# IIS injector version from its own VERSION file (independent of Cargo.toml)
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" _IIS_VERSION_RAW)
-string(STRIP "${_IIS_VERSION_RAW}" _IIS_VERSION_RAW)
-if(_IIS_VERSION_RAW MATCHES "([0-9]+)\\.([0-9]+)\\.([0-9]+)(-(.+))?")
-  set(IIS_INJECTOR_VERSION_MAJ   "${CMAKE_MATCH_1}")
-  set(IIS_INJECTOR_VERSION_MIN   "${CMAKE_MATCH_2}")
-  set(IIS_INJECTOR_VERSION_PATCH "${CMAKE_MATCH_3}")
-  set(IIS_INJECTOR_VERSION_PRE   "${CMAKE_MATCH_5}")
-  set(IIS_INJECTOR_VERSION       "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
-else()
-  message(FATAL_ERROR "Could not parse version from injector_IIS/VERSION: '${_IIS_VERSION_RAW}'")
-endif()
-unset(_IIS_VERSION_RAW)
+include(cmake/version.cmake)
 
 project(iis-injector LANGUAGES CXX VERSION ${IIS_INJECTOR_VERSION})
 
@@ -166,7 +154,7 @@ target_compile_options(iis_injector-objects
     /D_WIN32_WINNT=${win_ver}
     /DMAJ_VER=${IIS_INJECTOR_VERSION_MAJ}
     /DMIN_VER=${IIS_INJECTOR_VERSION_MIN}
-    /DPATCH_VER=${IIS_INJECTOR_VERSION_PATCH}
+    /DBUILD_VER=${IIS_INJECTOR_VERSION_BUILD}
     /DVERSION_PRE="${IIS_INJECTOR_VERSION_PRE}"
 )
 
@@ -200,7 +188,8 @@ target_link_libraries(iis_injector iis_injector-objects)
 ## Tests
 FetchContent_Declare(
   googletest
-  URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip
+  URL https://github.com/google/googletest/archive/refs/tags/v1.18.0.zip
+  URL_HASH SHA256=63b9c77751a5b8f492486005f67533fdc58682b67476fcb91650be5958d5195a
 )
 
 set(gtest_force_shared_crt OFF CACHE BOOL "" FORCE)

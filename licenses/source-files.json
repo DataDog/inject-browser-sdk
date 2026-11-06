@@ -1,0 +1,43 @@
+{
+  "first_party": {
+    "scripts/tests/test_license.py": {
+      "reason": "Apache-licensed unit tests contain synthetic license expressions to test attribution drift and detection failures.",
+      "licenses": [
+        "Apache-2.0",
+        "Apache-2.0 AND (MIT OR Apache-2.0) AND LicenseRef-scancode-unknown",
+        "BSD-3-Clause",
+        "MIT AND BSD-3-Clause"
+      ]
+    },
+    "injector_IIS/injector_IIS_installer/assets/LICENSE.rtf": {
+      "reason": "Datadog's device-driver EULA; first-party legal text, not third-party source. Its suitability for the RUM installer needs separate review.",
+      "licenses": [
+        "LicenseRef-scancode-proprietary-license AND LicenseRef-scancode-unknown-license-reference",
+        "LicenseRef-scancode-warranty-disclaimer AND LicenseRef-scancode-unknown-license-reference"
+      ]
+    },
+    "injector_IIS/injector_IIS_installer/localization-en-us.wxl": {
+      "reason": "Installer strings refer to Datadog's EULA.",
+      "licenses": [
+        "LicenseRef-scancode-proprietary-license",
+        "LicenseRef-scancode-unknown-license-reference AND LicenseRef-scancode-proprietary-license"
+      ]
+    },
+    "injector_IIS/injector_IIS_installer/simpleeula.wxi": {
+      "reason": "Dialog declares the repository's Apache license and links to Datadog's EULA.",
+      "licenses": [
+        "Apache-2.0",
+        "LicenseRef-scancode-unknown-license-reference AND LicenseRef-scancode-proprietary-license"
+      ]
+    }
+  },
+  "third_party": {
+    "microsoft/IIS.Common": {
+      "origin": "https://github.com/microsoft/IIS.Common",
+      "files": [
+        "injector_IIS/test/unittests/IIS.Common.LICENSE",
+        "injector_IIS/test/unittests/iis_interfaces_reference.h"
+      ]
+    }
+  }
+}

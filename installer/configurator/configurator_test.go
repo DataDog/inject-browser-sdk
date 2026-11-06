@@ -22,6 +22,7 @@ func TestValidateInput(t *testing.T) {
 		sessionSampleRate       int
 		sessionReplaySampleRate int
 		remoteConfigurationId   string
+		uninstall               bool
 		expectedError           string
 	}{
 		{
@@ -34,6 +35,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       50,
 			sessionReplaySampleRate: 50,
 			remoteConfigurationId:   "",
+			uninstall:               false,
 			expectedError:           "",
 		},
 		{
@@ -46,6 +48,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       50,
 			sessionReplaySampleRate: 50,
 			remoteConfigurationId:   "",
+			uninstall:               false,
 			expectedError:           "--appId is required",
 		},
 		{
@@ -58,6 +61,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       50,
 			sessionReplaySampleRate: 50,
 			remoteConfigurationId:   "",
+			uninstall:               false,
 			expectedError:           "--site is required",
 		},
 		{
@@ -70,6 +74,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       50,
 			sessionReplaySampleRate: 50,
 			remoteConfigurationId:   "",
+			uninstall:               false,
 			expectedError:           "--clientToken is required",
 		},
 		{
@@ -82,6 +87,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       -1,
 			sessionReplaySampleRate: 50,
 			remoteConfigurationId:   "",
+			uninstall:               false,
 			expectedError:           "sessionSampleRate is required and must be between 0 and 100",
 		},
 		{
@@ -94,6 +100,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       101,
 			sessionReplaySampleRate: 50,
 			remoteConfigurationId:   "",
+			uninstall:               false,
 			expectedError:           "sessionSampleRate is required and must be between 0 and 100",
 		},
 		{
@@ -106,6 +113,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       50,
 			sessionReplaySampleRate: -1,
 			remoteConfigurationId:   "",
+			uninstall:               false,
 			expectedError:           "sessionReplaySampleRate is required and must be between 0 and 100",
 		},
 		{
@@ -118,6 +126,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       50,
 			sessionReplaySampleRate: 101,
 			remoteConfigurationId:   "",
+			uninstall:               false,
 			expectedError:           "sessionReplaySampleRate is required and must be between 0 and 100",
 		},
 		{
@@ -130,6 +139,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       50,
 			sessionReplaySampleRate: 50,
 			remoteConfigurationId:   "",
+			uninstall:               false,
 			expectedError:           "arch must be either 'amd64' or 'arm64'",
 		},
 		{
@@ -142,6 +152,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       50,
 			sessionReplaySampleRate: 50,
 			remoteConfigurationId:   "",
+			uninstall:               false,
 			expectedError:           "",
 		},
 		{
@@ -154,6 +165,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       50,
 			sessionReplaySampleRate: 50,
 			remoteConfigurationId:   "",
+			uninstall:               false,
 			expectedError:           "",
 		},
 		{
@@ -166,6 +178,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       50,
 			sessionReplaySampleRate: 50,
 			remoteConfigurationId:   "",
+			uninstall:               false,
 			expectedError:           "proxyKind must be either 'nginx' or 'httpd', found 'iis'",
 		},
 		{
@@ -178,6 +191,7 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       -1,
 			sessionReplaySampleRate: -1,
 			remoteConfigurationId:   "123",
+			uninstall:               false,
 			expectedError:           "",
 		},
 		{
@@ -190,13 +204,30 @@ func TestValidateInput(t *testing.T) {
 			sessionSampleRate:       50,
 			sessionReplaySampleRate: 50,
 			remoteConfigurationId:   "123",
+			uninstall:               false,
 			expectedError:           "ArgumentError: unable to set both remote configuration and local configuration",
+		},
+		{
+			name:                    "Uninstall needs nothing beyond the proxy kind",
+			proxyKind:               "nginx",
+			sessionSampleRate:       -1,
+			sessionReplaySampleRate: -1,
+			uninstall:               true,
+			expectedError:           "",
+		},
+		{
+			name:                    "Uninstall still validates the proxy kind",
+			proxyKind:               "iis",
+			sessionSampleRate:       -1,
+			sessionReplaySampleRate: -1,
+			uninstall:               true,
+			expectedError:           "proxyKind must be either 'nginx' or 'httpd', found 'iis'",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateInput(tt.proxyKind, tt.appID, tt.site, tt.clientToken, tt.arch, tt.remoteConfigurationId, tt.sessionSampleRate, tt.sessionReplaySampleRate)
+			err := validateInput(tt.proxyKind, tt.appID, tt.site, tt.clientToken, tt.arch, tt.remoteConfigurationId, tt.sessionSampleRate, tt.sessionReplaySampleRate, tt.uninstall)
 
 			if tt.expectedError == "" {
 				if err != nil {

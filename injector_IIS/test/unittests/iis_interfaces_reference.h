@@ -21,6 +21,23 @@ class IHttpEventProvider {
   virtual VOID SetErrorStatus(HRESULT hrError) = 0;
 };
 
+// ---- ISendResponseProvider ----------------------------------------------
+
+class ISendResponseProvider : public IHttpEventProvider {
+ public:
+  virtual BOOL GetHeadersBeingSent(VOID) const = 0;
+
+  virtual DWORD GetFlags(VOID) const = 0;
+
+  virtual VOID SetFlags(DWORD dwFlags) = 0;
+
+  virtual HTTP_LOG_DATA* GetLogData(VOID) const = 0;
+
+  virtual HRESULT SetLogData(IN HTTP_LOG_DATA* pLogData) = 0;
+
+  virtual BOOL GetReadyToLogData(VOID) const = 0;
+};
+
 // ---- IHttpStoredContext --------------------------------------------------
 
 class IHttpStoredContext {

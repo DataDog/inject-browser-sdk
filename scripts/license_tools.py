@@ -5,6 +5,8 @@
 #
 # Copyright 2024-Present Datadog, Inc.
 
+"""Deprecated compatibility helpers; new attribution checks use license.py."""
+
 import re
 import typing
 

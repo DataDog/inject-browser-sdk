@@ -1,36 +1,53 @@
 variables:
-  DOCKER_TOOLING_WITH_NYDUS_IMAGE: registry.ddbuild.io/images/nydus:v105323365-fb36202-v2.3.4
+  WINDOWS_BUILD_IMAGE_REPO: registry.ddbuild.io/ci/datadog-agent-buildimages/windows_ltsc2022_x64
 
-.check_image_latest:
-  stage: build
+# Keep WINDOWS_DEFAULT_IMAGE on the build image the Windows runner AMI
+# pre-pulls, so IIS jobs skip a ~12 minute pull. Runs from the pipeline
+# schedule that sets WINDOWS_BUILD_IMAGE_BUMP=1 on main, managed in Terraform:
+# ddoghq/gitlab-config gitlab/projects/inject-browser-sdk/schedule_pipelines.tf.
+.windows_build_image_schedule:
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-  tags: ["arch:amd64"]
-  image: $DOCKER_TOOLING_WITH_NYDUS_IMAGE
-  needs: []
-  allow_failure: true
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $WINDOWS_BUILD_IMAGE_BUMP == "1"
 
-check_windows_build_image_latest:
-  extends: .check_image_latest
+windows_build_image_survey:
+  stage: build
+  tags: ["windows-v2:2022"]
+  needs: []
+  rules:
+    - !reference [.windows_build_image_schedule, rules]
+    # Read-only, so branches that change it can try it out.
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      changes:
+        compare_to: refs/heads/main
+        paths:
+          - .gitlab/images.yml
+          - scripts/survey-windows-build-image.ps1
+      when: manual
+      allow_failure: true
   script:
-    - |
-      # Split WINDOWS_BUILD_IMAGE into repo and current tag
-      REPO="${WINDOWS_BUILD_IMAGE%:*}"
-      CURRENT="${WINDOWS_BUILD_IMAGE##*:}"
-      LATEST=$(crane ls "$REPO" | grep -E '^v[0-9]' | sort -V | tail -1)
-      if [ -z "$LATEST" ]; then
-        echo "ERROR: Could not retrieve tags from $REPO (crane ls failed or returned no results)"
-        exit 1
-      fi
-      if [ "$LATEST" = "$CURRENT" ]; then
-        echo "✓ windows_ltsc2022_x64 is up to date ($CURRENT)"
-      else
-        echo "⚠ windows_ltsc2022_x64 is outdated."
-        echo "  Current : $CURRENT"
-        echo "  Latest  : $LATEST"
-        echo ""
-        echo "Bump WINDOWS_BUILD_IMAGE in .gitlab/iis.yml to use tag '$LATEST'."
-        echo "The Windows runner AMI pre-pulls the latest tag of this image — staying current"
-        echo "means the image is already cached on the runner, saving ~12 minutes per build job."
-        exit 1
-      fi
+    - .\scripts\survey-windows-build-image.ps1
+  artifacts:
+    reports:
+      dotenv: windows-build-image.env
+
+windows_build_image_bump:
+  stage: deps_fetch
+  extends: .windows_build_image_schedule
+  image: registry.ddbuild.io/images/dd-octo-sts-ci-base:2026.08-2
+  tags: ["arch:amd64"]
+  needs: ["windows_build_image_survey"]
+  resource_group: windows-build-image-bump
+  id_tokens:
+    DDOCTOSTS_ID_TOKEN:
+      aud: dd-octo-sts
+  script:
+    # Only scheduled main pipelines can mint this write token; see
+    # .github/chainguard/self.gitlab.windows-image-bump.sts.yaml.
+    - dd-octo-sts token --scope DataDog/inject-browser-sdk --policy self.gitlab.windows-image-bump > "$HOME/token.txt"
+    - export GH_TOKEN="$(cat "$HOME/token.txt")"
+    - ': "${GH_TOKEN:?dd-octo-sts produced an empty token}"'
+    # The image runs as a non-root user that does not own the checkout.
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - scripts/bump-windows-build-image.sh
+  after_script:
+    - if [ -f "$HOME/token.txt" ]; then dd-octo-sts revoke -t "$(cat "$HOME/token.txt")" || true; fi

@@ -10,24 +10,32 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
 	 xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
 
-	 <!-- Version is derived from injector_IIS/VERSION via the build system.
-	      MAJ_VER, MIN_VER, PATCH_VER, VERSION_PRE are passed from MSBuild. -->
-	<?if $(var.MAJ_VER) and $(var.MAJ_VER) != "" ?>
+	 <!-- Version is assembled by the build system. MAJ_VER, MIN_VER come from
+	      injector_IIS/VERSION; BUILD_VER is CI_PIPELINE_IID (0 locally) so
+	      dev builds upgrade cleanly. VERSION_PRE is "dev" except when
+	      IIS_RELEASE_BUILD=1 strips it. All five are passed from MSBuild. -->
+	<?if $(var.MAJ_VER) != "" ?>
 		<?define VERSION_MAJOR = $(var.MAJ_VER) ?>
 		<?define VERSION_MINOR = $(var.MIN_VER) ?>
-		<?define VERSION_PATCH = $(var.PATCH_VER) ?>
-		<?define VERSION_NUMBER = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH).0 ?>
+		<?define VERSION_BUILD = $(var.BUILD_VER) ?>
+		<?define VERSION_NUMBER = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_BUILD).0 ?>
 	<?else ?>
 		<?define VERSION_MAJOR = 0 ?>
 		<?define VERSION_MINOR = 0 ?>
-		<?define VERSION_PATCH = 0 ?>
+		<?define VERSION_BUILD = 0 ?>
 		<?define VERSION_NUMBER = 0.0.0.0 ?>
 	<?endif ?>
 
-	<?if $(var.VERSION_PRE) and $(var.VERSION_PRE) != "" ?>
-		<?define VERSION_DISPLAY = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH)-$(var.VERSION_PRE) ?>
+	<!-- RELEASE_VER is the MAJ.MIN.PATCH release-please wrote to VERSION. -->
+	<?if $(var.RELEASE_VER) != "" ?>
+		<?define VERSION_RELEASE = $(var.RELEASE_VER) ?>
 	<?else ?>
-		<?define VERSION_DISPLAY = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_PATCH) ?>
+		<?define VERSION_RELEASE = $(var.VERSION_MAJOR).$(var.VERSION_MINOR).$(var.VERSION_BUILD) ?>
+	<?endif ?>
+	<?if $(var.VERSION_PRE) and $(var.VERSION_PRE) != "" ?>
+		<?define VERSION_DISPLAY = $(var.VERSION_RELEASE)-$(var.VERSION_PRE).$(var.VERSION_BUILD) ?>
+	<?else ?>
+		<?define VERSION_DISPLAY = $(var.VERSION_RELEASE) ?>
 	<?endif ?>
 
 	<?define UPGRADE_CODE=A5E2C93A-4340-4D15-BA17-F3CA858D09CA?>
@@ -284,8 +292,11 @@
 
 		<InstallExecuteSequence>
 			<Custom Action="RegisterModule" After="InstallFiles" >NOT Installed</Custom>
-			<Custom Action="RemoveRUMConfig_Cmd" Before="UnregisterModule">REMOVE="ALL"</Custom>
-			<Custom Action="RemoveRUMConfig" After="RemoveRUMConfig_Cmd">REMOVE="ALL"</Custom>
+			<!-- Keep the customer's RUM configuration when a major upgrade removes
+			     this version: Windows Installer then uninstalls it with
+			     UPGRADINGPRODUCTCODE set. -->
+			<Custom Action="RemoveRUMConfig_Cmd" Before="UnregisterModule">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+			<Custom Action="RemoveRUMConfig" After="RemoveRUMConfig_Cmd">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
 			<Custom Action="UnregisterModule" After="StopServices">REMOVE="ALL"</Custom>
 
 

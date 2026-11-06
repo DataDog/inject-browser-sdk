@@ -1,13 +1,31 @@
 include:
+  # Shared advisory LM-CC jobs, images, model, and scoring profile.
+  - remote: https://gitlab-templates.ddbuild.io/dd-repo-tools/llm-cc/ca/21ecb7aa0c42481bd069c77f78a590a2a6849320/llm-cc.yml
   - local: .gitlab/devcontainer.yml
   - local: .adms/go/gitlab.yaml
   - local: .adms/python/gitlab.yaml
   - local: .gitlab/images.yml
+  - local: .gitlab/windows-default-image.yml
   - local: .gitlab/iis.yml
   - local: .gitlab/java.yml
   - local: .gitlab/installer.yml
   - local: .gitlab/cmake.yml
   - local: .gitlab/lint.yml
+  - local: .gitlab/release.yml
+
+workflow:
+  rules:
+    # Release tags build, sign (IIS_SIGN) and test release-mode MSIs: no -dev
+    # display version. Only they sign. See .gitlab/release.yml.
+    - if: $CI_COMMIT_TAG =~ /^iis-[0-9]+\.[0-9]+\.[0-9]+$/
+      variables:
+        IIS_RELEASE_BUILD: "1"
+        IIS_SIGN: "1"
+    # The release-please PR branch builds and tests the same tree unsigned.
+    - if: $CI_COMMIT_BRANCH == "release-please--branches--main--components--iis"
+      variables:
+        IIS_RELEASE_BUILD: "1"
+    - when: always
 
 stages:
   - build

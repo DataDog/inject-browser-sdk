@@ -1,0 +1,18 @@
+# Allow only the release-please jobs on mirrored main push pipelines to
+# maintain the IIS release PR and create its tag and draft GitHub release.
+issuer: https://gitlab.ddbuild.io
+
+subject: "project_path:DataDog/inject-browser-sdk:ref_type:branch:ref:main"
+
+claim_pattern:
+  project_path: "DataDog/inject-browser-sdk"
+  ref: "main"
+  ref_type: "branch"
+  ref_path: "refs/heads/main"
+  pipeline_source: "push"
+  ci_config_ref_uri: 'gitlab\.ddbuild\.io/DataDog/inject-browser-sdk//\.gitlab-ci\.yml@refs/heads/main'
+
+permissions:
+  contents: write
+  issues: write
+  pull_requests: write

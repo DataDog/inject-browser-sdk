@@ -15,28 +15,38 @@
     Output: injector_IIS\build\msi\injector_IIS_installer.msi
 
 .PARAMETER MajVer
-    Major version number (default: 0).
+    Major version number (default: VERSION).
 
 .PARAMETER MinVer
-    Minor version number (default: 1).
+    Minor version number (default: VERSION).
 
-.PARAMETER PatchVer
-    Patch version number (default: 0).
+.PARAMETER BuildVer
+    MSI BUILD number (default: CI_PIPELINE_IID, or 0 locally). PatchVer is a compatibility alias.
 
 .EXAMPLE
     .\build-msi.ps1
-    .\build-msi.ps1 -MajVer 1 -MinVer 2 -PatchVer 3
+    .\build-msi.ps1 -BuildVer 123
 #>
 param(
-    [int]$MajVer   = 0,
-    [int]$MinVer   = 1,
-    [int]$PatchVer = 0
+    [string]$MajVer,
+    [string]$MinVer,
+    [Alias("PatchVer")][string]$BuildVer
 )
 
 $ErrorActionPreference = "Stop"
 
 $ScriptDir   = Split-Path $MyInvocation.MyCommand.Path -Parent
 $InjectorDir = Split-Path $ScriptDir -Parent
+
+. (Join-Path $ScriptDir 'Get-IISBuildVersion.ps1')
+$overrides = @{}
+if ($PSBoundParameters.ContainsKey('MajVer')) { $overrides.Major = $MajVer }
+if ($PSBoundParameters.ContainsKey('MinVer')) { $overrides.Minor = $MinVer }
+if ($PSBoundParameters.ContainsKey('BuildVer')) { $overrides.Build = $BuildVer }
+$version = Get-IISBuildVersion @overrides
+$MajVer = $version.MAJ_VER
+$MinVer = $version.MIN_VER
+$BuildVer = $version.BUILD_VER
 
 # Required by corrosion (Rust CMake integration)
 $env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
@@ -79,7 +89,12 @@ if (-not (Test-Path $wixDir)) {
 Write-Host "Using WiX at: $wixDir"
 
 Push-Location $InjectorDir
+$savedVersionEnv = @{}
 try {
+    foreach ($field in $version.Keys) {
+        $savedVersionEnv[$field] = [Environment]::GetEnvironmentVariable($field, 'Process')
+        [Environment]::SetEnvironmentVariable($field, $version[$field], 'Process')
+    }
     # -- Build DLL --
     Write-Host "Configuring with preset 'ci-native'..."
     cmake --preset=ci-native -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo .
@@ -104,7 +119,7 @@ try {
     }
     $wixproj    = ".\injector_IIS_installer\injector_IIS_installer.wixproj"
 
-    Write-Host "Building MSI (v$MajVer.$MinVer.$PatchVer)..."
+    Write-Host "Building MSI (v$MajVer.$MinVer.$BuildVer)..."
     msbuild $wixproj `
         /p:Configuration=Release `
         /p:Platform=x64 `
@@ -113,15 +128,21 @@ try {
         /p:InjectorDll="$dllPath" `
         /p:MAJ_VER=$MajVer `
         /p:MIN_VER=$MinVer `
-        /p:PATCH_VER=$PatchVer `
+        /p:BUILD_VER=$BuildVer `
+        /p:VERSION_PRE=$($version.VERSION_PRE) `
+        /p:RELEASE_VER=$($version.RELEASE_VER) `
         /p:WixTargetsPath="$wixTargets" `
         /nologo /v:minimal
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     $msi = Get-ChildItem $msiOutDir -Filter "*.msi" -Recurse | Select-Object -First 1
     Write-Host ""
+    & (Join-Path $ScriptDir 'Assert-IISArtifactVersion.ps1') -DllPath $dllPath -MsiPath $msi.FullName
     Write-Host "MSI built: $($msi.FullName)"
     Write-Host "Run setup:  .\injector_IIS\scripts\setup-integration-test-env.ps1 -MsiPath '$($msi.FullName)'"
 } finally {
+    foreach ($field in $savedVersionEnv.Keys) {
+        [Environment]::SetEnvironmentVariable($field, $savedVersionEnv[$field], 'Process')
+    }
     Pop-Location
 }

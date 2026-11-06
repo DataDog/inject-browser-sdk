@@ -64,6 +64,13 @@ lint-fix: tidy-cpp format-cpp format-rust
 doc:
 	./scripts/generate-documentation.sh
 
+.PHONY: license-check license-update
+license-check:
+	python3 scripts/license.py
+
+license-update:
+	python3 scripts/license.py --write
+
 .PHONY: test-cmake-version
 test-cmake-version:
 	ci/cmake-consumer-test/run_validate_version.sh

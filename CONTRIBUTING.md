@@ -56,6 +56,41 @@ For detailed build instructions for specific modules, see their respective READM
 - [NGINX/httpd installer](installer/README.md)
 - [IIS Module](injector_IIS/README.md)
 
+## Third-party license attribution
+
+Install the scanner in a Python 3.11+ virtual environment:
+
+```bash
+python3 -m venv .cache/license-venv
+. .cache/license-venv/bin/activate
+pip install -r licenses/requirements.txt
+make license-update
+make license-check
+```
+
+On macOS, ScanCode also needs libmagic (`brew install libmagic`).
+On Debian/Ubuntu, install `libmagic1` and `libarchive13`.
+
+The license CI job scans every tracked file, including files ignored by Git,
+and checks all resolved Rust dependencies from `cargo metadata --locked
+--all-features`. It includes build/test dependencies and every target platform.
+Source notices and Rust license files provide copyright attribution; when a
+crate has no notices, its Cargo authors are used, falling back to the crate's
+contributors as in Datadog's Rust license tool.
+
+Register copied third-party source and its license file in
+`licenses/source-files.json`. New foreign notices or non-Apache licenses in
+unregistered files fail the check. Other language dependencies are maintained
+in `licenses/manual.csv`; generation preserves those entries. Commit the
+updated `LICENSE-3rdparty.csv` after changing dependencies or source notices.
+The registry also records expected detections for first-party EULA text and
+synthetic test data; changes to those detections require another review.
+Attribution inventories and npm lockfile license metadata are scanned as data,
+rather than treated as copied source. This check does not resolve or update
+the non-Rust dependency graphs.
+The scanner checks declared notices; it cannot establish the provenance of
+unmarked copied code.
+
 ## Code complexity
 
 GitLab runs advisory [LM-CC jobs](https://github.com/DataDog/dd-repo-tools/tree/main/shared/llm-cc)

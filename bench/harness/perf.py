@@ -74,6 +74,8 @@ def main():
                 cpu = cpu_seconds(pids) - before
                 result = parse_wrk(raw)
                 result.update(server=args.server, variant=args.variant, page=page, conns=conns,
+                              layout=os.environ.get("LAYOUT_SEED"),
+                              resp_headers_kb=int(os.environ.get("RESP_HEADERS_KB", "0")),
                               server_cpu_s=round(cpu, 3),
                               cpu_us_per_req=round(cpu / max(result["requests"], 1) * 1e6, 2))
                 print(f"{args.server:5} {args.variant:3} {page:24} c={conns:<4} {result['rps']:>10.0f} req/s"

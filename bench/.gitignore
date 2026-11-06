@@ -1,2 +1,6 @@
 target/
 results/*.json
+.ablate/
+results/ablate/microbench-*
+results/server-ablate/run/
+results/ablate/*.*.*.txt

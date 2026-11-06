@@ -9,6 +9,10 @@
 # by sendfile: nginx `rum_inject_sendfile on`, httpd `RUM_INJECT`), on-mem (whole response read
 # into memory: nginx `filter_need_in_memory` like nginx-datadog, httpd `RUM_INJECT_WHOLE`).
 #
+# loaded: the module loaded and its filters installed, but injection off, which isolates what the
+# filters cost from what injecting does.
+#
+#   RESP_HEADERS_KB [0]: response headers of about that many KiB added to every response
 #   SERVERS [nginx httpd]   VARIANTS [off on on-mem]   CONNS [16 64 256]   DURATION [10s]   SEEDS [4]
 #   PERF_PAGES [all of pages/perf]   SENDFILE [on]   HTTPD_MMAP [On]   WRK_CPUS [4-7]   SERVER_CPUS [0,1]
 #   MODULES_DIR [/opt/rum]  RESULTS [/results]
@@ -48,7 +52,8 @@ prepare() {
 render() { # template server variant -> config file
     local template=$1 server=$2 variant=$3 load="" on="" sendfile=$SENDFILE
     case $server/$variant in
-        nginx/off|httpd/off) ;;
+        nginx/off|httpd/off|httpd/loaded) ;;
+        nginx/loaded) on="rum_inject off;" ;;
         nginx/on) on="rum_inject on; rum_inject_sendfile on;" ;;
         nginx/on-mem) on="rum_inject on;" ;;
         httpd/on) on="SetOutputFilter RUM_INJECT" ;;
@@ -62,9 +67,17 @@ render() { # template server variant -> config file
         esac
     fi
     [ "$server" = httpd ] && { [ "$sendfile" = on ] && sendfile=On || sendfile=Off; }
+    local headers="" i
+    for i in $(seq 1 $(( ${RESP_HEADERS_KB:-0} * 10 ))); do
+        # About 100 bytes each.
+        case $server in
+            nginx) headers="$headers add_header X-Pad-$i \"$(printf 'v%.0s' $(seq 80))\";" ;;
+            httpd) headers="$headers\nHeader always set X-Pad-$i \"$(printf 'v%.0s' $(seq 80))\"" ;;
+        esac
+    done
     sed -e "s|@MODULE_LOAD@|$load|" -e "s|@MODULE_ON@|$on|" -e "s|@RUN@|$WORK/run|g" \
         -e "s|@PAGES@|$PAGES|g" -e "s|@PORT@|$PORT|g" -e "s|@UPSTREAM@|$UPSTREAM|g" \
-        -e "s|@SENDFILE@|$sendfile|g" -e "s|@MMAP@|${HTTPD_MMAP:-On}|g" "$template" > "$WORK/run/$server.conf"
+        -e "s|@SENDFILE@|$sendfile|g" -e "s|@HEADERS@|$headers|g" -e "s|@MMAP@|${HTTPD_MMAP:-On}|g" "$template" > "$WORK/run/$server.conf"
 }
 
 wait_port() {
@@ -116,7 +129,7 @@ accuracy() {
     local status=0
     for server in $SERVERS; do
         for variant in $VARIANTS; do
-            [ "$variant" = off ] && continue
+            case $variant in off|loaded) continue ;; esac
             start "$server" "$variant"
             python3 "$here/harness/accuracy.py" --server "$server/$variant" --port $PORT --pages "$PAGES" \
                 --expected "$EXPECTED" --seeds "$SEEDS" --buffered --out "$RESULTS/accuracy-$server-$variant.json" || status=1

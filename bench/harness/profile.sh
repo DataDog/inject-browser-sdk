@@ -15,7 +15,7 @@ taskset -c "$WRK_CPUS" wrk -t4 -c"$conns" -d"$((seconds + 4))s" "http://127.0.0.
 load=$!
 sleep 2
 out="$RESULTS/profile-$server-$variant-$page"
-perf record -q -F 2999 -g -o "$out.data" -p "$(server_pids "$server")" -- sleep "$seconds" 2>/dev/null
+perf record -q -F 999 -g -o "$out.data" -p "$(server_pids "$server")" -- sleep "$seconds" 2>/dev/null
 wait $load
 stop "$server"
 {

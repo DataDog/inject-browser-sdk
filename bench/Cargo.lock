@@ -184,6 +184,7 @@ name = "inject-browser-sdk"
 version = "1.2.1-dev"
 dependencies = [
  "libdd-library-config",
+ "memchr",
  "rustix",
  "serde",
  "serde_json",

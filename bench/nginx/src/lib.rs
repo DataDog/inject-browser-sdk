@@ -80,6 +80,9 @@ impl Merge for LocationConf {
 
 /// How much of a file buffer is read per injector write in `rum_inject_sendfile` mode.
 const FILE_READ_CHUNK: usize = 32 * 1024;
+/// The first read is the injector's head window, which decides where the snippet goes for most
+/// pages: past it, the file goes out by sendfile without being read.
+const FIRST_READ: usize = 1024;
 
 unsafe impl HttpModuleLocationConf for Module {
     type LocationConf = LocationConf;
@@ -176,6 +179,7 @@ struct Ctx {
     padded: bool,
     injected: bool,
     done: bool,
+    read_any: bool,
     free: *mut ngx_chain_t,
     busy: *mut ngx_chain_t,
 }
@@ -248,6 +252,7 @@ unsafe extern "C" fn header_filter(r: *mut ngx_http_request_t) -> ngx_int_t {
             padded: length > 0,
             injected: false,
             done: false,
+            read_any: false,
             free: ptr::null_mut(),
             busy: ptr::null_mut(),
         });
@@ -258,6 +263,10 @@ unsafe extern "C" fn header_filter(r: *mut ngx_http_request_t) -> ngx_int_t {
         if conf.sendfile != 1 {
             // The copy filter reads files into memory for us (no sendfile for the response).
             req.set_filter_need_in_memory(1);
+        } else {
+            // The response is now memory buffers ahead of the file. Corked with `tcp_nopush`,
+            // the last of it can wait on Nagle for the client's delayed ACK, 40 ms a response.
+            (*req.connection).set_tcp_nopush(ngx::ffi::ngx_connection_tcp_nopush_e_NGX_TCP_NOPUSH_DISABLED as _);
         }
 
         next(r)
@@ -377,6 +386,38 @@ unsafe fn emit(
     }
 }
 
+/// Links `b` as it is, past the point where the injector needs to see the data: the snippet is in,
+/// or never will be. The last buffer is followed by the padding then owed, if any.
+unsafe fn pass_through(
+    pool: *mut ngx_pool_t,
+    ll: &mut *mut *mut ngx_chain_t,
+    ctx: &mut Ctx,
+    b: *mut ngx_buf_t,
+    last: bool,
+) -> bool {
+    unsafe {
+        if !last || ctx.done {
+            return link(pool, ll, b);
+        }
+        ctx.done = true;
+        let result = if ctx.padded { ctx.injector.end() } else { ctx.injector.end_without_padding() };
+        if result.length == 0 || result.slices[..result.length].iter().all(|s| s.bytes.is_empty()) {
+            return link(pool, ll, b);
+        }
+        // An empty last buffer only carries the end of the response, which the padding takes over:
+        // linked without its flag, it would be a zero size buffer the writer refuses.
+        let empty = (*b).last == (*b).pos && ((*b).in_file() == 0 || (*b).file_last == (*b).file_pos);
+        if !empty {
+            (*b).set_last_buf(0);
+            (*b).set_last_in_chain(0);
+            if !link(pool, ll, b) {
+                return false;
+            }
+        }
+        emit(pool, ll, ptr::null_mut(), &result) && special(pool, ll, true)
+    }
+}
+
 unsafe extern "C" fn body_filter(r: *mut ngx_http_request_t, input: *mut ngx_chain_t) -> ngx_int_t {
     unsafe {
         let next = NEXT_BODY_FILTER.expect("next body filter");
@@ -397,12 +438,12 @@ unsafe extern "C" fn body_filter(r: *mut ngx_http_request_t, input: *mut ngx_cha
                 let b = (*cl).buf;
                 cl = (*cl).next;
                 let last = (*b).last_buf() != 0;
-                if ctx.done || ctx.injected {
-                    // Past the injection nothing is held back nor padded: pass as is.
-                    if !link(pool, &mut ll, b) {
+                if ctx.done || !ctx.injector.is_pending() {
+                    // Injected, or given up: nothing is held back, so the rest passes as is, files
+                    // by sendfile, and only the padding is left to add at the end.
+                    if !pass_through(pool, &mut ll, ctx, b, last) {
                         return NGX_ERROR;
                     }
-                    ctx.done |= last;
                     continue;
                 }
 
@@ -416,8 +457,10 @@ unsafe extern "C" fn body_filter(r: *mut ngx_http_request_t, input: *mut ngx_cha
                 } else if (*b).in_file() != 0 && (*b).file_last > (*b).file_pos {
                     // Only with rum_inject_sendfile: read the file region a chunk at a time
                     // until the snippet is in, leave the rest of it to sendfile.
-                    while !ctx.injected && (*b).file_pos < (*b).file_last {
-                        let size = FILE_READ_CHUNK.min(((*b).file_last - (*b).file_pos) as usize);
+                    while ctx.injector.is_pending() && (*b).file_pos < (*b).file_last {
+                        let piece = if ctx.read_any { FILE_READ_CHUNK } else { FIRST_READ };
+                        ctx.read_any = true;
+                        let size = piece.min(((*b).file_last - (*b).file_pos) as usize);
                         let m = ngx_create_temp_buf(pool, size);
                         if m.is_null() {
                             return NGX_ERROR;
@@ -436,11 +479,7 @@ unsafe extern "C" fn body_filter(r: *mut ngx_http_request_t, input: *mut ngx_cha
                         }
                     }
                     if (*b).file_pos < (*b).file_last {
-                        if last {
-                            // Injected: nothing comes after this, keep its last_buf.
-                            ctx.done = true;
-                        }
-                        if !link(pool, &mut ll, b) {
+                        if !pass_through(pool, &mut ll, ctx, b, last) {
                             return NGX_ERROR;
                         }
                         continue;

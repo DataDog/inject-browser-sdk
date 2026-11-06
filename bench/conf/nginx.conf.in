@@ -27,6 +27,7 @@ http {
         listen 127.0.0.1:@PORT@ backlog=4096 reuseport;
         root @PAGES@;
         @MODULE_ON@
+        @HEADERS@
 
         # Random upstream writes, streamed through as they come (non-buffered proxy).
         location /up/ {

@@ -13,6 +13,7 @@ LoadModule authz_core_module /usr/lib/apache2/modules/mod_authz_core.so
 LoadModule mime_module /usr/lib/apache2/modules/mod_mime.so
 LoadModule proxy_module /usr/lib/apache2/modules/mod_proxy.so
 LoadModule proxy_http_module /usr/lib/apache2/modules/mod_proxy_http.so
+LoadModule headers_module /usr/lib/apache2/modules/mod_headers.so
 @MODULE_LOAD@
 
 User www-data
@@ -48,3 +49,4 @@ DocumentRoot @PAGES@
 ProxyPass /up/ http://127.0.0.1:@UPSTREAM@/ flushpackets=on
 ProxyPass /upb/ http://127.0.0.1:@UPSTREAM@/
 @MODULE_ON@
+@HEADERS@

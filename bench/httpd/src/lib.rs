@@ -40,6 +40,9 @@ const FILTER_NAME: &CStr = c"RUM_INJECT";
 /// Reads buckets as they come: a file bucket is read whole (mmap'd up to 4 MiB by APR).
 const WHOLE_FILTER_NAME: &CStr = c"RUM_INJECT_WHOLE";
 const FILE_READ_CHUNK: apr_size_t = 32 * 1024;
+/// The first piece is the injector's head window, which decides where the snippet goes for most
+/// pages: past it, the file stays a file bucket, sent without being read.
+const FIRST_READ: apr_size_t = 1024;
 
 #[no_mangle]
 pub static mut rum_inject_module: module = module {
@@ -81,6 +84,7 @@ unsafe extern "C" fn register_hooks(_pool: *mut apr_pool_t) {
 struct Ctx {
     injector: Injector<'static>,
     padded: bool,
+    read_any: bool,
 }
 
 unsafe extern "C" fn drop_ctx(data: *mut c_void) -> apr_status_t {
@@ -180,7 +184,7 @@ unsafe fn start(f: *mut ap_filter_t) -> Option<*mut Ctx> {
             return None;
         }
 
-        let ctx = Box::into_raw(Box::new(Ctx { injector, padded }));
+        let ctx = Box::into_raw(Box::new(Ctx { injector, padded, read_any: false }));
         apr_pool_cleanup_register((*r).pool, ctx as *const c_void, Some(drop_ctx), Some(apr_pool_cleanup_null));
         Some(ctx)
     }
@@ -255,8 +259,20 @@ unsafe extern "C" fn filter<const SPLIT_FILES: bool>(
                 continue;
             }
 
-            if SPLIT_FILES && is_file(e) && (*e).length > FILE_READ_CHUNK {
-                let rv = ((*(*e).type_).split.unwrap())(e, FILE_READ_CHUNK);
+            if !ctx.injector.is_pending() {
+                // Given up: the data goes out unread, file buckets by sendfile, and only the
+                // padding the end of stream owes is left to add, when there is any.
+                if !ctx.padded {
+                    ap_remove_output_filter(f);
+                    break;
+                }
+                e = next(e);
+                continue;
+            }
+            let piece = if ctx.read_any { FILE_READ_CHUNK } else { FIRST_READ };
+            ctx.read_any = true;
+            if SPLIT_FILES && is_file(e) && (*e).length > piece {
+                let rv = ((*(*e).type_).split.unwrap())(e, piece);
                 if rv != APR_SUCCESS as apr_status_t {
                     return rv;
                 }

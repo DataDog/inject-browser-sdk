@@ -98,8 +98,8 @@ available as deprecated compatibility helpers; the new checker does not use them
 
 ## Code complexity
 
-GitLab runs advisory [LM-CC jobs](https://github.com/DataDog/dd-repo-tools/tree/main/shared/llm-cc)
-on branch pushes. They score the repository's supported source files, cache
+GitLab runs advisory LM-CC jobs on branch pushes.
+They score the repository's supported source files, cache
 unchanged results, and compare each PR with its merge base with the target
 branch. Default-branch pipelines produce a baseline. All LM-CC jobs allow
 failure; scores do not gate merges.

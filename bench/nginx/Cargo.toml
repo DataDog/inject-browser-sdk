@@ -1,0 +1,16 @@
+[package]
+name = "ngx-http-rum-inject"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ngx_http_rum_inject_module"
+crate-type = ["cdylib"]
+
+[dependencies]
+inject-browser-sdk.workspace = true
+bench-common.workspace = true
+# nginx-sys must be a direct dependency for the DEP_NGINX_* build metadata.
+ngx = { version = "=0.5.1", default-features = false, features = ["std"] }
+nginx-sys = "=0.5.0"

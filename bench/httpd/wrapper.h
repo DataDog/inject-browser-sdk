@@ -1,0 +1,8 @@
+#include <httpd.h>
+#include <http_config.h>
+#include <http_protocol.h>
+#include <http_request.h>
+#include <util_filter.h>
+#include <apr_buckets.h>
+#include <apr_tables.h>
+#include <apr_pools.h>

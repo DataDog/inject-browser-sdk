@@ -1,0 +1,50 @@
+# @MODULE_LOAD@ / @MODULE_ON@ are replaced by run.sh (module on) or emptied (off).
+ServerRoot /etc/apache2
+ServerName bench
+Listen 127.0.0.1:@PORT@
+PidFile @RUN@/httpd.pid
+ErrorLog @RUN@/httpd-error.log
+LogLevel warn
+DefaultRuntimeDir @RUN@
+Mutex file:@RUN@ default
+
+LoadModule mpm_event_module /usr/lib/apache2/modules/mod_mpm_event.so
+LoadModule authz_core_module /usr/lib/apache2/modules/mod_authz_core.so
+LoadModule mime_module /usr/lib/apache2/modules/mod_mime.so
+LoadModule proxy_module /usr/lib/apache2/modules/mod_proxy.so
+LoadModule proxy_http_module /usr/lib/apache2/modules/mod_proxy_http.so
+@MODULE_LOAD@
+
+User www-data
+Group www-data
+TypesConfig /etc/mime.types
+AddType "text/html; charset=utf-8" .html
+AddType "text/plain; charset=utf-8" .txt
+
+EnableSendfile @SENDFILE@
+EnableMMAP On
+KeepAlive On
+MaxKeepAliveRequests 0
+KeepAliveTimeout 65
+
+# Two processes, like the two nginx workers; enough threads for 256 connections.
+StartServers 2
+ServerLimit 2
+ThreadLimit 256
+ThreadsPerChild 256
+MinSpareThreads 64
+MaxSpareThreads 512
+MaxRequestWorkers 512
+MaxConnectionsPerChild 0
+ListenBacklog 4096
+
+DocumentRoot @PAGES@
+<Directory @PAGES@>
+    Require all granted
+</Directory>
+<Location /up/>
+    Require all granted
+</Location>
+ProxyPass /up/ http://127.0.0.1:@UPSTREAM@/ flushpackets=on
+ProxyPass /upb/ http://127.0.0.1:@UPSTREAM@/
+@MODULE_ON@

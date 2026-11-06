@@ -1,0 +1,9 @@
+**/target
+.git
+.devcontainer
+injector_IIS
+installer
+fuzz/corpus
+fuzz/artifacts
+tests
+bench/results

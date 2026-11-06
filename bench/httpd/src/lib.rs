@@ -3,7 +3,9 @@
 //! ring/bucket macros it needs are re-expressed below.
 //!
 //! Configuration: load the module and enable the `RUM_INJECT` output filter, e.g.
-//! `SetOutputFilter RUM_INJECT`; nothing else, and a fixed snippet.
+//! `SetOutputFilter RUM_INJECT`; nothing else, and a fixed snippet. `RUM_INJECT_WHOLE` is the same
+//! filter without splitting file buckets (a file bucket is then read whole, mmap'd by APR up to
+//! 4 MiB), kept to measure the difference.
 //!
 //! On its first brigade the filter keeps only `200` main-request `text/html` responses without
 //! `Content-Encoding`, and removes itself otherwise. A valid `Content-Length` grows by the snippet
@@ -13,9 +15,10 @@
 //! Each data bucket is read and written to the injector. Slices from the incoming bucket become
 //! copies of that bucket (shared resource, adjusted start/length), so nothing is copied; slices
 //! that are not (snippet, held-back head window, padding) are copied into heap buckets, as the
-//! injector reuses that memory on the next call. Once the snippet is in, the filter removes
-//! itself and leaves the rest of the brigade, and every later one, untouched (so file buckets
-//! after the injection point still go out by sendfile).
+//! injector reuses that memory on the next call. File buckets are split into `FILE_READ_CHUNK`
+//! pieces before being read. Once the snippet is in, the filter removes itself and leaves the
+//! rest of the brigade, and every later one, untouched (so the file past the injection point
+//! still goes out by sendfile).
 
 #![allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code)]
 #![allow(clippy::missing_safety_doc)]

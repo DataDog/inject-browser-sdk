@@ -23,8 +23,8 @@ import socket
 import sys
 
 
-def fetch(port, path):
-    sock = socket.create_connection(("127.0.0.1", port), timeout=30)
+def fetch(host, port, path):
+    sock = socket.create_connection((host, port), timeout=30)
     sock.sendall(f"GET {path} HTTP/1.1\r\nHost: bench\r\nConnection: close\r\n\r\n".encode())
     data = bytearray()
     while True:
@@ -101,11 +101,11 @@ def check(args, sub, page, mode, seed):
         with open(os.path.join(args.pages, sub, page), "rb") as f:
             expected = f.read()
     else:
-        kind = "unpadded" if mode.startswith("chunked") else "padded"
+        kind = args.expect or ("unpadded" if mode.startswith("chunked") else "padded")
         with open(os.path.join(args.expected, f"{page}.{kind}"), "rb") as f:
             expected = f.read()
     try:
-        raw = fetch(args.port, path)
+        raw = fetch(args.host, args.port, path)
         status, headers, body, framing, problems = parse(raw)
     except Exception as error:  # noqa: BLE001 - report anything as a mismatch
         return {"path": path, "problems": [f"exception: {error!r}"]}
@@ -131,10 +131,14 @@ def main():
     parser.add_argument("--expected", required=True)
     parser.add_argument("--seeds", type=int, default=4)
     parser.add_argument("--buffered", action="store_true")
+    parser.add_argument("--modes", default="static,cl,chunked", help="comma-separated subset")
+    parser.add_argument("--expect", choices=["padded", "unpadded"],
+                        help="force one expectation for every mode (IIS never pads: unpadded)")
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--out")
     args = parser.parse_args()
 
-    modes = ["static", "cl", "chunked"] + (["clb", "chunkedb"] if args.buffered else [])
+    modes = args.modes.split(",") + (["clb", "chunkedb"] if args.buffered else [])
     jobs = []
     for sub in ("perf", "corpus"):
         for page in sorted(os.listdir(os.path.join(args.pages, sub))):

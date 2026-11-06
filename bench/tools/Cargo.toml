@@ -11,3 +11,11 @@ path = "src/oracle.rs"
 [dependencies]
 inject-browser-sdk.workspace = true
 bench-common.workspace = true
+
+[[bin]]
+name = "microbench"
+path = "src/microbench.rs"
+
+[[bin]]
+name = "splitcheck"
+path = "src/splitcheck.rs"

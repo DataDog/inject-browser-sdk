@@ -1,21 +1,31 @@
 //! Minimal "injection only" nginx dynamic module, in Rust on top of the `ngx` crate, calling
-//! the `inject-browser-sdk` crate directly (no FFI layer).
+//! the `inject-browser-sdk` crate directly (no FFI layer, no C shim).
 //!
-//! Configuration: `rum_inject on|off;` (http/server/location, default off) and a fixed snippet.
+//! Configuration: `rum_inject on|off;` (http/server/location, default off), a fixed snippet, and
+//! `rum_inject_sendfile on|off;` (default off) to pick how file responses are read, see below.
 //!
 //! Header filter: only `200` main-request `text/html` responses without `Content-Encoding`.
 //! A known `Content-Length` grows by the snippet length (the library pads with spaces when it
 //! does not inject); an unknown one stays unknown (chunked, no padding). Ranges are disabled and
-//! the ETag is weakened, as the body changes. `filter_need_in_memory` makes the copy filter read
-//! files into memory instead of handing us file buffers (this turns sendfile off for injected
-//! responses).
+//! the ETag is weakened, as the body changes.
 //!
 //! Body filter: every in-memory buffer is written to the injector. Slices from the incoming
 //! buffer are emitted zero-copy: the last of them reuses the incoming buffer itself (its `pos`
 //! moved forward), earlier ones are new buffers pointing into the same memory, linked before
 //! it, so the producer only gets the incoming buffer back once all of them have been sent.
 //! Slices that are not from the incoming buffer (snippet, held-back head window, padding) point
-//! at injector memory reused by the next call, so they are copied into pool memory.
+//! at injector memory reused by the next call, so they are copied into pool memory. Once the
+//! snippet is in, buffers pass through untouched.
+//!
+//! File responses:
+//! * `rum_inject_sendfile off`: `filter_need_in_memory`, as nginx-datadog does: the copy filter
+//!   reads the whole file into memory (`output_buffers`) before this filter sees it.
+//! * `rum_inject_sendfile on`: file buffers reach this filter as they are; it reads them itself,
+//!   `FILE_READ_CHUNK` at a time, only until the snippet is in, and leaves the rest of the file
+//!   region to sendfile. A page that never gets the snippet is read whole into pool memory (no
+//!   flow control: fine for a benchmark, not for production with huge non-injectable pages).
+//!
+//! The filter must sit below the copy filter: see `ngx_module_order`.
 
 use core::ffi::c_void;
 use core::{mem, ptr, slice};

@@ -260,19 +260,7 @@ impl<'snippet> Injector<'snippet> {
     /// (<https://www.rfc-editor.org/rfc/rfc9110#section-8.6>); anything else is not, and a server
     /// should remove the header rather than announce a wrong length.
     pub fn content_length_with_snippet(&self, content_length: &[u8]) -> Option<u64> {
-        let mut announced: Option<u64> = None;
-        for value in content_length.split(|&byte| return byte == b',') {
-            let value = value.trim_ascii();
-            if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
-                return None;
-            }
-            let length = core::str::from_utf8(value).ok()?.parse::<u64>().ok()?;
-            if announced.is_some_and(|announced| return announced != length) {
-                return None;
-            }
-            announced = Some(length);
-        }
-        return announced?.checked_add(u64::try_from(self.snippet.len()).ok()?);
+        return content_length_plus(content_length, u64::try_from(self.snippet.len()).ok()?);
     }
 
     /// Whether the snippet may still go into data yet to be written: the injector has neither
@@ -943,6 +931,24 @@ fn take_head_window<'a>(public_ref: &'a [u8], input: HeadWindow<'a>) -> (&'a [u8
         HeadWindow::InPlace { chunk } => (chunk, b"", true),
         HeadWindow::Buffered { tail } => (public_ref, tail, false),
     };
+}
+
+/// The length `added` bytes more than `content_length`, the value of a `Content-Length` header,
+/// or `None` if that value is not a valid length: see [`Injector::content_length_with_snippet`].
+pub fn content_length_plus(content_length: &[u8], added: u64) -> Option<u64> {
+    let mut announced: Option<u64> = None;
+    for value in content_length.split(|&byte| return byte == b',') {
+        let value = value.trim_ascii();
+        if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let length = core::str::from_utf8(value).ok()?.parse::<u64>().ok()?;
+        if announced.is_some_and(|announced| return announced != length) {
+            return None;
+        }
+        announced = Some(length);
+    }
+    return announced?.checked_add(added);
 }
 
 #[derive(Default, Copy, Clone)]

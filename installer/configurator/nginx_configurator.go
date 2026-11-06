@@ -432,9 +432,9 @@ const nginxDatadogBlockDirective = "datadog_rum_config"
 // since one of these comments invites exactly that.
 var nginxInstallerComments = []string{"Disable APM Tracing", "Enable RUM Injection"}
 
-// Inverse of addDatadogToConfig: drops every datadog load_module directive and
-// every datadog_* directive it wrote inside the http block, restoring the
-// original config byte for byte.
+// Inverse of addDatadogToConfig: drops every load_module directive pointing to
+// the installer-owned module and every datadog_* directive it wrote inside the
+// http block, restoring the original config byte for byte.
 //
 // The comment lines above datadog_tracing and datadog_rum are dropped along with
 // the directive they document, so a config written by any installer version
@@ -458,7 +458,10 @@ func removeDatadogFromConfig(content []byte) ([]byte, error) {
 	// the original config with it. The nginx docker images ship a config whose very
 	// first byte is a newline, and the load_module line is written directly above
 	// it, so that blank line is immediately after the match.
-	moduleRegex := regexp.MustCompile(`(?m)^[ \t]*load_module[ \t]+.*/ngx_http_datadog_module\.so;[ \t]*\r?\n?`)
+	// Other module paths belong to customer-managed installations (for example,
+	// APM), so they must neither authorize uninstall nor be removed by it.
+	modulePath := regexp.QuoteMeta(NginxModulesPath + "/ngx_http_datadog_module.so")
+	moduleRegex := regexp.MustCompile(`(?m)^[ \t]*load_module[ \t]+` + modulePath + `;[ \t]*\r?\n?`)
 	modules := moduleRegex.FindAllStringIndex(contentStr, -1)
 	if len(modules) == 0 {
 		return nil, NewInstallerError(NginxError, fmt.Errorf("datadog load_module directive not found in nginx config"))

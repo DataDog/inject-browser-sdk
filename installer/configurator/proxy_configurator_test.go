@@ -278,17 +278,22 @@ func TestRemoveDatadogFromConfigWithOnlyLoadModule(t *testing.T) {
 
 // A duplicate load_module line passes 'nginx -t' while the module file is still
 // there, so leaving one behind is only noticed once the directory is deleted and
-// NGINX refuses to start. The duplicate may also name a different directory,
-// which is still a reference to a datadog module we are removing.
+// NGINX refuses to start. Module paths outside our installation directory belong
+// to the customer and must be preserved.
 func TestRemoveDatadogFromConfigWithMultipleLoadModules(t *testing.T) {
 	original, installed := installIntoBasicConfig(t)
 
 	tests := []struct {
 		name      string
 		duplicate string
+		preserved string
 	}{
 		{name: "Same directory", duplicate: nginxLoadModule},
-		{name: "Different directory", duplicate: "load_module /usr/lib/nginx/modules/ngx_http_datadog_module.so;\n"},
+		{
+			name:      "Different directory",
+			duplicate: "load_module /usr/lib/nginx/modules/ngx_http_datadog_module.so;\n",
+			preserved: "load_module /usr/lib/nginx/modules/ngx_http_datadog_module.so;\n",
+		},
 	}
 
 	for _, tt := range tests {
@@ -296,7 +301,27 @@ func TestRemoveDatadogFromConfigWithMultipleLoadModules(t *testing.T) {
 			transformed, err := removeDatadogFromConfig([]byte(tt.duplicate + installed))
 			require.NoError(t, err, "Failed to remove Datadog from a config with two load_module lines")
 
-			assert.Equal(t, original, string(transformed), "Not every load_module line was removed")
+			assert.Equal(t, tt.preserved+original, string(transformed), "Only installer-owned load_module lines should be removed")
+		})
+	}
+}
+
+func TestRemoveDatadogFromConfigWithForeignModulePath(t *testing.T) {
+	_, installed := installIntoBasicConfig(t)
+
+	for _, modulePath := range []string{
+		"/usr/lib/nginx/modules/ngx_http_datadog_module.so",
+		NginxModulesPath + "-custom/ngx_http_datadog_module.so",
+		"/custom" + NginxModulesPath + "/ngx_http_datadog_module.so",
+	} {
+		t.Run(modulePath, func(t *testing.T) {
+			foreign := strings.Replace(installed, nginxLoadModule, "load_module "+modulePath+";\n", 1)
+			content := []byte(foreign)
+
+			transformed, err := removeDatadogFromConfig(content)
+			require.ErrorContains(t, err, "datadog load_module directive not found")
+			require.Nil(t, transformed, "A foreign installation must not produce a replacement config")
+			assert.Equal(t, foreign, string(content), "The customer's module and datadog_* directives must remain unchanged")
 		})
 	}
 }

@@ -2,8 +2,10 @@
 //! `end`, with no server and no I/O, over a matrix of generated pages:
 //!
 //! * the `<head>`: tiny (a title), 1 KiB of `<meta>`/`<link>` crossing the head window, 8 KiB of
-//!   inline script and style, one starting past the window, none at all, and a body that is not
-//!   HTML;
+//!   inline script and style, one starting past the window, none at all, a body that is not
+//!   HTML, and the shapes the walk past the window is for: the metas the snippet stays behind late
+//!   in the first kilobyte, an `X-UA-Compatible` after 3 KiB of metas, and a run of metas past the
+//!   10 KiB walk limit;
 //! * the page size: 512 B to 1 MiB, the head included (a head larger than the page is skipped);
 //! * the chunking: 8000 B (APR file reads), 32 KiB (nginx output buffers), the whole page.
 //!
@@ -15,7 +17,17 @@ use std::{env, hint::black_box, time::Instant};
 
 use inject_browser_sdk::injector::Injector;
 
-const KINDS: &[&str] = &["head_tiny", "head_1k", "head_8k", "head_late", "no_head", "not_html"];
+const KINDS: &[&str] = &[
+    "head_tiny",
+    "head_1k",
+    "head_8k",
+    "head_late",
+    "no_head",
+    "not_html",
+    "relevant_late",
+    "xua_after_run",
+    "run_10k",
+];
 const SIZES: &[(usize, &str)] =
     &[(512, "512"), (2 << 10, "2k"), (16 << 10, "16k"), (128 << 10, "128k"), (1 << 20, "1m")];
 const CHUNKS: &[(usize, &str)] = &[(8000, "8000"), (32 << 10, "32k"), (usize::MAX, "whole")];
@@ -39,6 +51,30 @@ fn metas(bytes: usize) -> String {
     out
 }
 
+/// A run of `<meta>` tags the snippet need not stay behind, at least `bytes` of them.
+fn meta_run(bytes: usize) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while out.len() < bytes {
+        out += &format!("<meta property=\"og:tag{i}\" content=\"Some page description number {i}\">\n");
+        i += 1;
+    }
+    out
+}
+
+/// `<link>` tags, at least `bytes` of them.
+fn links(bytes: usize) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while out.len() < bytes {
+        out += &format!("<link rel=\"preload\" href=\"/static/asset{i}.js\" as=\"script\">\n");
+        i += 1;
+    }
+    out
+}
+
+const COMPATIBLE: &str = "<meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\">\n";
+
 fn head(kind: &str) -> String {
     let doc = "<!doctype html><html lang=\"en\">";
     match kind {
@@ -53,6 +89,21 @@ fn head(kind: &str) -> String {
         "head_late" => format!(
             "{doc}<!-- {} --><head><title>Page</title></head><body>\n",
             "build info ".repeat(200)
+        ),
+        // The metas the snippet stays behind, late in the first kilobyte.
+        "relevant_late" => format!(
+            "{doc}<head>\n{}<meta charset=\"utf-8\">\n{COMPATIBLE}<title>Page</title></head><body>\n",
+            links(850)
+        ),
+        // An `X-UA-Compatible` declaration after 3 KiB of metas, which the walk follows.
+        "xua_after_run" => format!(
+            "{doc}<head>\n<meta charset=\"utf-8\">\n{}{COMPATIBLE}<link rel=icon href=/i.png><title>Page</title></head><body>\n",
+            meta_run(3000)
+        ),
+        // A run of metas past the 10 KiB the walk goes to.
+        "run_10k" => format!(
+            "{doc}<head>\n<meta charset=\"utf-8\">\n{}<title>Page</title></head><body>\n",
+            meta_run(11 << 10)
         ),
         "no_head" => format!("{doc}<body>\n"),
         "not_html" => "{\"items\":[".into(),

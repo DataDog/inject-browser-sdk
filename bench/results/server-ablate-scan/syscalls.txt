@@ -1,0 +1,10 @@
+nginx/off: 236575 requests; setsockopt 0.88, recvfrom 0.44, newfstatat 0.44, sendfile 0.44, close 0.44, writev 0.44, openat 0.44
+nginx/read-cork: 213754 requests; setsockopt 0.78, newfstatat 0.39, openat 0.39, pread64 0.39, recvfrom 0.39, writev 0.39, close 0.39, sendfile 0.39
+nginx/split_snippet-cork: 208209 requests; setsockopt 0.79, newfstatat 0.39, pread64 0.39, openat 0.39, writev 0.39, close 0.39, recvfrom 0.39, sendfile 0.39
+nginx/scan@0-cork: 200778 requests; setsockopt 0.81, newfstatat 0.41, pread64 0.41, openat 0.41, writev 0.41, recvfrom 0.41, close 0.41, sendfile 0.40
+nginx/off: 236462 requests; setsockopt 0.79, newfstatat 0.39, writev 0.39, openat 0.39, recvfrom 0.39, close 0.39, sendfile 0.39
+nginx/scan-cork: 239663 requests; close 0.51, newfstatat 0.51, writev 0.51, openat 0.51, recvfrom 0.51, pread64 0.51
+httpd/off: 86507 requests; openat 3.02, futex 1.96, setsockopt 0.86, read 0.86, epoll_ctl 0.85, newfstatat 0.43, sendfile 0.43, writev 0.43, close 0.43
+httpd/read: 82767 requests; openat 3.03, futex 1.94, setsockopt 0.87, read 0.86, epoll_ctl 0.85, newfstatat 0.43, sendfile 0.43, writev 0.43, pread64 0.43, close 0.43
+httpd/split_snippet: 83204 requests; openat 3.05, futex 1.96, setsockopt 0.87, read 0.86, epoll_ctl 0.86, pread64 0.44, sendfile 0.44, writev 0.44, newfstatat 0.44, close 0.44
+httpd/scan: 82468 requests; openat 3.06, futex 1.92, setsockopt 0.87, read 0.87, epoll_ctl 0.86, pread64 0.44, writev 0.44, newfstatat 0.44, sendfile 0.44, close 0.44

@@ -25,7 +25,14 @@
 //!   region to sendfile. A page that never gets the snippet is read whole into pool memory (no
 //!   flow control: fine for a benchmark, not for production with huge non-injectable pages).
 //!
+//! `rum_inject_mode injector|scan|read|split|split_snippet;` (default `injector`) picks the
+//! integration: the `Injector` as above, or the offset-based `Scanner` and the ablations that
+//! locate its remaining cost, see the `scan` module. `rum_inject_cork on|off;` (default off) keeps
+//! `tcp_nopush` on for the responses the module touches, which it otherwise turns off.
+//!
 //! The filter must sit below the copy filter: see `ngx_module_order`.
+
+mod scan;
 
 use core::ffi::c_void;
 use core::{mem, ptr, slice};
@@ -34,10 +41,11 @@ use inject_browser_sdk::injector::{Injector, Result as InjectorResult};
 use ngx::core::Pool;
 use ngx::ffi::{
     ngx_alloc_chain_link, ngx_buf_t, ngx_chain_t, ngx_chain_update_chains, ngx_command_t,
-    ngx_conf_set_flag_slot, ngx_conf_t, ngx_create_temp_buf, ngx_flag_t, ngx_http_module_t,
+    ngx_conf_enum_t, ngx_conf_set_enum_slot, ngx_conf_set_flag_slot, ngx_conf_t, ngx_create_temp_buf, ngx_flag_t, ngx_http_module_t,
     ngx_http_output_body_filter_pt, ngx_http_output_header_filter_pt, ngx_http_request_t,
     ngx_http_top_body_filter, ngx_http_top_header_filter, ngx_http_weak_etag, ngx_int_t,
-    ngx_module_t, ngx_pcalloc, ngx_pool_t, ngx_read_file, NGX_CONF_FLAG, NGX_HTTP_LOC_CONF,
+    ngx_module_t, ngx_pcalloc, ngx_pool_t, ngx_read_file, ngx_uint_t, NGX_CONF_FLAG, NGX_CONF_TAKE1,
+    NGX_HTTP_LOC_CONF,
     NGX_HTTP_LOC_CONF_OFFSET, NGX_HTTP_MAIN_CONF, NGX_HTTP_MODULE, NGX_HTTP_SRV_CONF,
 };
 use ngx::http::{HttpModule, HttpModuleLocationConf, Merge, MergeConfigError};
@@ -46,6 +54,7 @@ use ngx::ngx_string;
 const NGX_OK: ngx_int_t = 0;
 const NGX_ERROR: ngx_int_t = -1;
 const NGX_CONF_UNSET: ngx_flag_t = -1;
+const NGX_CONF_UNSET_UINT: ngx_uint_t = ngx_uint_t::MAX;
 const NGX_HTTP_OK: usize = 200;
 
 struct Module;
@@ -56,11 +65,20 @@ struct LocationConf {
     /// `rum_inject_sendfile`: leave file buffers to sendfile, reading only the part the
     /// injector needs, instead of having the copy filter read whole files into memory.
     sendfile: ngx_flag_t,
+    /// `rum_inject_mode`, one of the `scan::MODE_*`.
+    mode: ngx_uint_t,
+    /// `rum_inject_cork`: keep `tcp_nopush` on.
+    cork: ngx_flag_t,
 }
 
 impl Default for LocationConf {
     fn default() -> Self {
-        Self { enable: NGX_CONF_UNSET, sendfile: NGX_CONF_UNSET }
+        Self {
+            enable: NGX_CONF_UNSET,
+            sendfile: NGX_CONF_UNSET,
+            mode: NGX_CONF_UNSET_UINT,
+            cork: NGX_CONF_UNSET,
+        }
     }
 }
 
@@ -82,6 +100,10 @@ impl Merge for LocationConf {
             ANY_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
         }
         merge_flag(&mut self.sendfile, prev.sendfile);
+        merge_flag(&mut self.cork, prev.cork);
+        if self.mode == NGX_CONF_UNSET_UINT {
+            self.mode = if prev.mode == NGX_CONF_UNSET_UINT { scan::MODE_INJECTOR } else { prev.mode };
+        }
         Ok(())
     }
 }
@@ -96,8 +118,8 @@ unsafe impl HttpModuleLocationConf for Module {
     type LocationConf = LocationConf;
 }
 
-static mut NEXT_HEADER_FILTER: ngx_http_output_header_filter_pt = None;
-static mut NEXT_BODY_FILTER: ngx_http_output_body_filter_pt = None;
+pub(crate) static mut NEXT_HEADER_FILTER: ngx_http_output_header_filter_pt = None;
+pub(crate) static mut NEXT_BODY_FILTER: ngx_http_output_body_filter_pt = None;
 
 impl HttpModule for Module {
     fn module() -> &'static ngx_module_t {
@@ -126,7 +148,16 @@ impl HttpModule for Module {
     }
 }
 
-static mut COMMANDS: [ngx_command_t; 3] = [
+static mut MODES: [ngx_conf_enum_t; 6] = [
+    ngx_conf_enum_t { name: ngx_string!("injector"), value: scan::MODE_INJECTOR },
+    ngx_conf_enum_t { name: ngx_string!("scan"), value: scan::MODE_SCAN },
+    ngx_conf_enum_t { name: ngx_string!("read"), value: scan::MODE_READ },
+    ngx_conf_enum_t { name: ngx_string!("split"), value: scan::MODE_SPLIT },
+    ngx_conf_enum_t { name: ngx_string!("split_snippet"), value: scan::MODE_SPLIT_SNIPPET },
+    ngx_conf_enum_t { name: ngx::ffi::ngx_str_t { len: 0, data: ptr::null_mut() }, value: 0 },
+];
+
+static mut COMMANDS: [ngx_command_t; 5] = [
     ngx_command_t {
         name: ngx_string!("rum_inject"),
         type_: (NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_FLAG)
@@ -143,6 +174,24 @@ static mut COMMANDS: [ngx_command_t; 3] = [
         set: Some(ngx_conf_set_flag_slot),
         conf: NGX_HTTP_LOC_CONF_OFFSET as ngx::ffi::ngx_uint_t,
         offset: mem::offset_of!(LocationConf, sendfile) as ngx::ffi::ngx_uint_t,
+        post: ptr::null_mut(),
+    },
+    ngx_command_t {
+        name: ngx_string!("rum_inject_mode"),
+        type_: (NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1)
+            as ngx::ffi::ngx_uint_t,
+        set: Some(ngx_conf_set_enum_slot),
+        conf: NGX_HTTP_LOC_CONF_OFFSET as ngx::ffi::ngx_uint_t,
+        offset: mem::offset_of!(LocationConf, mode) as ngx::ffi::ngx_uint_t,
+        post: unsafe { &raw mut MODES[0] } as *mut c_void,
+    },
+    ngx_command_t {
+        name: ngx_string!("rum_inject_cork"),
+        type_: (NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_FLAG)
+            as ngx::ffi::ngx_uint_t,
+        set: Some(ngx_conf_set_flag_slot),
+        conf: NGX_HTTP_LOC_CONF_OFFSET as ngx::ffi::ngx_uint_t,
+        offset: mem::offset_of!(LocationConf, cork) as ngx::ffi::ngx_uint_t,
         post: ptr::null_mut(),
     },
     ngx_command_t::empty(),
@@ -201,11 +250,11 @@ struct Ctx {
     busy: *mut ngx_chain_t,
 }
 
-fn tag() -> *mut c_void {
+pub(crate) fn tag() -> *mut c_void {
     ptr::addr_of!(ngx_http_rum_inject_module) as *mut c_void
 }
 
-unsafe fn module_index() -> usize {
+pub(crate) unsafe fn module_index() -> usize {
     unsafe { (*ptr::addr_of!(ngx_http_rum_inject_module)).ctx_index }
 }
 
@@ -244,6 +293,9 @@ unsafe extern "C" fn header_filter(r: *mut ngx_http_request_t) -> ngx_int_t {
 
         let snippet = bench_common::snippet();
         let length = out.content_length_n;
+        if conf.mode != scan::MODE_INJECTOR {
+            return scan_header_filter(r, conf, next);
+        }
         if length > 0 {
             if !out.content_length.is_null() {
                 (*out.content_length).hash = 0;
@@ -280,7 +332,7 @@ unsafe extern "C" fn header_filter(r: *mut ngx_http_request_t) -> ngx_int_t {
         if conf.sendfile != 1 {
             // The copy filter reads files into memory for us (no sendfile for the response).
             req.set_filter_need_in_memory(1);
-        } else {
+        } else if conf.cork != 1 {
             // The response is now memory buffers ahead of the file. Corked with `tcp_nopush`,
             // the last of it can wait on Nagle for the client's delayed ACK, 40 ms a response.
             (*req.connection).set_tcp_nopush(ngx::ffi::ngx_connection_tcp_nopush_e_NGX_TCP_NOPUSH_DISABLED as _);
@@ -290,16 +342,57 @@ unsafe extern "C" fn header_filter(r: *mut ngx_http_request_t) -> ngx_int_t {
     }
 }
 
+/// The header filter of the `scan` module's modes: the headers wait for the decision in `scan`,
+/// and go on right away for the ablations.
+unsafe fn scan_header_filter(
+    r: *mut ngx_http_request_t,
+    conf: &LocationConf,
+    next: unsafe extern "C" fn(*mut ngx_http_request_t) -> ngx_int_t,
+) -> ngx_int_t {
+    unsafe {
+        let req = &mut *r;
+        let out = &mut req.headers_out;
+        let length = out.content_length_n;
+        if !out.content_length.is_null() {
+            (*out.content_length).hash = 0;
+            out.content_length = ptr::null_mut();
+        }
+        if conf.mode == scan::MODE_SPLIT_SNIPPET && length >= 0 {
+            out.content_length_n = length + bench_common::snippet().len() as i64;
+        }
+        if !out.accept_ranges.is_null() {
+            (*out.accept_ranges).hash = 0;
+            out.accept_ranges = ptr::null_mut();
+        }
+        req.set_allow_ranges(0);
+        ngx_http_weak_etag(r);
+        if req.header_only() != 0 {
+            return next(r);
+        }
+        if !scan::create(r, conf.mode, length) {
+            return NGX_ERROR;
+        }
+        if conf.cork != 1 {
+            (*req.connection).set_tcp_nopush(ngx::ffi::ngx_connection_tcp_nopush_e_NGX_TCP_NOPUSH_DISABLED as _);
+        }
+        if conf.mode == scan::MODE_SCAN {
+            // The headers wait for the decision, see `scan::commit`.
+            return NGX_OK;
+        }
+        next(r)
+    }
+}
+
 unsafe fn buf_in_memory(b: *const ngx_buf_t) -> bool {
     unsafe { (*b).temporary() != 0 || (*b).memory() != 0 || (*b).mmap() != 0 }
 }
 
-unsafe fn calloc_buf(pool: *mut ngx_pool_t) -> *mut ngx_buf_t {
+pub(crate) unsafe fn calloc_buf(pool: *mut ngx_pool_t) -> *mut ngx_buf_t {
     unsafe { ngx_pcalloc(pool, mem::size_of::<ngx_buf_t>()) as *mut ngx_buf_t }
 }
 
 /// Appends `b` to the chain whose next link pointer is `*ll`.
-unsafe fn link(pool: *mut ngx_pool_t, ll: &mut *mut *mut ngx_chain_t, b: *mut ngx_buf_t) -> bool {
+pub(crate) unsafe fn link(pool: *mut ngx_pool_t, ll: &mut *mut *mut ngx_chain_t, b: *mut ngx_buf_t) -> bool {
     unsafe {
         let cl = ngx_alloc_chain_link(pool);
         if cl.is_null() {
@@ -313,7 +406,7 @@ unsafe fn link(pool: *mut ngx_pool_t, ll: &mut *mut *mut ngx_chain_t, b: *mut ng
     }
 }
 
-unsafe fn special(pool: *mut ngx_pool_t, ll: &mut *mut *mut ngx_chain_t, last_buf: bool) -> bool {
+pub(crate) unsafe fn special(pool: *mut ngx_pool_t, ll: &mut *mut *mut ngx_chain_t, last_buf: bool) -> bool {
     unsafe {
         let b = calloc_buf(pool);
         if b.is_null() {
@@ -441,6 +534,9 @@ unsafe fn pass_through(
 unsafe extern "C" fn body_filter(r: *mut ngx_http_request_t, input: *mut ngx_chain_t) -> ngx_int_t {
     unsafe {
         let next = NEXT_BODY_FILTER.expect("next body filter");
+        if !get_ctx(r).is_null() && (*location_conf(r)).mode != scan::MODE_INJECTOR {
+            return scan::body_filter(r, input);
+        }
         let ctx = get_ctx(r);
         if ctx.is_null() || ((*ctx).done || input.is_null()) && (*ctx).busy.is_null() {
             return next(r, input);

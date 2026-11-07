@@ -12,6 +12,13 @@
 # loaded: the module loaded and its filters installed, but injection off, which isolates what the
 # filters cost from what injecting does.
 #
+# nginx, the offset-based integration and its ablations (bench/nginx/src/scan.rs): scan (the
+# Scanner: headers held until the decision, the snippet spliced into nginx's own buffers, files by
+# sendfile on both sides of it), read (read the first KiB, send unchanged), split (the first KiB
+# from memory, the rest by sendfile), split_snippet (split, with the snippet in after the first
+# KiB). Each takes a `-cork` suffix that keeps tcp_nopush on, which the module turns off otherwise.
+# httpd has the same variants, as the RUM_INJECT_SCAN / _READ / _SPLIT / _SPLIT_SNIPPET filters.
+#
 #   RESP_HEADERS_KB [0]: response headers of about that many KiB added to every response
 #   SERVERS [nginx httpd]   VARIANTS [off on on-mem]   CONNS [16 64 256]   DURATION [10s]   SEEDS [4]
 #   PERF_PAGES [all of pages/perf]   SENDFILE [on]   HTTPD_MMAP [On]   WRK_CPUS [4-7]   SERVER_CPUS [0,1]
@@ -51,16 +58,24 @@ prepare() {
 }
 
 render() { # template server variant -> config file
-    local template=$1 server=$2 variant=$3 load="" on="" sendfile=$SENDFILE
+    local template=$1 server=$2 variant=$3 load="" on="" sendfile=$SENDFILE cork=""
+    # `<variant>-cork`: the same, with `tcp_nopush` left on (nginx).
+    case $variant in *-cork) variant=${variant%-cork}; cork="rum_inject_cork on;" ;; esac
     case $server/$variant in
         nginx/off|httpd/off|httpd/loaded) ;;
         nginx/loaded) on="rum_inject off;" ;;
         nginx/on) on="rum_inject on; rum_inject_sendfile on;" ;;
         nginx/on-mem) on="rum_inject on;" ;;
+        nginx/scan|nginx/read|nginx/split|nginx/split_snippet)
+            on="rum_inject on; rum_inject_mode $variant; $cork" ;;
         httpd/on) on="SetOutputFilter RUM_INJECT" ;;
         httpd/on-mem) on="SetOutputFilter RUM_INJECT_WHOLE" ;;
+        # APR corks sendfile itself: `-cork` makes no difference to httpd.
+        httpd/scan|httpd/read|httpd/split|httpd/split_snippet)
+            on="SetOutputFilter RUM_INJECT_$(echo "$variant" | tr a-z A-Z)" ;;
         *) echo "unknown variant $server/$variant" >&2; return 1 ;;
     esac
+    [ -n "$cork" ] && [ "$server/$variant" = nginx/on ] && on="$on $cork"
     if [ "$variant" != off ]; then
         case $server in
             nginx) load="load_module $MODULES_DIR/libngx_http_rum_inject_module.so;" ;;
@@ -127,15 +142,21 @@ start_upstream() {
 }
 
 accuracy() {
-    local status=0 servers variants
+    local status=0 servers variants expect
     read -r -a servers <<< "$SERVERS"
     read -r -a variants <<< "$VARIANTS"
     for server in "${servers[@]}"; do
         for variant in "${variants[@]}"; do
-            case $variant in off|loaded) continue ;; esac
+            expect=()
+            case $server/$variant in httpd/*-cork) continue ;; esac
+            case $variant in
+                off|loaded|split_snippet*) continue ;;
+                scan*) expect=(--expect exact) ;;
+                read*|split*) expect=(--expect original) ;;
+            esac
             start "$server" "$variant"
             python3 "$here/harness/accuracy.py" --server "$server/$variant" --port "$PORT" --pages "$PAGES" \
-                --expected "$EXPECTED" --seeds "$SEEDS" --buffered --out "$RESULTS/accuracy-$server-$variant.json" || status=1
+                --expected "$EXPECTED" --seeds "$SEEDS" --buffered "${expect[@]}" --out "$RESULTS/accuracy-$server-$variant.json" || status=1
             stop "$server"
             grep -v "^\s*$" "$WORK/run/$server-error.log" 2>/dev/null | grep -iv "notice\|AH10159" | tail -5 || true
         done
@@ -152,6 +173,8 @@ perf() {
     read -r -a variants <<< "$VARIANTS"
     for server in "${servers[@]}"; do
         for variant in "${variants[@]}"; do
+            # APR corks sendfile itself: the -cork variants are nginx's only.
+            case $server/$variant in httpd/*-cork) continue ;; esac
             start "$server" "$variant"
             python3 "$here/harness/perf.py" --server "$server" --variant "$variant" --port "$PORT" \
                 --pids "$(server_pids "$server")" --pages "$pages" --conns "${CONNS// /,}" \

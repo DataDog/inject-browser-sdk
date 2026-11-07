@@ -8,6 +8,7 @@
 #   bench/dev.sh bench/server-ablate.sh
 #
 # Env (defaults in brackets): LAYOUTS [1 2 3]   SERVERS [nginx httpd]   CONNS [64]   DURATION [5s]
+#   VARIANTS [off loaded on, scan and the ablations, plain and -cork]
 #   PERF_PAGES [a page per size and head kind]   HEADER_SIZES [0 4]: response header KiB to add
 #   RESULTS [/src/bench/results/server-ablate]
 set -euo pipefail
@@ -17,6 +18,8 @@ LAYOUTS=${LAYOUTS:-1 2 3}
 HEADER_SIZES=${HEADER_SIZES:-0 4}
 RESULTS=${RESULTS:-$here/results/server-ablate}
 export SERVERS=${SERVERS:-nginx httpd} CONNS=${CONNS:-64} DURATION=${DURATION:-5s}
+# The offset-based integration (scan) and its ablations, each with corking on as well (nginx).
+VARIANTS=${VARIANTS:-off loaded on scan read split split_snippet scan-cork read-cork split-cork split_snippet-cork}
 export PERF_PAGES=${PERF_PAGES:-html_512.html,html_2k.html,html_16k.html,html_100k.html,html_1m.html,head_late_20k.html,text_as_html_100k.html,html_nohead_1m.html}
 mkdir -p "$RESULTS" && : > "$RESULTS/perf.jsonl"
 
@@ -37,7 +40,7 @@ for seed in "${layouts[@]}"; do
         target/release/oracle "$mods/"
     for kb in "${header_sizes[@]}"; do
         LAYOUT_SEED=$seed RESP_HEADERS_KB=$kb MODULES_DIR=$mods RESULTS=$RESULTS/run \
-            VARIANTS="off loaded on" "$here/run.sh" perf >/dev/null
+            VARIANTS="$VARIANTS" "$here/run.sh" perf >/dev/null
         cat "$RESULTS/run/perf.jsonl" >> "$RESULTS/perf.jsonl"
         echo "layout $seed, $kb KiB of response headers done" >&2
     done

@@ -5,7 +5,7 @@
 //! * the header filter does not call the next one: the headers wait for the decision, and then
 //!   announce the exact `Content-Length`, the snippet length more only if it goes in;
 //! * the held bytes are nginx's own buffers, but for files: a file no larger than
-//!   `RUM_INJECT_MEMORY_BELOW` bytes (environment, default 16 KiB) is read whole, in one read, and
+//!   `RUM_INJECT_MEMORY_BELOW` bytes (environment, default 8 KiB) is read whole, in one read, and
 //!   goes out from memory around the snippet, in one write. A larger one is read only until the
 //!   decision (usually the first 1 KiB), and what was read goes out from memory, the snippet after
 //!   it, the rest of the file by sendfile. Sending both sides of the snippet by sendfile costs a
@@ -271,7 +271,7 @@ unsafe fn feed(pool: *mut ngx_pool_t, ctx: &mut ScanCtx, b: *mut ngx_buf_t) -> O
 pub(crate) fn memory_below() -> i64 {
     static BELOW: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *BELOW.get_or_init(|| {
-        std::env::var("RUM_INJECT_MEMORY_BELOW").ok().and_then(|v| v.parse().ok()).unwrap_or(16 << 10)
+        std::env::var("RUM_INJECT_MEMORY_BELOW").ok().and_then(|v| v.parse().ok()).unwrap_or(8 << 10)
     })
 }
 

@@ -62,7 +62,7 @@ render() { # template server variant -> config file
     local template=$1 server=$2 variant=$3 load="" on="" sendfile=$SENDFILE cork=""
     # `<variant>-cork`: the same, with `tcp_nopush` left on (nginx).
     case $variant in *-cork) variant=${variant%-cork}; cork="rum_inject_cork on;" ;; esac
-    # `scan@<bytes>`: files up to that size are read whole and sent from memory (default 16 KiB).
+    # `scan@<bytes>`: files up to that size are read whole and sent from memory (default 8 KiB).
     unset RUM_INJECT_MEMORY_BELOW
     case $variant in *@*) export RUM_INJECT_MEMORY_BELOW=${variant#*@}; variant=${variant%@*} ;; esac
     case $server/$variant in

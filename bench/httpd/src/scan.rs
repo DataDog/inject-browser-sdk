@@ -6,7 +6,7 @@
 //!   the first brigade passed, so they wait too, and announce the exact `Content-Length`, the
 //!   snippet length more only if it goes in;
 //! * the held buckets are httpd's own, but for files: a file bucket no larger than
-//!   `RUM_INJECT_MEMORY_BELOW` bytes (environment, default 16 KiB) is read whole, and goes out from
+//!   `RUM_INJECT_MEMORY_BELOW` bytes (environment, default 8 KiB) is read whole, and goes out from
 //!   memory around the snippet, an immortal bucket. A larger one is split into the pieces the
 //!   decision needs (usually the first 1 KiB), which are read and go out from memory, and the rest,
 //!   which stays a file bucket, sent by sendfile. Buckets held across calls are set aside, which
@@ -184,7 +184,7 @@ pub(crate) unsafe fn read_head(
 fn memory_below() -> apr_size_t {
     static BELOW: std::sync::OnceLock<apr_size_t> = std::sync::OnceLock::new();
     *BELOW.get_or_init(|| {
-        std::env::var("RUM_INJECT_MEMORY_BELOW").ok().and_then(|v| v.parse().ok()).unwrap_or(16 << 10)
+        std::env::var("RUM_INJECT_MEMORY_BELOW").ok().and_then(|v| v.parse().ok()).unwrap_or(8 << 10)
     })
 }
 

@@ -125,6 +125,61 @@ unsafe fn read_file_piece(
     }
 }
 
+extern "C" {
+    fn pread(fd: core::ffi::c_int, buf: *mut c_void, count: usize, offset: i64) -> isize;
+}
+
+/// Reads `length` bytes of file bucket `e` from `at` on into request pool memory, with a plain
+/// `pread` on its descriptor. Reading the bucket through APR maps the file instead, with
+/// `EnableMMAP On`: an mmap, a munmap and page faults per response, which is what made reading the
+/// first KiB cost httpd several times what it costs nginx.
+pub(crate) unsafe fn pread_bucket(
+    e: *mut apr_bucket,
+    at: apr_size_t,
+    length: apr_size_t,
+    pool: *mut apr_pool_t,
+) -> Result<*mut u8, apr_status_t> {
+    unsafe {
+        let file = (*e).data as *mut apr_bucket_file;
+        let mut fd: apr_os_file_t = 0;
+        let rv = apr_os_file_get(&mut fd, (*file).fd);
+        if rv != SUCCESS {
+            return Err(rv);
+        }
+        let buf = apr_palloc(pool, length.max(1)) as *mut u8;
+        let offset = (*e).start + at as apr_off_t;
+        if pread(fd, buf as *mut c_void, length as usize, offset) != length as isize {
+            // APR_EGENERAL
+            return Err(20014);
+        }
+        Ok(buf)
+    }
+}
+
+/// Replaces the first `length` bytes of file bucket `e` with a pool bucket holding them, read with
+/// [`pread_bucket`]: the rest stays a file bucket, `e` itself moved forward, or goes if there is
+/// none. Returns the new bucket, and the bytes it holds.
+pub(crate) unsafe fn read_head(
+    e: *mut apr_bucket,
+    length: apr_size_t,
+    pool: *mut apr_pool_t,
+    list: *mut apr_bucket_alloc_t,
+) -> Result<(*mut apr_bucket, *const u8), apr_status_t> {
+    unsafe {
+        let buf = pread_bucket(e, 0, length, pool)?;
+        let m = apr_bucket_pool_create(buf as *const c_char, length, pool, list);
+        insert_before(e, m);
+        if length == (*e).length {
+            remove(e);
+            destroy(e);
+        } else {
+            (*e).start += length as apr_off_t;
+            (*e).length -= length;
+        }
+        Ok((m, buf))
+    }
+}
+
 /// Files up to this size are read whole and sent from memory, see the module documentation.
 fn memory_below() -> apr_size_t {
     static BELOW: std::sync::OnceLock<apr_size_t> = std::sync::OnceLock::new();
@@ -133,25 +188,31 @@ fn memory_below() -> apr_size_t {
     })
 }
 
-/// While holding: feeds the scanner held file bucket `e`, read into memory, whole if it is small,
-/// otherwise only its first piece, split off: the rest goes back to the head of `bb`, the next
-/// bucket the holding loop takes.
-unsafe fn feed_held_file(ctx: &mut ScanCtx, e: *mut apr_bucket, bb: *mut apr_bucket_brigade) -> Result<Decision, apr_status_t> {
+/// While holding: feeds the scanner held file bucket `e`, read into a pool bucket that takes its
+/// place: the whole file if it is small, otherwise only its first piece, the rest of `e` going back
+/// to the head of `bb`, the next bucket the holding loop takes. Returns the decision and that
+/// bucket.
+unsafe fn feed_held_file(
+    f: *mut ap_filter_t,
+    ctx: &mut ScanCtx,
+    e: *mut apr_bucket,
+    bb: *mut apr_bucket_brigade,
+) -> Result<(Decision, *mut apr_bucket), apr_status_t> {
     unsafe {
-        if (*e).length > memory_below() {
-            let piece = if ctx.scanner.fed() == 0 { FIRST_READ } else { FILE_READ_CHUNK };
-            if (*e).length > piece {
-                let rv = split(e, piece);
-                if rv != SUCCESS {
-                    return Err(rv);
-                }
-                let rest = next(e);
-                remove(rest);
-                insert_before(first(bb), rest);
-            }
+        let piece = match (*e).length <= memory_below() {
+            true => (*e).length,
+            false if ctx.scanner.fed() == 0 => FIRST_READ,
+            false => FILE_READ_CHUNK,
         }
-        let data = read(e)?;
-        Ok(ctx.scanner.feed(data))
+        .min((*e).length);
+        let whole = piece == (*e).length;
+        let (m, buf) = read_head(e, piece, (*(*f).r).pool, (*(*f).c).bucket_alloc)?;
+        if !whole {
+            remove(e);
+            insert_before(first(bb), e);
+        }
+        let data = slice::from_raw_parts(buf, piece as usize);
+        Ok((ctx.scanner.feed(data), m))
     }
 }
 
@@ -296,13 +357,25 @@ unsafe fn start(f: *mut ap_filter_t, mode: u8) -> Option<*mut ScanCtx> {
 unsafe fn ablate(f: *mut ap_filter_t, mode: u8, e: *mut apr_bucket) -> apr_status_t {
     unsafe {
         let at = SPLIT_AT.min((*e).length);
+        let pool = (*(*f).r).pool;
         if mode == MODE_READ {
             if is_file(e) {
-                return read_file_piece(e, 0, at, &mut |data| {
-                    core::hint::black_box(data);
-                });
+                return pread_bucket(e, 0, at, pool).map(|buf| {
+                    core::hint::black_box(buf);
+                }).err().unwrap_or(SUCCESS);
             }
             return read(e).err().unwrap_or(SUCCESS);
+        }
+        if is_file(e) {
+            // The first KiB from memory, the rest by sendfile.
+            let m = match read_head(e, at, pool, (*(*f).c).bucket_alloc) {
+                Ok((m, _)) => m,
+                Err(rv) => return rv,
+            };
+            if mode == MODE_SPLIT_SNIPPET {
+                insert_before(next(m), snippet_bucket((*(*f).c).bucket_alloc));
+            }
+            return SUCCESS;
         }
         if at < (*e).length {
             let rv = split(e, at);
@@ -341,7 +414,7 @@ pub(crate) unsafe extern "C" fn filter<const MODE: u8>(
         // Holding: buckets move to `held` until the decision.
         let mut resume: Option<apr_size_t> = None;
         while ctx.state == State::Holding && first(bb) != sentinel(bb) {
-            let e = first(bb);
+            let mut e = first(bb);
             remove(e);
             insert_before(sentinel(ctx.held), e);
             let mut decision = Decision::Hold { from: 0 };
@@ -349,10 +422,13 @@ pub(crate) unsafe extern "C" fn filter<const MODE: u8>(
             if is_eos(e) {
                 decision = ctx.scanner.finish();
             } else if is_file(e) {
-                decision = match feed_held_file(ctx, e, bb) {
-                    Ok(decision) => decision,
+                let m;
+                (decision, m) = match feed_held_file(f, ctx, e, bb) {
+                    Ok(fed) => fed,
                     Err(rv) => return rv,
                 };
+                // The pool bucket is the one held now, fed whole.
+                e = m;
                 fed = (*e).length;
                 if matches!(decision, Decision::Hold { .. }) {
                     ctx.offset += (*e).length as u64;

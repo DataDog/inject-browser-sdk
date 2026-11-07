@@ -54,6 +54,16 @@ const FILE_READ_CHUNK: usize = 4096;
 /// The ablations' "first KiB".
 const SPLIT_AT: usize = 1024;
 
+/// The ablations' split point, `RUM_INJECT_SPLIT_AT` bytes (environment), default [`SPLIT_AT`]: to
+/// tell what a sendfile starting mid-page costs from what the memory buffer before it does. Read
+/// first by the master, see [`memory_below`].
+pub(crate) fn split_at() -> usize {
+    static AT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *AT.get_or_init(|| {
+        std::env::var("RUM_INJECT_SPLIT_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(SPLIT_AT)
+    })
+}
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum State {
     /// The headers wait, and the buffers in `held` with them.
@@ -524,7 +534,7 @@ unsafe fn ablate(
 ) -> bool {
     unsafe {
         let size = buf_size(b);
-        let n = (SPLIT_AT as u64).min(size);
+        let n = (split_at() as u64).min(size);
         let insert = match ctx.mode {
             MODE_SPLIT_SNIPPET => {
                 ctx.injected = true;

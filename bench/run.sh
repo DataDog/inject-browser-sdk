@@ -63,8 +63,12 @@ render() { # template server variant -> config file
     # `<variant>-cork`: the same, with `tcp_nopush` left on (nginx).
     case $variant in *-cork) variant=${variant%-cork}; cork="rum_inject_cork on;" ;; esac
     # `scan@<bytes>`: files up to that size are read whole and sent from memory (default 8 KiB).
-    unset RUM_INJECT_MEMORY_BELOW
-    case $variant in *@*) export RUM_INJECT_MEMORY_BELOW=${variant#*@}; variant=${variant%@*} ;; esac
+    unset RUM_INJECT_MEMORY_BELOW RUM_INJECT_SPLIT_AT
+    # `split@<bytes>`, `split_snippet@<bytes>`, `read@<bytes>`: where the ablations split (1 KiB).
+    case $variant in
+        scan@*) export RUM_INJECT_MEMORY_BELOW=${variant#*@}; variant=${variant%@*} ;;
+        *@*) export RUM_INJECT_SPLIT_AT=${variant#*@}; variant=${variant%@*} ;;
+    esac
     case $server/$variant in
         nginx/off|httpd/off|httpd/loaded) ;;
         nginx/loaded) on="rum_inject off;" ;;

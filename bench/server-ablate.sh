@@ -8,7 +8,7 @@
 #   bench/dev.sh bench/server-ablate.sh
 #
 # Env (defaults in brackets): LAYOUTS [1 2 3]   SERVERS [nginx httpd]   CONNS [64]   DURATION [5s]
-#   VARIANTS [off loaded on, scan and the ablations, plain and -cork]
+#   VARIANTS [off loaded on, scan and the ablations, plain and -cork]   TLS [0]: 1 for HTTPS
 #   PERF_PAGES [a page per size and head kind]   HEADER_SIZES [0 4]: response header KiB to add
 #   RESULTS [/src/bench/results/server-ablate]
 set -euo pipefail

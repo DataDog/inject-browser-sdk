@@ -266,8 +266,9 @@ unsafe fn feed(pool: *mut ngx_pool_t, ctx: &mut ScanCtx, b: *mut ngx_buf_t) -> O
     }
 }
 
-/// Files up to this size are read whole and sent from memory, see the module documentation.
-fn memory_below() -> i64 {
+/// Files up to this size are read whole and sent from memory, see the module documentation. Read
+/// first by the master, in `postconfiguration`: nginx strips the environment of its workers.
+pub(crate) fn memory_below() -> i64 {
     static BELOW: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *BELOW.get_or_init(|| {
         std::env::var("RUM_INJECT_MEMORY_BELOW").ok().and_then(|v| v.parse().ok()).unwrap_or(16 << 10)

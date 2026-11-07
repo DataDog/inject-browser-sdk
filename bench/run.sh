@@ -95,7 +95,22 @@ render() { # template server variant -> config file
             httpd) headers="$headers\nHeader always set X-Pad-$i \"$(printf 'v%.0s' $(seq 80))\"" ;;
         esac
     done
+    # TLS=1: HTTPS with a self-signed certificate, as most production traffic is. Neither server
+    # sends files by sendfile then (no kTLS): they read them into memory to encrypt them.
+    local listen_ssl="" ssl_conf="" ssl_load=""
+    if [ "${TLS:-0}" = 1 ]; then
+        [ -f "$WORK/run/cert.pem" ] || openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=bench \
+            -keyout "$WORK/run/key.pem" -out "$WORK/run/cert.pem" 2>/dev/null
+        chmod 644 "$WORK/run/key.pem"
+        case $server in
+            nginx) listen_ssl=ssl
+                   ssl_conf="ssl_certificate $WORK/run/cert.pem; ssl_certificate_key $WORK/run/key.pem;" ;;
+            httpd) ssl_load="LoadModule ssl_module /usr/lib/apache2/modules/mod_ssl.so\nLoadModule socache_shmcb_module /usr/lib/apache2/modules/mod_socache_shmcb.so"
+                   ssl_conf="SSLEngine on\nSSLCertificateFile $WORK/run/cert.pem\nSSLCertificateKeyFile $WORK/run/key.pem\nSSLSessionCache shmcb:$WORK/run/ssl_scache(512000)" ;;
+        esac
+    fi
     sed -e "s|@MODULE_LOAD@|$load|" -e "s|@MODULE_ON@|$on|" -e "s|@RUN@|$WORK/run|g" \
+        -e "s|@LISTEN_SSL@|$listen_ssl|" -e "s|@SSL_CONF@|$ssl_conf|" -e "s|@SSL_LOAD@|$ssl_load|" \
         -e "s|@PAGES@|$PAGES|g" -e "s|@PORT@|$PORT|g" -e "s|@UPSTREAM@|$UPSTREAM|g" \
         -e "s|@SENDFILE@|$sendfile|g" -e "s|@HEADERS@|$headers|g" -e "s|@MMAP@|${HTTPD_MMAP:-On}|g" "$template" > "$WORK/run/$server.conf"
 }
@@ -181,6 +196,7 @@ perf() {
             case $server/$variant in httpd/*-cork) continue ;; esac
             start "$server" "$variant"
             python3 "$here/harness/perf.py" --server "$server" --variant "$variant" --port "$PORT" \
+                --scheme "$([ "${TLS:-0}" = 1 ] && echo https || echo http)" \
                 --pids "$(server_pids "$server")" --pages "$pages" --conns "${CONNS// /,}" \
                 --duration "$DURATION" --wrk-cpus "$WRK_CPUS" --out "$out"
             stop "$server"

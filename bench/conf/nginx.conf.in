@@ -24,7 +24,8 @@ http {
     proxy_temp_path @RUN@/nginx-proxy;
 
     server {
-        listen 127.0.0.1:@PORT@ backlog=4096 reuseport;
+        listen 127.0.0.1:@PORT@ backlog=4096 reuseport @LISTEN_SSL@;
+        @SSL_CONF@
         root @PAGES@;
         @MODULE_ON@
         @HEADERS@

@@ -138,6 +138,7 @@ impl HttpModule for Module {
         }
         // Build the snippet in the master, before workers fork.
         let _ = bench_common::snippet();
+        let _ = scan::memory_below();
         unsafe {
             NEXT_HEADER_FILTER = ngx_http_top_header_filter;
             ngx_http_top_header_filter = Some(header_filter);

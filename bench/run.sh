@@ -18,6 +18,7 @@
 # from memory, the rest by sendfile), split_snippet (split, with the snippet in after the first
 # KiB). Each takes a `-cork` suffix that keeps tcp_nopush on, which the module turns off otherwise.
 # httpd has the same variants, as the RUM_INJECT_SCAN / _READ / _SPLIT / _SPLIT_SNIPPET filters.
+# scan@<bytes> sets the size up to which scan reads a file whole and sends it from memory.
 #
 #   RESP_HEADERS_KB [0]: response headers of about that many KiB added to every response
 #   SERVERS [nginx httpd]   VARIANTS [off on on-mem]   CONNS [16 64 256]   DURATION [10s]   SEEDS [4]
@@ -61,6 +62,9 @@ render() { # template server variant -> config file
     local template=$1 server=$2 variant=$3 load="" on="" sendfile=$SENDFILE cork=""
     # `<variant>-cork`: the same, with `tcp_nopush` left on (nginx).
     case $variant in *-cork) variant=${variant%-cork}; cork="rum_inject_cork on;" ;; esac
+    # `scan@<bytes>`: files up to that size are read whole and sent from memory (default 16 KiB).
+    unset RUM_INJECT_MEMORY_BELOW
+    case $variant in *@*) export RUM_INJECT_MEMORY_BELOW=${variant#*@}; variant=${variant%@*} ;; esac
     case $server/$variant in
         nginx/off|httpd/off|httpd/loaded) ;;
         nginx/loaded) on="rum_inject off;" ;;

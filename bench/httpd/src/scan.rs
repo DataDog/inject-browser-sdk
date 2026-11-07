@@ -5,10 +5,12 @@
 //! * the first brigade is kept, and the ones after it until the decision: the headers go out with
 //!   the first brigade passed, so they wait too, and announce the exact `Content-Length`, the
 //!   snippet length more only if it goes in;
-//! * the held buckets are httpd's own. A file bucket stays one: copies of it are read, a piece at a
-//!   time, only until the decision (usually the first 1 KiB), and it is split at the offset, so the
-//!   file goes out by sendfile on both sides of the snippet, an immortal bucket. Buckets held across
-//!   calls are set aside, which copies transient ones (at most 10 KiB);
+//! * the held buckets are httpd's own, but for files: a file bucket no larger than
+//!   `RUM_INJECT_MEMORY_BELOW` bytes (environment, default 16 KiB) is read whole, and goes out from
+//!   memory around the snippet, an immortal bucket. A larger one is split into the pieces the
+//!   decision needs (usually the first 1 KiB), which are read and go out from memory, and the rest,
+//!   which stays a file bucket, sent by sendfile. Buckets held across calls are set aside, which
+//!   copies transient ones (at most 10 KiB);
 //! * early commit: a decision that stays open past the head window (the `<head>` past it) passes
 //!   what is held with the snippet length announced, and pads the end with spaces if the snippet
 //!   never goes in. A FLUSH bucket does not commit: mod_proxy's `flushpackets` sends one after
@@ -120,6 +122,36 @@ unsafe fn read_file_piece(
         };
         destroy(copy);
         rv
+    }
+}
+
+/// Files up to this size are read whole and sent from memory, see the module documentation.
+fn memory_below() -> apr_size_t {
+    static BELOW: std::sync::OnceLock<apr_size_t> = std::sync::OnceLock::new();
+    *BELOW.get_or_init(|| {
+        std::env::var("RUM_INJECT_MEMORY_BELOW").ok().and_then(|v| v.parse().ok()).unwrap_or(16 << 10)
+    })
+}
+
+/// While holding: feeds the scanner held file bucket `e`, read into memory, whole if it is small,
+/// otherwise only its first piece, split off: the rest goes back to the head of `bb`, the next
+/// bucket the holding loop takes.
+unsafe fn feed_held_file(ctx: &mut ScanCtx, e: *mut apr_bucket, bb: *mut apr_bucket_brigade) -> Result<Decision, apr_status_t> {
+    unsafe {
+        if (*e).length > memory_below() {
+            let piece = if ctx.scanner.fed() == 0 { FIRST_READ } else { FILE_READ_CHUNK };
+            if (*e).length > piece {
+                let rv = split(e, piece);
+                if rv != SUCCESS {
+                    return Err(rv);
+                }
+                let rest = next(e);
+                remove(rest);
+                insert_before(first(bb), rest);
+            }
+        }
+        let data = read(e)?;
+        Ok(ctx.scanner.feed(data))
     }
 }
 
@@ -316,6 +348,15 @@ pub(crate) unsafe extern "C" fn filter<const MODE: u8>(
             let mut fed = 0;
             if is_eos(e) {
                 decision = ctx.scanner.finish();
+            } else if is_file(e) {
+                decision = match feed_held_file(ctx, e, bb) {
+                    Ok(decision) => decision,
+                    Err(rv) => return rv,
+                };
+                fed = (*e).length;
+                if matches!(decision, Decision::Hold { .. }) {
+                    ctx.offset += (*e).length as u64;
+                }
             } else if !is_metadata(e) {
                 decision = match feed(ctx, e, &mut fed) {
                     Ok(decision) => decision,

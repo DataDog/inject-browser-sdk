@@ -4,10 +4,14 @@
 //! `scan`: the library is asked for a decision, a body offset, rather than for the bytes:
 //! * the header filter does not call the next one: the headers wait for the decision, and then
 //!   announce the exact `Content-Length`, the snippet length more only if it goes in;
-//! * the held bytes are nginx's own buffers. A file buffer stays a file range: it is read, a piece
-//!   at a time into a scratch buffer, only until the decision (usually the first 1 KiB), and goes
-//!   out by sendfile on both sides of the snippet. A memory buffer from an upstream is copied only
-//!   if a call ends undecided, so that the upstream gets its buffer back (at most 10 KiB);
+//! * the held bytes are nginx's own buffers, but for files: a file no larger than
+//!   `RUM_INJECT_MEMORY_BELOW` bytes (environment, default 16 KiB) is read whole, in one read, and
+//!   goes out from memory around the snippet, in one write. A larger one is read only until the
+//!   decision (usually the first 1 KiB), and what was read goes out from memory, the snippet after
+//!   it, the rest of the file by sendfile. Sending both sides of the snippet by sendfile costs a
+//!   syscall and a packet more than that, which is what made the first version of this variant
+//!   dearer than the injector. A memory buffer from an upstream is copied only if a call ends
+//!   undecided, so that the upstream gets its buffer back (at most 10 KiB);
 //! * the snippet is a buffer pointing at the static snippet, linked in where the buffer holding the
 //!   offset is split;
 //! * early commit: a decision that stays open past the head window (`Searching`, the `<head>` past
@@ -77,8 +81,13 @@ pub(crate) struct ScanCtx {
     offset: u64,
     /// How much of the last held buffer the scanner was fed, when it is a file buffer.
     file_fed: i64,
-    /// Where file pieces are read into for the scanner, reused.
+    /// Where file pieces are read into for the scanner past the commit, reused.
     scratch: *mut ngx_buf_t,
+    /// While holding: what was read of the file buffer `read_for`, from its `file_pos` on, to go out
+    /// from memory. `read_whole` when that is all of it.
+    read: *mut ngx_buf_t,
+    read_for: *mut ngx_buf_t,
+    read_whole: bool,
     free: *mut ngx_chain_t,
     busy: *mut ngx_chain_t,
 }
@@ -199,6 +208,9 @@ pub(crate) unsafe fn create(r: *mut ngx_http_request_t, mode: ngx_uint_t, length
             offset: 0,
             file_fed: 0,
             scratch: ptr::null_mut(),
+            read: ptr::null_mut(),
+            read_for: ptr::null_mut(),
+            read_whole: false,
             free: ptr::null_mut(),
             busy: ptr::null_mut(),
         });
@@ -228,6 +240,9 @@ unsafe fn feed(pool: *mut ngx_pool_t, ctx: &mut ScanCtx, b: *mut ngx_buf_t) -> O
         if (*b).in_file() == 0 {
             return Some(ctx.scanner.decision());
         }
+        if ctx.state == State::Holding {
+            return feed_held_file(pool, ctx, b);
+        }
         if ctx.scratch.is_null() {
             ctx.scratch = ngx_create_temp_buf(pool, FILE_READ_CHUNK);
             if ctx.scratch.is_null() {
@@ -248,6 +263,88 @@ unsafe fn feed(pool: *mut ngx_pool_t, ctx: &mut ScanCtx, b: *mut ngx_buf_t) -> O
             decision = ctx.scanner.feed(slice::from_raw_parts((*ctx.scratch).start, size));
         }
         Some(decision)
+    }
+}
+
+/// Files up to this size are read whole and sent from memory, see the module documentation.
+fn memory_below() -> i64 {
+    static BELOW: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *BELOW.get_or_init(|| {
+        std::env::var("RUM_INJECT_MEMORY_BELOW").ok().and_then(|v| v.parse().ok()).unwrap_or(16 << 10)
+    })
+}
+
+/// The most the scanner can ask for before it decides: the walk's limit.
+const WALK_LIMIT: usize = 10 << 10;
+
+/// Feeds the scanner file buffer `b` while holding, keeping what it reads in `ctx.read` to send it
+/// from memory: the whole file when it is small, see [`memory_below`], otherwise only what the
+/// decision needs.
+unsafe fn feed_held_file(pool: *mut ngx_pool_t, ctx: &mut ScanCtx, b: *mut ngx_buf_t) -> Option<Decision> {
+    unsafe {
+        let size = ((*b).file_last - (*b).file_pos) as usize;
+        if ctx.read_for != b {
+            ctx.read_whole = size as i64 <= memory_below();
+            let capacity = if ctx.read_whole { size } else { size.min(WALK_LIMIT) };
+            ctx.read = ngx_create_temp_buf(pool, capacity.max(1));
+            if ctx.read.is_null() {
+                return None;
+            }
+            ctx.read_for = b;
+        }
+        let m = ctx.read;
+        let mut decision = ctx.scanner.decision();
+        while matches!(decision, Decision::Hold { .. }) && (ctx.file_fed as usize) < size {
+            let room = (*m).end.offset_from((*m).last) as usize;
+            let left = size - ctx.file_fed as usize;
+            let piece = match ctx.read_whole {
+                true => left,
+                false if ctx.scanner.fed() == 0 => FIRST_READ,
+                false => FILE_READ_CHUNK,
+            }
+            .min(left)
+            .min(room);
+            if piece == 0 {
+                break;
+            }
+            let at = (*b).file_pos + ctx.file_fed;
+            if ngx_read_file((*b).file, (*m).last, piece, at) != piece as isize {
+                return None;
+            }
+            decision = ctx.scanner.feed(slice::from_raw_parts((*m).last, piece));
+            (*m).last = (*m).last.add(piece);
+            ctx.file_fed += piece as i64;
+        }
+        Some(decision)
+    }
+}
+
+/// Links held file buffer `b`, which `ctx.read` holds the start of in memory, with the snippet in
+/// `at` bytes into it: from memory up to where it was read, the rest by sendfile.
+unsafe fn link_read_file(
+    pool: *mut ngx_pool_t,
+    ctx: &mut ScanCtx,
+    ll: &mut *mut *mut ngx_chain_t,
+    b: *mut ngx_buf_t,
+    at: u64,
+) -> bool {
+    unsafe {
+        let m = ctx.read;
+        let read = (*m).last.offset_from((*m).pos) as i64;
+        (*m).tag = tag();
+        let snippet = snippet_buf(pool);
+        if snippet.is_null() || !link_split(pool, ll, m, at, snippet) {
+            return false;
+        }
+        (*b).file_pos += read;
+        if buf_size(b) == 0 {
+            // Read whole: the memory takes over the end of the response from it.
+            if (*b).last_buf() != 0 {
+                return special(pool, ll, true);
+            }
+            return true;
+        }
+        link(pool, ll, b)
     }
 }
 
@@ -317,9 +414,15 @@ unsafe fn commit(
             match decision {
                 Decision::InjectAt(point) if !ctx.injected && point <= start + size => {
                     ctx.injected = true;
-                    let snippet = snippet_buf(pool);
-                    if snippet.is_null() || !link_split(pool, ll, b, point - start, snippet) {
-                        return NGX_ERROR;
+                    if b == ctx.read_for {
+                        if !link_read_file(pool, ctx, ll, b, point - start) {
+                            return NGX_ERROR;
+                        }
+                    } else {
+                        let snippet = snippet_buf(pool);
+                        if snippet.is_null() || !link_split(pool, ll, b, point - start, snippet) {
+                            return NGX_ERROR;
+                        }
                     }
                 }
                 _ => {

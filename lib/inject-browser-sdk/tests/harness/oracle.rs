@@ -406,8 +406,9 @@ pub enum Exception {
     /// head open when it holds none of those.
     EndTagClosingHead,
     /// [`InjectionStrategy::HeadCloseTag`] injects before a `</head>` tag closing a head whose start
-    /// tag the document omits, which HTML allows: lol_html, without a tree builder, sees no head to
-    /// close before it.
+    /// tag the document omits, which HTML allows, or stops at it when no HTML evidence precedes it:
+    /// lol_html, without a tree builder, sees no head to close before it, and pairs a later
+    /// `</head>` with a later `<head>` the browser ignores.
     HeadStartOmitted,
     /// The injector stops at a `<![CDATA[`, whose end it cannot tell without tracking foreign
     /// content: before the `<head>` tag it then never injects, within the head its point is earlier.
@@ -508,11 +509,21 @@ fn head_close_exception(
         {
             return Some(Exception::StrayEndTag);
         }
-        (Some(ours), None)
+        (Some(ours), _)
             if observed
                 .heads
                 .first()
                 .is_none_or(|head| return head.start > ours) =>
+        {
+            return Some(Exception::HeadStartOmitted);
+        }
+        // A `</head>` before the head lol_html sees: it closed a head whose start tag the document
+        // omits, for the browser and the injector alike, and no later one counts.
+        (None, Some(_))
+            if observed
+                .heads
+                .first()
+                .is_some_and(|head| return contains(&lower[..head.start], b"</head")) =>
         {
             return Some(Exception::HeadStartOmitted);
         }

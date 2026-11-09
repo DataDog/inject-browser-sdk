@@ -87,6 +87,7 @@ class MockServer : public IHttpServer {
 class MockHttpContext : public IHttpContext {
   VOID* m_allocatedMemory;
   DWORD m_allocatedSize = 0;
+  bool m_failAllocations = false;
 
  public:
   // Bytes of guard pattern placed just past every allocation, so a write that runs off the end of
@@ -101,6 +102,12 @@ class MockHttpContext : public IHttpContext {
   };
 
   // Whether the guard region past the last allocation is untouched.
+  // Size of the last request memory allocation, without the guard.
+  size_t AllocatedSize() const { return m_allocatedSize; }
+
+  // Make every later AllocateRequestMemory call fail, as IIS does when out of request memory.
+  void FailAllocations() { m_failAllocations = true; }
+
   bool AllocationGuardIntact() const {
     if (m_allocatedMemory == nullptr) return true;
     const auto* guard = static_cast<const unsigned char*>(m_allocatedMemory) + m_allocatedSize;
@@ -199,6 +206,9 @@ class MockHttpContext : public IHttpContext {
   // To make memory management a little easier, we'll implement this function
   // instead of mocking it
   VOID* AllocateRequestMemory(DWORD size) override {
+    if (m_failAllocations) {
+      return nullptr;
+    }
     if (m_allocatedMemory != nullptr) {
       free(m_allocatedMemory);
     };

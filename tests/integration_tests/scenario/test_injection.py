@@ -5,6 +5,7 @@
 # Copyright 2024-Present Datadog, Inc.
 
 import os
+import socket
 import pytest
 import requests
 import gzip
@@ -32,7 +33,73 @@ def __assert_rum_injection(headers, body):
     assert "datadog-rum.js" in body.decode()
 
 
-@pytest.mark.xfail(os.environ.get("WEBSERVER-FLAVOR", "") == "iis", reason="IIS serves static file directly")
+IIS = os.environ.get("WEBSERVER-FLAVOR", "") == "iis"
+
+
+def __fetch(path, timeout=60):
+    """
+    GET `path` over a raw socket, the connection closed after the response,
+    and return its status, headers (names lowercased) and body as framed on
+    the wire. Unlike requests, which stops reading at Content-Length, this
+    sees every byte the server sends: the framing has to account for all of
+    them, so a length too short or too long fails here rather than quietly
+    truncating the body.
+    """
+    with socket.create_connection(("localhost", 8080), timeout=timeout) as sock:
+        sock.sendall(
+            f"GET {path} HTTP/1.1\r\nHost: localhost:8080\r\nConnection: close\r\n\r\n".encode()
+        )
+        raw = bytearray()
+        while data := sock.recv(65536):
+            raw += data
+    head, separator, rest = bytes(raw).partition(b"\r\n\r\n")
+    assert separator, "no end of headers"
+    lines = head.decode("latin-1").split("\r\n")
+    status = int(lines[0].split()[1])
+    headers = {}
+    for line in lines[1:]:
+        name, _, value = line.partition(":")
+        headers[name.strip().lower()] = value.strip()
+
+    if headers.get("transfer-encoding", "").lower() == "chunked":
+        body = bytearray()
+        while True:
+            size_line, _, rest = rest.partition(b"\r\n")
+            size = int(size_line.split(b";")[0], 16)
+            if size == 0:
+                break
+            body += rest[:size]
+            assert rest[size : size + 2] == b"\r\n", "chunk longer than its size"
+            rest = rest[size + 2 :]
+        assert rest == b"\r\n", "bytes past the last chunk"
+        return status, headers, bytes(body)
+    assert int(headers["content-length"]) == len(rest), "Content-Length is not the bytes sent"
+    return status, headers, rest
+
+
+def __assert_injected_once(page, body, at=None):
+    """
+    Verify `body` is `page` whole with exactly one insertion, the RUM
+    snippet, at index `at` of the page if given. The snippet's own bytes may
+    match the page around it, so `at` only has to lie where an insertion
+    gives the same body.
+    """
+    added = len(body) - len(page)
+    assert added > 0, "nothing injected"
+    prefix = 0
+    while prefix < len(page) and body[prefix] == page[prefix]:
+        prefix += 1
+    suffix = 0
+    while suffix < len(page) and body[-1 - suffix] == page[-1 - suffix]:
+        suffix += 1
+    earliest = len(page) - suffix
+    assert earliest <= prefix, "not the page with a single insertion"
+    assert b"datadog-rum" in body[earliest : earliest + added]
+    if at is not None:
+        assert earliest <= at <= prefix, f"injected at {earliest}..{prefix}, expected {at}"
+
+
+@pytest.mark.xfail(IIS, reason="IIS serves static file directly")
 @pytest.mark.parametrize("path", ["/index.html", "/large.html"])
 def test_injection_static_html_file(path):
     """
@@ -64,14 +131,17 @@ def test_proxy_injection(upstream_server):
 
     upstream_server.add_route("/proxy", upstream_handler)
 
-    r = requests.get("http://localhost:8080/proxy")
+    status, headers, body = __fetch("/proxy")
 
-    assert r.status_code == 200
+    assert status == 200
     assert (
         upstream_server.get_last_request().headers["x-datadog-rum-injection-pending"]
         == "1"
     )
-    __assert_rum_injection(r.headers, r.content)
+    assert headers["x-datadog-rum-injected"] == "1"
+    page = SIMPLE_HTML.encode()
+    # Other servers bundle a library release whose placement may differ.
+    __assert_injected_once(page, body, at=page.index(b"</head>") if IIS else None)
 
 
 LARGE_HTML = (
@@ -104,24 +174,15 @@ def test_large_proxied_response_is_served_whole(upstream_server, chunked):
     path = "/large-chunked" if chunked else "/large"
     upstream_server.add_route(path, upstream_handler)
 
-    r = requests.get("http://localhost:8080" + path, timeout=60)
+    status, headers, body = __fetch(path)
 
-    assert r.status_code == 200
-    assert r.headers["x-datadog-rum-injected"] == "1"
-    body = r.content
+    assert status == 200
+    assert headers["x-datadog-rum-injected"] == "1"
     # The announced length grows by the snippet, and a chunked response stays chunked.
-    if chunked:
-        assert "content-length" not in r.headers
-    else:
-        assert int(r.headers["content-length"]) == len(body)
-    # Wherever the snippet went, the rest of the page is there, once and in order.
-    prefix = 0
-    while prefix < len(LARGE_HTML) and body[prefix] == LARGE_HTML[prefix]:
-        prefix += 1
-    suffix = len(LARGE_HTML) - prefix
-    assert len(body) > len(LARGE_HTML)
-    assert body[len(body) - suffix :] == LARGE_HTML[prefix:]
-    assert b"datadog-rum" in body[prefix : len(body) - suffix]
+    assert ("content-length" in headers) != chunked
+    __assert_injected_once(
+        LARGE_HTML, body, at=LARGE_HTML.index(b"</head>") if IIS else None
+    )
 
 
 # Past the 256 KiB ARR hands IIS in its first part.
@@ -159,15 +220,12 @@ def test_head_close_tag_past_the_first_part_is_served_untouched(upstream_server,
     path = "/late-head-close-chunked" if chunked else "/late-head-close"
     upstream_server.add_route(path, upstream_handler)
 
-    r = requests.get("http://localhost:8080" + path, timeout=60)
+    status, headers, body = __fetch(path)
 
-    assert r.status_code == 200
-    assert "x-datadog-rum-injected" not in r.headers
-    assert r.content == LATE_HEAD_CLOSE_HTML
-    if chunked:
-        assert "content-length" not in r.headers
-    else:
-        assert int(r.headers["content-length"]) == len(LATE_HEAD_CLOSE_HTML)
+    assert status == 200
+    assert "x-datadog-rum-injected" not in headers
+    assert body == LATE_HEAD_CLOSE_HTML
+    assert ("content-length" in headers) != chunked
 
 
 def test_injection_only_for_html_content(upstream_server):

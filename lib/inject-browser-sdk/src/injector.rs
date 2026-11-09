@@ -125,6 +125,17 @@ impl<'snippet> Injector<'snippet> {
         return Self::with_strategy(snippet, InjectionStrategy::default());
     }
 
+    /// How many bytes of the input written so far are held back: not returned in any result yet.
+    ///
+    /// They are always the end of that input, and come back out, in order, in later results, in
+    /// slices that are not flagged `from_incoming_chunk`. A server that queues the incoming chunks
+    /// can therefore leave them untouched until a result injects, then drop this many bytes (read
+    /// before the call) from the end of the chunks already queued and serve the result in their
+    /// place: see the `chunk_rebuild` tests.
+    pub fn held_back(&self) -> usize {
+        return self.incomplete_data.len();
+    }
+
     /// Creates an injector using the given [`InjectionStrategy`].
     pub fn with_strategy(snippet: &'snippet [u8], strategy: InjectionStrategy) -> Self {
         return Self {
@@ -144,6 +155,30 @@ impl<'snippet> Injector<'snippet> {
             incomplete_data_public_ref: Vec::new(),
             padding_spaces: Vec::new(),
         };
+    }
+
+    /// The length a response that announced `content_length`, the value of its `Content-Length`
+    /// header, has to announce once the snippet is in it, or `None` if that value is not a valid
+    /// length. The snippet is all the injection adds, and the padding [`Injector::end`] emits instead
+    /// is as long, so the announced length grows by exactly the snippet length either way.
+    ///
+    /// A list of identical lengths, as a proxy may produce by merging headers, is valid per RFC 9110
+    /// (<https://www.rfc-editor.org/rfc/rfc9110#section-8.6>); anything else is not, and a server
+    /// should remove the header rather than announce a wrong length.
+    pub fn content_length_with_snippet(&self, content_length: &[u8]) -> Option<u64> {
+        let mut announced: Option<u64> = None;
+        for value in content_length.split(|&byte| return byte == b',') {
+            let value = value.trim_ascii();
+            if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            let length = core::str::from_utf8(value).ok()?.parse::<u64>().ok()?;
+            if announced.is_some_and(|announced| return announced != length) {
+                return None;
+            }
+            announced = Some(length);
+        }
+        return announced?.checked_add(u64::try_from(self.snippet.len()).ok()?);
     }
 
     pub fn write<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
@@ -1061,6 +1096,161 @@ mod tests {
         }
     }
 
+    #[test]
+    fn content_length_with_snippet() {
+        let injector = Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadCloseTag);
+        assert_eq!(injector.content_length_with_snippet(b"100"), Some(111));
+        assert_eq!(injector.content_length_with_snippet(b" 0\t"), Some(11));
+        assert_eq!(
+            injector.content_length_with_snippet(b"100, 100,100"),
+            Some(111)
+        );
+        for invalid in [
+            b"".as_slice(),
+            b" ",
+            b"12x",
+            b"-1",
+            b"+1",
+            b"1 2",
+            b"100, 101",
+            b"100,",
+            b"18446744073709551615",
+            b"99999999999999999999",
+        ] {
+            assert_eq!(
+                injector.content_length_with_snippet(invalid),
+                None,
+                "{:?}",
+                core::str::from_utf8(invalid)
+            );
+        }
+    }
+
+    /// Replays how a server that queues the incoming chunks rebuilds them around the injection, as
+    /// the IIS module does: the queued chunks stay as they are until a result injects; then the
+    /// bytes held back from them ([`Injector::held_back`] before that call) are dropped from their
+    /// end, the result's slices take the place of the chunk just written, and the later chunks are
+    /// served unchanged. Whatever the chunking, that must serve what a single write would.
+    mod chunk_rebuild {
+        use super::*;
+        use alloc::vec::Vec;
+        use pretty_assertions::assert_eq;
+
+        const STRATEGIES: [InjectionStrategy; 3] = [
+            InjectionStrategy::HeadCloseTag,
+            InjectionStrategy::HeadOpenTag,
+            InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+        ];
+
+        fn rebuild(strategy: InjectionStrategy, chunks: &[&[u8]]) -> Vec<u8> {
+            let mut injector = Injector::with_strategy(b"{{SNIPPET}}", strategy);
+            for (index, chunk) in chunks.iter().enumerate() {
+                let held = injector.held_back();
+                let result = injector.write(chunk);
+                if result.injected {
+                    let mut served: Vec<u8> = chunks[..index].concat();
+                    served.truncate(served.len() - held);
+                    for slice in result.iter() {
+                        served.extend_from_slice(slice.bytes);
+                    }
+                    for later in &chunks[index + 1..] {
+                        served.extend_from_slice(later);
+                    }
+                    return served;
+                }
+            }
+            let held = injector.held_back();
+            let result = injector.end_without_padding();
+            let mut served: Vec<u8> = chunks.concat();
+            if result.injected {
+                served.truncate(served.len() - held);
+                for slice in result.iter() {
+                    served.extend_from_slice(slice.bytes);
+                }
+            }
+            return served;
+        }
+
+        fn check(document: &[u8], split_points: &[usize]) {
+            let mut chunks = Vec::new();
+            let mut start = 0;
+            for &point in split_points {
+                chunks.push(&document[start..point]);
+                start = point;
+            }
+            chunks.push(&document[start..]);
+            for strategy in STRATEGIES {
+                assert_eq!(
+                    String::from_utf8(rebuild(strategy, &chunks)).unwrap(),
+                    String::from_utf8(rebuild(strategy, &[document])).unwrap(),
+                    "{:?} split at {:?}",
+                    strategy,
+                    split_points
+                );
+            }
+        }
+
+        fn documents() -> Vec<Vec<u8>> {
+            let mut long_head =
+                String::from("<!DOCTYPE html><html><head><meta charset='utf-8'><title>");
+            long_head.push_str(&"x".repeat(1500));
+            long_head.push_str("</title></head><body>hi</body></html>");
+            let mut head_past_window = String::from("<!-- ");
+            head_past_window.push_str(&"c".repeat(1100));
+            head_past_window
+                .push_str(" --><html><head><title>t</title></head><body>hi</body></html>");
+            return [
+                long_head.as_str(),
+                head_past_window.as_str(),
+                "<!DOCTYPE html><html><head><meta charset='utf-8'><title>t</title></head><body>hi</body></html>",
+                "<html><head><title>t</title></head><body>hi</body><p>more</p></html>",
+                "<body><pre>hello</pre></body>",
+                "<html><body>hi</body></he",
+            ]
+            .iter()
+            .map(|document| return document.as_bytes().to_vec())
+            .collect();
+        }
+
+        #[test]
+        fn two_chunks_at_every_point() {
+            for document in documents() {
+                for point in 0..=document.len() {
+                    check(&document, &[point]);
+                }
+            }
+        }
+
+        #[test]
+        fn three_chunks() {
+            for document in documents() {
+                let stride = (document.len() / 40).max(1);
+                for first in (0..=document.len()).step_by(stride) {
+                    for second in (first..=document.len()).step_by(stride) {
+                        check(&document, &[first, second]);
+                    }
+                }
+            }
+        }
+
+        // Every split within and around the window end and the `</head>` that follows it, where
+        // the head-open fallback hands over to the `</head>` scan.
+        #[test]
+        fn around_the_window_end_and_head_close_tag() {
+            for document in documents() {
+                let Some(tag) = document.windows(7).position(|w| return w == b"</head>") else {
+                    continue;
+                };
+                let window_end = DOCUMENT_CHARSET_SCAN_LIMIT.min(document.len());
+                for first in window_end.saturating_sub(8)..=(window_end + 8).min(document.len()) {
+                    for second in tag.saturating_sub(2).max(first)..=(tag + 8).min(document.len()) {
+                        check(&document, &[first, second]);
+                    }
+                }
+            }
+        }
+    }
+
     fn test_injector_with_strategy<T: AsRef<[u8]> + core::fmt::Debug>(
         strategy: InjectionStrategy,
         input_chunks: impl IntoIterator<Item = T>,
@@ -1122,6 +1312,9 @@ mod tests {
             .map(|chunk| return Some(chunk.as_ref()))
             .chain([None])
         {
+            let held_before = injector.held_back();
+            let was_injected = injected;
+            let mut emitted = 0;
             let result = match incoming_chunk {
                 Some(chunk) => injector.write(chunk),
                 None if padded => injector.end(),
@@ -1155,8 +1348,28 @@ mod tests {
                         .any(|w| return w == snippet);
                 }
                 output_slices.extend_from_slice(slice.bytes);
+                emitted += slice.bytes.len();
             }
             assert_eq!(result.injected, injected);
+
+            // Every input byte comes out exactly once: what was held back plus this chunk is what
+            // was emitted, minus the snippet (or the padding standing in for it), plus what is
+            // still held back.
+            let added = match (incoming_chunk, injected && !was_injected) {
+                (_, true) => snippet.len(),
+                (None, false) if padded && !injected => snippet.len(),
+                _ => 0,
+            };
+            let held_after = injector.held_back();
+            assert_eq!(
+                held_before + incoming_chunk.map_or(0, <[u8]>::len) + added,
+                emitted + held_after,
+                "held-back accounting with chunks {:?}",
+                input_chunks
+            );
+            if incoming_chunk.is_none() {
+                assert_eq!(held_after, 0, "data still held back after the end");
+            }
         }
 
         assert_eq!(

@@ -190,6 +190,65 @@ pub unsafe extern "C" fn injector_write(
     );
 }
 
+/// How many bytes of the document written so far the [`Injector`] holds back, not returned in
+/// any [`InjectorResult`] yet.
+///
+/// They are always the end of what was written, and come back out in later results, in slices
+/// whose `from_incoming_chunk` is false. A server that queues the chunks it writes can leave them
+/// as they are until a result injects, then drop this many bytes (read before that call) from the
+/// end of the chunks already queued, and serve the result's slices in place of the chunk just
+/// written. Passing `NULL` returns 0.
+#[no_mangle]
+pub unsafe extern "C" fn injector_held_back_length(injector: *const Injector) -> u32 {
+    if injector.is_null() {
+        return 0;
+    }
+    return (*injector).inner.held_back() as u32;
+}
+
+/// Computes the `Content-Length` a response has to announce once the snippet is in it, given the
+/// `length` bytes at `value`, the `Content-Length` it announced (not NUL-terminated). The snippet is
+/// all the injection adds, and the padding [`injector_end`] emits instead is as long, so the length
+/// grows by exactly the snippet length either way.
+///
+/// Returns false, leaving `*extended` untouched, when `value` is not a valid length (a list of
+/// identical lengths is): the server should then remove the header rather than announce a wrong
+/// length. Passing `NULL` for `injector` or `extended` returns false.
+///
+/// # Example
+///
+/// ```c
+/// uint64_t extended;
+/// if (injector_extend_content_length(injector, value, value_length, &extended)) {
+///   // announce `extended`
+/// } else {
+///   // remove Content-Length
+/// }
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn injector_extend_content_length(
+    injector: *const Injector,
+    value: *const u8,
+    length: u32,
+    extended: *mut u64,
+) -> bool {
+    if injector.is_null() || extended.is_null() {
+        return false;
+    }
+    let value: &[u8] = if value.is_null() || length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(value, length as usize)
+    };
+    return match (*injector).inner.content_length_with_snippet(value) {
+        Some(length) => {
+            *extended = length;
+            true
+        }
+        None => false,
+    };
+}
+
 /// Notify the [`Injector`] that the full HTML document has been written.
 ///
 /// If the injection did not happen yet, a slice of the same size as the snippet containing only
@@ -546,6 +605,90 @@ mod tests {
                 b"{\"majorVersion\":5,\"rum\":{\"applicationId\":\"a\",\"clientToken\":\"t\"}}\0",
             ))
         };
+    }
+
+    #[test]
+    fn injector_extend_content_length_adds_the_snippet() {
+        let snippet = test_snippet();
+        let injector = unsafe { injector_create(snippet) };
+        let mut extended = 0u64;
+        let value = b"1000";
+        assert!(unsafe {
+            injector_extend_content_length(
+                injector,
+                value.as_ptr(),
+                value.len() as u32,
+                &mut extended,
+            )
+        });
+        assert_eq!(extended, 1000 + snippet_len() as u64);
+
+        let mut untouched = 7u64;
+        let value = b"12x";
+        assert!(!unsafe {
+            injector_extend_content_length(
+                injector,
+                value.as_ptr(),
+                value.len() as u32,
+                &mut untouched,
+            )
+        });
+        assert_eq!(untouched, 7);
+        assert!(!unsafe { injector_extend_content_length(injector, null(), 0, &mut untouched) });
+        assert!(!unsafe {
+            injector_extend_content_length(null(), value.as_ptr(), 3, &mut untouched)
+        });
+        assert!(!unsafe {
+            injector_extend_content_length(injector, value.as_ptr(), 3, core::ptr::null_mut())
+        });
+
+        unsafe { injector_cleanup(injector) };
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn injector_held_back_length_null_injector_returns_zero() {
+        assert_eq!(unsafe { injector_held_back_length(null()) }, 0);
+    }
+
+    /// The head window is held back until it fills, then comes back out in slices that are not
+    /// flagged as coming from the chunk just written, ahead of the snippet.
+    #[test]
+    fn injector_held_back_length_reports_the_head_window() {
+        let snippet = test_snippet();
+        let injector = unsafe {
+            injector_create_with_strategy(
+                snippet,
+                InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+            )
+        };
+        assert!(!injector.is_null());
+
+        let head = b"<html><head>";
+        let result = unsafe { injector_write(injector, head.as_ptr(), head.len() as u32) };
+        assert_eq!(result.slices_length, 0);
+        assert_eq!(
+            unsafe { injector_held_back_length(injector) },
+            head.len() as u32
+        );
+
+        let rest = [b'x'; 2048];
+        let result = unsafe { injector_write(injector, rest.as_ptr(), rest.len() as u32) };
+        assert!(result.injected);
+        let slices =
+            unsafe { core::slice::from_raw_parts(result.slices, result.slices_length as usize) };
+        assert!(
+            !slices[0].from_incoming_chunk,
+            "the held-back window is not part of this chunk"
+        );
+        assert_eq!(
+            unsafe { core::slice::from_raw_parts(slices[0].start, slices[0].length as usize) },
+            head
+        );
+        assert_eq!(unsafe { injector_held_back_length(injector) }, 0);
+
+        unsafe { injector_cleanup(injector) };
+        unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]

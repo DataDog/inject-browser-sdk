@@ -101,7 +101,16 @@ function Initialize-Site {
     Remove-Item -Recurse -Force $SiteRoot -ErrorAction SilentlyContinue
     & $Python (Join-Path $harness 'gen_pages.py') $pages
     if ($LASTEXITCODE) { throw 'gen_pages.py failed' }
-    Copy-Item (Join-Path $bench '..\lib\inject-browser-sdk\tests\data\regression\*.html') (Join-Path $pages 'corpus')
+    # The library's fixtures and regressions join the corpus, written out by its corpus tests.
+    if (Get-Command cargo -ErrorAction SilentlyContinue) {
+        $env:FUZZ_SEEDS_DIR = (Resolve-Path (Join-Path $pages 'corpus')).Path
+        Push-Location (Join-Path $bench '..')
+        try { cargo test -q -p inject-browser-sdk --test injection write_fuzz_seeds | Out-Null }
+        finally { Pop-Location; Remove-Item Env:FUZZ_SEEDS_DIR }
+        if ($LASTEXITCODE) { throw 'writing the library fixtures and regressions failed' }
+    } else {
+        Write-Warning 'cargo not found: the corpus goes without the library fixtures and regressions'
+    }
     Set-Content -Path (Join-Path $pages 'calibrate.html') -Value '<html><head></head><body></body></html>' -NoNewline -Encoding ascii
 
     # ARR: enable the proxy, stream responses (no buffering), keep the upstream's framing.

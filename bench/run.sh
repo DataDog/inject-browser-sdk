@@ -42,8 +42,9 @@ EXPECTED=$WORK/expected
 prepare() {
     rm -rf "$PAGES" "$EXPECTED"
     python3 "$here/harness/gen_pages.py" "$PAGES"
-    # The library's own regression documents join the corpus.
-    cp "$here"/../lib/inject-browser-sdk/tests/data/regression/*.html "$PAGES/corpus/" 2>/dev/null || true
+    # The library's fixtures and regressions join the corpus, written out by its corpus tests when
+    # the image was built (`write_fuzz_seeds`).
+    cp "$MODULES_DIR"/seeds/*.html "$PAGES/corpus/" 2>/dev/null || true
     chmod -R a+rX "$PAGES"
     "$MODULES_DIR/oracle" "$EXPECTED" "$PAGES"/perf/*.html "$PAGES"/corpus/*.html
     echo "pages: $(ls "$PAGES/perf" | wc -l) perf, $(ls "$PAGES/corpus" | wc -l) corpus; snippet $(wc -c < "$EXPECTED/snippet") B"

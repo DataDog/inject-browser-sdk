@@ -10,6 +10,7 @@
 use memchr::{memchr, memchr2};
 
 use super::encoding::{has_encoding_attributes, meta_kind, MetaKind};
+use super::head_open_tag::is_whitespace_reference;
 use super::{DOCUMENT_CHARSET_SCAN_LIMIT, WALK_LIMIT};
 
 /// Where [`find_injection_point`] says the snippet goes.
@@ -89,14 +90,14 @@ pub(super) fn find_injection_point(window: &[u8], head_end: usize, complete: boo
 
     let stop = loop {
         let markup = next_markup(window, offset);
-        if leading {
-            // Text closes the head, so the run ends at any but whitespace.
-            let text_end = match markup {
-                Markup::None => window.len(),
-                Markup::Unfinished(start) | Markup::CdataSection(start) => start,
-                Markup::Tag { start, .. } => start,
-            };
-            leading = !holds_text(&window[offset..text_end]);
+        // Text closes the head: the walk ends at any but whitespace.
+        let text_end = match markup {
+            Markup::None => window.len(),
+            Markup::Unfinished(start) | Markup::CdataSection(start) => start,
+            Markup::Tag { start, .. } => start,
+        };
+        if holds_text(&window[offset..text_end]) {
+            break offset;
         }
         let (closing, name, tag_start, tag_end) = match markup {
             Markup::None if more && leading => return Placement::NeedMore,
@@ -202,6 +203,26 @@ fn holds_text(input: &[u8]) -> bool {
         let end = match input[i] {
             b'<' if input[i..].starts_with(b"<!--") => find_comment_end(input, i),
             b'<' if ends_at_first_greater_than(&input[i + 1..]) => find_bogus_comment_end(input, i),
+            // A character reference to whitespace is whitespace. One the input ends within is
+            // not text yet: more of it may tell.
+            b'&' => {
+                let name = &input[i + 1..];
+                let length = name
+                    .iter()
+                    .enumerate()
+                    .take_while(|&(index, &byte)| {
+                        return byte.is_ascii_alphanumeric() || (index == 0 && byte == b'#');
+                    })
+                    .count();
+                if i + 1 + length == input.len() {
+                    return false;
+                }
+                let terminated = name[length] == b';';
+                if !is_whitespace_reference(&name[..length], terminated) {
+                    return true;
+                }
+                Some(i + 1 + length + usize::from(terminated))
+            }
             // A stray `<` is text as well.
             _ => return true,
         };
@@ -1181,6 +1202,30 @@ mod tests {
                 &alloc::format!("<html><head><meta charset=utf-8>{{{{SNIPPET}}}}{meta}</head>"),
             );
         }
+    }
+
+    #[test]
+    fn stops_at_text() {
+        // Text closes the head: a meta past it is in the body, and holds nothing back.
+        test_injector(
+            "<html><head><title>t</title>stray<meta http-equiv=X-UA-Compatible content=IE=edge></head>",
+            "<html><head>{{SNIPPET}}<title>t</title>stray<meta http-equiv=X-UA-Compatible content=IE=edge></head>",
+        );
+        test_injector(
+            "<html><head>><meta http-equiv=Content-Security-Policy content=x></head>",
+            "<html><head>{{SNIPPET}}><meta http-equiv=Content-Security-Policy content=x></head>",
+        );
+        // Whitespace does not, nor a character reference to it.
+        test_injector(
+            "<html><head>\n &#32;&Tab;<meta http-equiv=X-UA-Compatible content=IE=edge></head>",
+            "<html><head>\n &#32;&Tab;<meta http-equiv=X-UA-Compatible content=IE=edge>{{SNIPPET}}</head>",
+        );
+        // An encoding declaration past it, which the prescan still honours: declined, as past a tag
+        // the head cannot hold.
+        test_injector(
+            "<html><head>&nbsp;<meta charset=utf-8></head>",
+            "<html><head>&nbsp;<meta charset=utf-8></head>",
+        );
     }
 
     #[test]

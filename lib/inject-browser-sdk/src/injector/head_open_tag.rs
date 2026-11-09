@@ -767,7 +767,7 @@ impl HeadOpenTagLocator {
 /// Whether the character reference whose name follows the `&`, ended by a `;` when `terminated`,
 /// decodes to whitespace: a numeric one to a tab, a line feed, a form feed, a carriage return or a
 /// space (its `;` optional, as the parser has it), or `&Tab;` or `&NewLine;`.
-fn is_whitespace_reference(name: &[u8], terminated: bool) -> bool {
+pub(super) fn is_whitespace_reference(name: &[u8], terminated: bool) -> bool {
     let number = match name {
         [b'#', b'x' | b'X', digits @ ..] if !digits.is_empty() => {
             digits.iter().try_fold(0u32, |n, &b| {

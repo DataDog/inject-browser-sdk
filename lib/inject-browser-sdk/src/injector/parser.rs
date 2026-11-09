@@ -30,9 +30,9 @@ pub(super) enum Placement {
 ///
 /// The snippet goes right after the `<head>` tag, unless the head holds a `<meta>` tag the snippet
 /// has to stay behind: then right after the last of them. Those are the ones declaring the character
-/// encoding, and the `http-equiv="X-UA-Compatible"` ones (see [`meta_kind`]). Every other `<meta>`
-/// tag, SEO, Open Graph, viewport, a content security policy or the tracer's `dd-trace-id`, is left
-/// behind the snippet.
+/// encoding, the `http-equiv="X-UA-Compatible"` ones and the `http-equiv="Content-Security-Policy"`
+/// ones (see [`meta_kind`]). Every other `<meta>` tag, SEO, Open Graph, viewport or the tracer's
+/// `dd-trace-id`, is left behind the snippet.
 ///
 /// The tags of the head are walked from the `<head>` tag on, and the walk stops at:
 /// * the `</head>` tag, or a `</body>`, `</html>` or `</br>` one, which close the head as well,
@@ -60,10 +60,11 @@ pub(super) enum Placement {
 /// a tag or an element that does not end within the window, there is no point to inject at that
 /// would not push it further into the document: injection is declined.
 ///
-/// The snippet is deliberately injected *before* a `<meta http-equiv="content-security-policy">`:
-/// a meta-delivered policy only governs what the parser sees after it. A policy delivered by
-/// response header applies regardless of position and is the common case, so the fix for a strict
-/// `script-src` belongs in nonce or hash support rather than in where the snippet is placed.
+/// The snippet goes *after* a `<meta http-equiv="content-security-policy">` the walk reaches: a
+/// meta-delivered policy only governs what the parser sees after it, so injecting ahead of one
+/// would exempt the snippet from a control the site wrote. This is opportunistic: nothing more is
+/// held back to look for one, and one past where the walk stops is not seen. A policy delivered by
+/// response header applies regardless of position and is the common case.
 pub(super) fn find_injection_point(window: &[u8], head_end: usize, complete: bool) -> Placement {
     let window = &window[..window.len().min(WALK_LIMIT)];
     // What follows the window may change the outcome only if it can come, and be walked.
@@ -1150,13 +1151,15 @@ mod tests {
 
     #[test]
     fn before_metas_it_need_not_stay_behind() {
-        // SEO, Open Graph, viewport, a content security policy, the tracer's metas, and `http-equiv`
-        // values other than the two that matter: none of them hold the snippet back.
+        // SEO, Open Graph, viewport, the tracer's metas, a report-only policy (ignored in a meta),
+        // and `http-equiv` values other than the three that matter: none of them hold the snippet
+        // back.
         for meta in [
             "<meta name=description content=x>",
             "<meta property='og:title' content=x>",
             "<meta name=viewport content='width=device-width'>",
-            "<meta http-equiv=Content-Security-Policy content=\"script-src 'self'\">",
+            "<meta http-equiv=Content-Security-Policy-Report-Only content=\"script-src 'self'\">",
+            "<meta name=content-security-policy content=x>",
             "<meta name=dd-trace-id content=123><meta name=dd-trace-time content=456>",
             "<meta http-equiv=refresh content=0>",
             "<meta data-charset=utf-8>",
@@ -1171,6 +1174,44 @@ mod tests {
                 &alloc::format!("<html><head><meta charset=utf-8>{{{{SNIPPET}}}}{meta}</head>"),
             );
         }
+    }
+
+    #[test]
+    fn after_a_content_security_policy_meta() {
+        // The policy only governs what follows it: the snippet goes under it, not ahead of it.
+        test_injector(
+            "<html><head><meta http-equiv=Content-Security-Policy content=\"script-src 'self'\"><title>t</title></head>",
+            "<html><head><meta http-equiv=Content-Security-Policy content=\"script-src 'self'\">{{SNIPPET}}<title>t</title></head>",
+        );
+        // After the last of the metas to stay behind, whichever comes first.
+        test_injector(
+            "<html><head><meta charset=utf-8><meta http-equiv=content-security-policy content=x><meta name=a></head>",
+            "<html><head><meta charset=utf-8><meta http-equiv=content-security-policy content=x>{{SNIPPET}}<meta name=a></head>",
+        );
+        test_injector(
+            "<html><head><meta http-equiv=content-security-policy content=x><meta charset=utf-8><meta name=a></head>",
+            "<html><head><meta http-equiv=content-security-policy content=x><meta charset=utf-8>{{SNIPPET}}<meta name=a></head>",
+        );
+        // Anywhere the walk reaches within the head, past other head elements.
+        test_injector(
+            "<html><head><title>t</title><link rel=icon><script>1</script><meta http-equiv=' CONTENT-security-POLICY ' content=x><style></style></head>",
+            "<html><head><title>t</title><link rel=icon><script>1</script><meta http-equiv=' CONTENT-security-POLICY ' content=x>{{SNIPPET}}<style></style></head>",
+        );
+        // Written in a comment or a raw text element, it is no tag.
+        test_injector(
+            "<html><head><!-- <meta http-equiv=content-security-policy> --><script>'<meta http-equiv=content-security-policy>'</script></head>",
+            "<html><head>{{SNIPPET}}<!-- <meta http-equiv=content-security-policy> --><script>'<meta http-equiv=content-security-policy>'</script></head>",
+        );
+        // Opportunistic: one past where the walk stops is not seen, nothing is held back for it.
+        test_injector(
+            "<html><head><meta charset=utf-8></head><meta http-equiv=content-security-policy content=x>",
+            "<html><head><meta charset=utf-8>{{SNIPPET}}</head><meta http-equiv=content-security-policy content=x>",
+        );
+        let padding = " ".repeat(DOCUMENT_CHARSET_SCAN_LIMIT);
+        test_injector(
+            &alloc::format!("<html><head><link rel=icon>{padding}<meta http-equiv=content-security-policy content=x></head>"),
+            &alloc::format!("<html><head>{{{{SNIPPET}}}}<link rel=icon>{padding}<meta http-equiv=content-security-policy content=x></head>"),
+        );
     }
 
     #[test]

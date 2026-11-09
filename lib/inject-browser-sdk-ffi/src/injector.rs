@@ -29,8 +29,8 @@ pub struct Injector {
 /// The snippet only ever goes within the `<head>` of the document:
 ///
 /// * if the `<head>` start tag is within the first 1024 bytes of the document, right after it, unless
-///   the head holds `<meta>` tags declaring the character encoding or `X-UA-Compatible`: then right
-///   after the last of them. Other `<meta>` tags, SEO, viewport or the tracer's, do not hold the
+///   the head holds `<meta>` tags declaring the character encoding, `X-UA-Compatible` or a
+///   `Content-Security-Policy`: then right after the last of them. Other `<meta>` tags, SEO, viewport or the tracer's, do not hold the
 ///   snippet back;
 /// * otherwise, if those bytes look like an HTML document, as they hold an `<html>` or a `<meta>`
 ///   start tag, right after the first `<head>` start tag that follows;

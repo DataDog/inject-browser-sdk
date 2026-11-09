@@ -12,8 +12,8 @@ intercepts responses and injects the Datadog RUM SDK in the response body for re
 
 The snippet only ever goes within `<head>`:
 * if the `<head>` tag is within the first 1 KiB of the body, right after it, unless the head holds
-  `<meta>` tags declaring the character encoding or `X-UA-Compatible`: then right after the last of
-  them. Other `<meta>` tags (SEO, viewport, the tracer's `dd-trace-id`…) do not hold the snippet
+  `<meta>` tags declaring the character encoding, `X-UA-Compatible` or a `Content-Security-Policy`:
+  then right after the last of them, so a meta-delivered policy governs the snippet. Other `<meta>` tags (SEO, viewport, the tracer's `dd-trace-id`…) do not hold the snippet
   back;
 * otherwise, if that 1 KiB looks like an HTML document (it holds an `<html>` or a `<meta>` tag),
   right after the first `<head>` tag that follows;

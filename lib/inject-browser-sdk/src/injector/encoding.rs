@@ -6,8 +6,9 @@
 
 //! Whether a `<meta>` tag is one the snippet has to stay behind: a declaration of the character
 //! encoding of the document, which injecting before could push out of the window the browser
-//! prescans for it, or an `X-UA-Compatible` one, which Internet Explorer only honours ahead of every
-//! element but `<title>` and other `<meta>` tags. See [`meta_kind`].
+//! prescans for it, an `X-UA-Compatible` one, which Internet Explorer only honours ahead of every
+//! element but `<title>` and other `<meta>` tags, or a `Content-Security-Policy` one, which only
+//! governs what follows it. See [`meta_kind`].
 
 use super::parser::compare_case_insensitive;
 
@@ -134,8 +135,13 @@ pub(super) enum MetaKind {
     /// A `http-equiv="X-UA-Compatible"` one, which Internet Explorer honours only when no element
     /// but `<title>` and other `<meta>` tags precedes it: the snippet must not be one.
     Compatibility,
-    /// Any other: SEO, Open Graph, viewport, a content security policy, the tracer's
-    /// `dd-trace-id`… The snippet does not have to stay behind it.
+    /// A `http-equiv="Content-Security-Policy"` one. A meta-delivered policy only governs what the
+    /// parser sees after it, so the snippet goes after it, under the site's own policy rather than
+    /// ahead of it. Opportunistic: only one the walk reaches counts, nothing more is held back to
+    /// find one. `Content-Security-Policy-Report-Only` is ignored in a `<meta>`, so it is not one.
+    SecurityPolicy,
+    /// Any other: SEO, Open Graph, viewport, the tracer's `dd-trace-id`… The snippet does not have
+    /// to stay behind it.
     Other,
 }
 
@@ -147,7 +153,8 @@ pub(super) fn meta_kind(tag: &[u8]) -> MetaKind {
         return MetaKind::Encoding;
     }
     // The value has to spell it out, so a tag without it is not parsed.
-    if !contains_ignore_case(tag, b"x-ua") {
+    if !contains_ignore_case(tag, b"x-ua") && !contains_ignore_case(tag, b"content-security-policy")
+    {
         return MetaKind::Other;
     }
     let Some(mut index) = tag.iter().position(|&b| return b.is_ascii_whitespace()) else {
@@ -162,10 +169,14 @@ pub(super) fn meta_kind(tag: &[u8]) -> MetaKind {
         index = next_index;
         // Only the first `http-equiv` counts, the parser drops the others.
         if compare_case_insensitive(name, b"http-equiv") {
-            return match compare_case_insensitive(value.trim_ascii(), b"x-ua-compatible") {
-                true => MetaKind::Compatibility,
-                false => MetaKind::Other,
-            };
+            let value = value.trim_ascii();
+            if compare_case_insensitive(value, b"x-ua-compatible") {
+                return MetaKind::Compatibility;
+            }
+            if compare_case_insensitive(value, b"content-security-policy") {
+                return MetaKind::SecurityPolicy;
+            }
+            return MetaKind::Other;
         }
     }
 }

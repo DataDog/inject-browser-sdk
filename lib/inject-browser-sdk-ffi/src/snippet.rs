@@ -13,7 +13,7 @@ use alloc::{
 };
 use core::{
     ffi::{c_char, CStr},
-    ptr::null,
+    ptr::{null, null_mut},
 };
 
 use inject_browser_sdk::{
@@ -248,6 +248,37 @@ pub unsafe extern "C" fn snippet_create_from_json(json: *const c_char) -> *mut S
     return SnippetInternal::new(result).into_public_ptr();
 }
 
+/// Create a copy of a [`Snippet`] that built successfully, to keep for as long as the caller needs,
+/// whatever happens to the original. An [`Injector`](crate::Injector) borrows the snippet it is
+/// created from: one that has to outlive that snippet, for instance carried across the parts of a
+/// response while a configuration reload frees the snippet, is created from a copy.
+///
+/// Returns `NULL` when `snippet` is `NULL` or holds no content (`snippet->error_code != 0`).
+///
+/// # Memory ownership
+///
+/// The copy is owned by the caller and should be freed with [`snippet_cleanup`].
+#[no_mangle]
+pub unsafe extern "C" fn snippet_copy(snippet: *const Snippet) -> *mut Snippet {
+    if snippet.is_null() {
+        return null_mut();
+    }
+    let original = SnippetInternal::borrow_public_ptr(snippet);
+    let Ok(content) = &original.inner else {
+        return null_mut();
+    };
+    let mut copy = SnippetInternal::new(Ok(content.clone()));
+    copy.rum_enabled = original.rum_enabled;
+    copy.owned_ids = original.owned_ids.clone();
+    copy.application_id = copy.owned_ids[0]
+        .as_ref()
+        .map_or(null(), |id| return id.as_ptr());
+    copy.remote_configuration_id = copy.owned_ids[1]
+        .as_ref()
+        .map_or(null(), |id| return id.as_ptr());
+    return copy.into_public_ptr();
+}
+
 /// Free the [`Snippet`] associated memory.
 ///
 /// # Memory safety
@@ -266,6 +297,33 @@ mod tests {
     use core::ptr::null;
     use pretty_assertions::{assert_eq, assert_ne};
     use std::{borrow::ToOwned, ptr::null_mut, string::String};
+
+    #[test]
+    fn snippet_copy_outlives_the_original() {
+        let original = unsafe {
+            snippet_create_from_json(cstr_ptr(
+                b"{\"majorVersion\":5,\"rum\":{\"applicationId\":\"a\",\"clientToken\":\"t\"}}\0",
+            ))
+        };
+        let expected = unsafe { SnippetInternal::borrow_public_ptr(original) }
+            .inner
+            .clone()
+            .unwrap();
+        let copy = unsafe { snippet_copy(original) };
+        unsafe { snippet_cleanup(original) };
+
+        assert_ne!(copy, null_mut());
+        let copied = unsafe { SnippetInternal::borrow_public_ptr(copy) };
+        assert_eq!(copied.error_code, 0);
+        assert_eq!(copied.length as usize, expected.len());
+        assert_eq!(copied.inner.as_ref().unwrap(), &expected);
+        unsafe { snippet_cleanup(copy) };
+
+        assert_eq!(unsafe { snippet_copy(null()) }, null_mut());
+        let failed = unsafe { snippet_create_from_json(cstr_ptr(b"{not json\0")) };
+        assert_eq!(unsafe { snippet_copy(failed) }, null_mut());
+        unsafe { snippet_cleanup(failed) };
+    }
 
     #[test]
     fn snippet_creation() {

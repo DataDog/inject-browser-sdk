@@ -177,6 +177,14 @@ pub struct Injector<'snippet> {
     /// again over a growing window stays linear in its size.
     hold_target: usize,
 
+    /// Whether [`Injector::flush`] handed the head window back before it was complete. What it held
+    /// is gone then, so no injection point within the window can be proven anymore.
+    window_cut: bool,
+
+    /// How many bytes had been scanned when [`Injector::flush`] last handed back what was held, with
+    /// [`InjectionStrategy::HeadCloseTag`]: a `</head>` tag starting before it went out already.
+    flushed_up_to: usize,
+
     /// The head window as it accumulates, bounded by `hold_target`: a chunk only ever contributes the
     /// bytes that complete it, unless the walk asks for more of them.
     ///
@@ -224,6 +232,8 @@ impl<'snippet> Injector<'snippet> {
             head_locator: HeadOpenTagLocator::with_target(target),
             head_end: None,
             hold_target: DOCUMENT_CHARSET_SCAN_LIMIT,
+            window_cut: false,
+            flushed_up_to: 0,
             incomplete_data: Vec::new(),
             incomplete_data_public_ref: Vec::new(),
             padding_spaces: Vec::new(),
@@ -263,6 +273,20 @@ impl<'snippet> Injector<'snippet> {
             announced = Some(length);
         }
         return announced?.checked_add(u64::try_from(self.snippet.len()).ok()?);
+    }
+
+    /// Whether the snippet may still go into data yet to be written: the injector has neither
+    /// injected nor given up. Past the head window it holds nothing back while it still is, so a
+    /// server that sends the document in several parts can keep writing them to the same injector,
+    /// each part on its own.
+    pub fn is_pending(&self) -> bool {
+        return matches!(
+            self.injector_state,
+            InjectorState::BufferingHeadWindow
+                | InjectorState::ScanningForHeadOpenTag
+                | InjectorState::ScanningForHeadCloseTag
+                | InjectorState::HoldingForCharset { .. }
+        );
     }
 
     pub fn write<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
@@ -310,6 +334,60 @@ impl<'snippet> Injector<'snippet> {
                 return self.create_result(&[BytesSlice::new(chunk, true)]);
             }
         }
+    }
+
+    /// Hands back everything held back, for a server that has to send what it has now, a page
+    /// streamed in pieces that waits on more data for instance, which would otherwise stall until
+    /// the head window fills. Never injects, and past the window there is nothing to hand back.
+    ///
+    /// The window is given up in exchange: what it held is gone, so no injection point within it can
+    /// be proven anymore. A `<head>` tag in what is handed back, or starting later within the window,
+    /// is not injected after. One starting past the window still is, if the window looks like an
+    /// HTML document, as when the window holds no `<head>` tag at all.
+    ///
+    /// While more than the window is held back, for a run of `<meta>` and `<title>` tags that has
+    /// not ended, the `<head>` tag has been found and goes out too: the snippet is not injected.
+    ///
+    /// Past the window, what is handed back is a tag or character reference a write cut short:
+    /// should it turn out to be where the snippet goes before, it cannot go there anymore, and is
+    /// not injected. And while the bytes from a point within the first DOCUMENT_CHARSET_SCAN_LIMIT
+    /// are held back, to tell whether an encoding declaration follows it, that point goes out:
+    /// the snippet is not injected.
+    pub fn flush(&mut self) -> Result<'_> {
+        match self.injector_state {
+            InjectorState::ScanningForHeadCloseTag | InjectorState::ScanningForHeadOpenTag => {
+                self.flushed_up_to = self.head_locator.offset();
+                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
+                return self
+                    .create_result(&[BytesSlice::new(&self.incomplete_data_public_ref, false)]);
+            }
+            InjectorState::HoldingForCharset { .. } => {
+                self.injector_state = InjectorState::PassingThrough;
+                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
+                return self
+                    .create_result(&[BytesSlice::new(&self.incomplete_data_public_ref, false)]);
+            }
+            InjectorState::BufferingHeadWindow => {}
+            _ => return self.create_result(&[]),
+        }
+        self.window_cut = true;
+        self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
+        let head = match self.head_end {
+            Some(_) => true,
+            None => self
+                .head_locator
+                .scan(&self.incomplete_data_public_ref)
+                .is_some(),
+        };
+        // A tag the window ends in goes out as well.
+        self.flushed_up_to = self.head_locator.offset();
+        self.injector_state = match head {
+            // Its injection point is in what goes out now.
+            true => InjectorState::PassingThrough,
+            false if self.may_find_injection_point() => InjectorState::ScanningForHeadOpenTag,
+            false => InjectorState::PassingThrough,
+        };
+        return self.create_result(&[BytesSlice::new(&self.incomplete_data_public_ref, false)]);
     }
 
     /// Ends the document. When no injection point was found, the output is padded with spaces to
@@ -575,6 +653,14 @@ impl<'snippet> Injector<'snippet> {
     /// found in a chunk starting at `chunk_start`: before where the head closes, before a `</head>`
     /// tag, or after a `<head>` one. `None` when it does not go there after all.
     fn injection_point(&self, head: HeadOpenTag, chunk_start: usize) -> Option<usize> {
+        // A point in what a flush handed back is gone.
+        return self
+            .placement(head, chunk_start)
+            .filter(|&point| return point >= self.flushed_up_to);
+    }
+
+    /// [`Injector::injection_point`], flushes aside.
+    fn placement(&self, head: HeadOpenTag, chunk_start: usize) -> Option<usize> {
         // Evidence counts within EVIDENCE_LIMIT bytes, even when a single chunk holds more: the
         // tag found, within the body, or what came before the head closed.
         if head.breaks {
@@ -798,6 +884,10 @@ impl<'snippet> Injector<'snippet> {
     /// Whether the snippet may go after `head`, a `<head>` tag found past the head window or ending
     /// past it: only if the tag starts within the window, or if the document looks like HTML.
     fn may_inject_after(&self, head: HeadOpenTag) -> bool {
+        if self.window_cut {
+            // Within a window cut short, the meta walk cannot tell where the snippet may go.
+            return head.start >= DOCUMENT_CHARSET_SCAN_LIMIT && self.looks_like_html();
+        }
         return head.start < DOCUMENT_CHARSET_SCAN_LIMIT || self.looks_like_html();
     }
 
@@ -1397,6 +1487,28 @@ mod tests {
                 injector.write(chunk);
                 assert!(injector.held_back() < WALK_LIMIT);
             }
+            assert!(!injector.is_pending());
+        }
+
+        #[test]
+        fn flush_hands_back_the_extended_hold() {
+            let mut injector =
+                Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadOpenTag);
+            let document = format!("<html><head>{}", metas(3000));
+            injector.write(&document.as_bytes()[..2000]);
+            assert_eq!(injector.held_back(), 2000);
+            let flush = injector.flush();
+            assert!(!flush.injected);
+            assert_eq!(
+                flush
+                    .iter()
+                    .map(|slice| return slice.bytes.len())
+                    .sum::<usize>(),
+                2000
+            );
+            assert_eq!(injector.held_back(), 0);
+            assert!(!injector.is_pending());
+            assert!(!injector.write(COMPATIBLE.as_bytes()).injected);
         }
     }
 
@@ -1572,6 +1684,29 @@ mod tests {
         }
 
         #[test]
+        fn is_pending_until_injected_or_given_up() {
+            let mut injector =
+                Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadOpenTag);
+            assert!(injector.is_pending());
+            injector.write(format!("<html>{}", filler()).as_bytes());
+            assert!(injector.is_pending());
+            assert_eq!(injector.held_back(), 0);
+            assert!(injector.write(b"<head>").injected);
+            assert!(!injector.is_pending());
+
+            let mut injector =
+                Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadOpenTag);
+            injector.write(filler().as_bytes());
+            assert!(!injector.is_pending());
+
+            let mut injector =
+                Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadOpenTag);
+            injector.write(b"<head>");
+            injector.end_without_padding();
+            assert!(!injector.is_pending());
+        }
+
+        #[test]
         fn fuzzy() {
             fuzz_head_open_tag(&(String::from("<html>") + &filler()), true);
             fuzz_head_open_tag(&opaque_filler(), false);
@@ -1649,6 +1784,106 @@ mod tests {
                 let split = rng.random_range(0..=bytes.len());
                 run_injector(make, [&bytes[..split], &bytes[split..]], &expected);
             }
+        }
+    }
+
+    /// [`Injector::flush`] hands the held-back window out, and gives up any `<head>` within it.
+    mod flush {
+        use super::*;
+        use pretty_assertions::assert_eq;
+
+        /// Writes `before`, flushes, writes `after` and ends the document, checking every result
+        /// carries the bytes it should; returns the output.
+        fn flushed(before: &str, after: &str) -> String {
+            let mut injector =
+                Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadOpenTag);
+            let mut output = Vec::new();
+            let collect = |output: &mut Vec<u8>, result: Result<'_>| {
+                for slice in result.iter() {
+                    output.extend_from_slice(slice.bytes);
+                }
+            };
+            collect(&mut output, injector.write(before.as_bytes()));
+            let held = injector.held_back();
+            let flush = injector.flush();
+            assert!(!flush.injected);
+            assert!(flush.iter().all(|slice| return !slice.from_incoming_chunk));
+            assert_eq!(
+                flush
+                    .iter()
+                    .map(|slice| return slice.bytes.len())
+                    .sum::<usize>(),
+                held
+            );
+            collect(&mut output, flush);
+            assert_eq!(injector.held_back(), 0);
+            collect(&mut output, injector.write(after.as_bytes()));
+            assert_eq!(injector.held_back(), 0, "nothing is held back past a flush");
+            collect(&mut output, injector.end_without_padding());
+            return String::from_utf8(output).unwrap();
+        }
+
+        #[test]
+        fn hands_the_window_out() {
+            assert_eq!(flushed("<html>", ""), "<html>");
+            // Past the window, there is nothing left to hand out.
+            let mut injector =
+                Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadOpenTag);
+            injector.write("a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT).as_bytes());
+            assert_eq!(injector.flush().length, 0);
+        }
+
+        #[test]
+        fn injects_after_a_head_tag_past_the_window() {
+            let comment = format!("<!-- {} -->", "c".repeat(DOCUMENT_CHARSET_SCAN_LIMIT));
+            assert_eq!(
+                flushed("<html>", &format!("{comment}<head><meta name=a>")),
+                format!("<html>{comment}<head>{{{{SNIPPET}}}}<meta name=a>")
+            );
+            // The evidence may come after the flush, as long as it is within the window.
+            assert_eq!(
+                flushed("<!DOCTYPE html>", &format!("<html>{comment}<head>")),
+                format!("<!DOCTYPE html><html>{comment}<head>{{{{SNIPPET}}}}")
+            );
+        }
+
+        #[test]
+        fn gives_up_a_head_tag_within_the_window() {
+            // In what was handed out: its injection point is gone.
+            assert_eq!(
+                flushed("<html><head>", "<title>t</title>"),
+                "<html><head><title>t</title>"
+            );
+            // After the flush but within the window: a charset declaration may follow it there.
+            assert_eq!(
+                flushed("<html>", "<head><meta charset=utf-8>"),
+                "<html><head><meta charset=utf-8>"
+            );
+        }
+
+        #[test]
+        fn does_not_inject_without_html_evidence() {
+            let filler = "a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT);
+            assert_eq!(
+                flushed("{\"a\": 1", &format!("{filler}<head>")),
+                format!("{{\"a\": 1{filler}<head>")
+            );
+        }
+
+        #[test]
+        fn pads_when_ended_with_padding() {
+            let mut injector =
+                Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadOpenTag);
+            injector.write(b"<html>");
+            injector.flush();
+            let end = injector.end();
+            assert!(!end.injected);
+            assert_eq!(
+                end.iter()
+                    .map(|slice| return slice.bytes.len())
+                    .sum::<usize>(),
+                11
+            );
         }
     }
 
@@ -2395,6 +2630,63 @@ mod tests {
             let mut injector = Injector::new(b"{{SNIPPET}}");
             injector.write(b"<html><head></hx");
             assert_eq!(injector.held_back(), 0);
+        }
+
+        #[test]
+        fn is_pending_until_injected_or_given_up() {
+            // Whatever the size of the head so far: a server can carry it over to later parts.
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            injector.write(b"<html><head><script>");
+            injector.write("x".repeat(3 * WALK_LIMIT).as_bytes());
+            assert!(injector.is_pending());
+            assert_eq!(injector.held_back(), 0);
+            assert!(injector.write(b"</script></head>").injected);
+            assert!(!injector.is_pending());
+
+            // Body content ends the search.
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            injector.write(b"<html><head><div>");
+            assert!(!injector.is_pending());
+
+            // So does a first kilobyte without HTML evidence.
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            injector.write("x".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 1).as_bytes());
+            assert!(injector.is_pending());
+            injector.write(b"xx");
+            assert!(!injector.is_pending());
+        }
+
+        #[test]
+        fn flush_hands_back_an_end_tag_cut_short() {
+            // Nothing held: a later `</head>` is still injected before.
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            injector.write(b"<html><head><title>t</title>");
+            assert_eq!(injector.flush().length, 0);
+            assert!(injector.write(b"</head>").injected);
+
+            // A `</head` tag cut short goes out: should it turn out to be the one, the snippet
+            // cannot go before it anymore.
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            injector.write(b"<html><head></he");
+            let flushed = injector.flush();
+            assert_eq!(
+                flushed
+                    .iter()
+                    .flat_map(|slice| return slice.bytes.iter().copied())
+                    .collect::<Vec<u8>>(),
+                b"</he"
+            );
+            assert_eq!(injector.held_back(), 0);
+            assert!(!injector.write(b"ad>").injected);
+            assert!(!injector.is_pending());
+
+            // Should it turn out to be another tag, the search goes on.
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            injector.write(b"<html><head></he");
+            injector.flush();
+            injector.write(b"ader>");
+            assert!(injector.is_pending());
+            assert!(injector.write(b"</head>").injected);
         }
 
         #[test]

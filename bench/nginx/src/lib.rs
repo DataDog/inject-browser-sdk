@@ -351,15 +351,18 @@ unsafe fn emit(
             }
             let start = s.bytes.as_ptr() as *mut u8;
             let end = start.add(s.bytes.len());
-            let b = if s.from_incoming_chunk && Some(index) == last_incoming && end == (*incoming).last
-            {
-                // Reuse the incoming buffer: the producer gets it back once it is sent.
+            let b = if s.from_incoming_chunk && Some(index) == last_incoming {
+                // Reuse the incoming buffer: the producer gets it back once it is sent. What the
+                // injector held back from its end, a `</head` tag cut short, it copied: the buffer
+                // is cut short of it, or it would never be consumed.
                 let b = incoming;
                 if (*b).in_file() != 0 {
                     // Read into memory for us, but still sent by sendfile: keep both in step.
                     (*b).file_pos += start.offset_from((*b).pos) as i64;
+                    (*b).file_last -= (*b).last.offset_from(end) as i64;
                 }
                 (*b).pos = start;
+                (*b).last = end;
                 (*b).set_last_buf(0);
                 (*b).set_last_in_chain(0);
                 b

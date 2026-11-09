@@ -8,7 +8,11 @@
 extern crate inject_browser_sdk;
 extern crate libfuzzer_sys;
 
-use inject_browser_sdk::{generate_snippet, injector::Injector, Configuration, RumConfiguration};
+use inject_browser_sdk::{
+    generate_snippet,
+    injector::{InjectionStrategy, Injector},
+    Configuration, RumConfiguration,
+};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -21,14 +25,22 @@ fuzz_target!(|data: &[u8]| {
         },
     };
 
-    // Spend the first byte on how the document ends, so both ways get fuzzed.
-    let (padded, data) = match data.split_first() {
-        Some((selector, rest)) => (selector % 2 == 0, rest),
-        None => (true, data),
+    // Spend the first byte on the strategy and on how the document ends, so every combination gets
+    // fuzzed. The strategies hold back different amounts of data, so they exercise quite different
+    // buffering paths.
+    let (strategy, padded, data) = match data.split_first() {
+        Some((selector, rest)) => {
+            let strategy = match selector % 2 {
+                0 => InjectionStrategy::HeadCloseTag,
+                _ => InjectionStrategy::HeadOpenTag,
+            };
+            (strategy, (selector / 2) % 2 == 0, rest)
+        }
+        None => (InjectionStrategy::default(), true, data),
     };
 
     let snippet = generate_snippet(&conf).unwrap();
-    let mut injector = Injector::new(snippet.as_slice());
+    let mut injector = Injector::with_strategy(snippet.as_slice(), strategy);
 
     let mut emitted = 0usize;
     let result = injector.write(data);

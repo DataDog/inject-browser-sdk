@@ -16,11 +16,19 @@ You can see the diff with the original document by doing something like:
 diff -u document.html <(cargo run document.html)
 ```
 
-## Where the snippet goes
+## Injection strategy
 
-The snippet is injected within the `<head>` of the document, as the library always does: right
-after the `<head>` tag if it is within the first 1024 bytes, or after the last `<meta>` tag the head
-holds declaring the character encoding, `X-UA-Compatible` or a `Content-Security-Policy` if any, or right after a `<head>` tag
-past those bytes if they look like an HTML document
-(they hold an `<html>` or a `<meta>` tag). Otherwise the document is left untouched, padded with
-spaces to the length it would have had.
+An optional second argument selects where the snippet goes. It defaults to `head-close-tag`, which
+is also the library default.
+
+| Strategy | Injects |
+| --- | --- |
+| `head-close-tag` | right before the first real `</head>`, wherever it is, if the document looks like HTML: an `<html>`, `<meta>` or `<head>` tag within its first 1024 bytes |
+| `head-open-tag` | as early as possible in `<head>`: right after the `<head>` tag, or after the last `<meta>` declaring the character encoding, `X-UA-Compatible` or a `Content-Security-Policy` |
+
+Either way, nothing goes past body content, and a document that does not look like HTML is left
+untouched, padded with spaces to the length it would have had.
+
+```bash
+cargo run document.html head-open-tag
+```

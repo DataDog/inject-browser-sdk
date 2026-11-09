@@ -4,11 +4,24 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-//! Streaming locator for the first `<head>` start tag. See [`HeadOpenTagLocator`].
+//! Streaming locator for the first `<head>` start tag, or the first `</head>` end tag. See
+//! [`HeadOpenTagLocator`].
 
 use memchr::{memchr, memchr2, memchr3};
 
-/// The first `<head>` start tag, as found by [`HeadOpenTagLocator::scan`].
+/// What a [`HeadOpenTagLocator`] looks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Target {
+    /// The first `<head>` start tag, to inject right after it.
+    HeadStart,
+    /// The first `</head>` end tag, to inject right before it: one closing the head of a document
+    /// that looked like HTML before it (see [`HeadOpenTagLocator::evidence`]), and coming before any
+    /// body content. A `</body>`, `</html>` or `</br>` end tag closes the head first, and ends the
+    /// search, as body content does.
+    HeadEnd,
+}
+
+/// The tag a [`HeadOpenTagLocator`] looks for, as found by [`HeadOpenTagLocator::scan`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct HeadOpenTag {
     /// Offset of its `<` from the start of the document, across every chunk scanned.
@@ -122,7 +135,7 @@ enum State {
     /// `]]>` within `svg` or `math` and to the first `>` anywhere else. Guessing wrong would find a
     /// `<head>` written in CDATA text, so nothing is looked for past it, as the window walk does.
     CdataSection,
-    /// The `<head>` start tag was found; nothing is left to look for.
+    /// The tag looked for was found; nothing is left to look for.
     Found,
     /// Past a start tag the head cannot follow, `<body>`, `<div>` or any other but the few
     /// [`MAY_PRECEDE_HEAD`] lists: the browser has started the body by then and ignores a `<head>`
@@ -141,6 +154,8 @@ enum State {
 ///
 /// It also records whether the document looks like HTML: see [`HeadOpenTagLocator::html_evidence`].
 pub(super) struct HeadOpenTagLocator {
+    target: Target,
+
     state: State,
 
     /// Number of bytes scanned so far, across every chunk.
@@ -161,11 +176,20 @@ pub(super) struct HeadOpenTagLocator {
 
     /// Offset of the `<` of the first `<html>` or `<meta>` start tag.
     html_evidence: Option<usize>,
+
+    /// Offset of the `<` of the first `<head>` start tag, looking for the `</head>` one.
+    head_start: Option<usize>,
 }
 
 impl HeadOpenTagLocator {
+    #[cfg(test)]
     pub(super) fn new() -> Self {
+        return Self::with_target(Target::HeadStart);
+    }
+
+    pub(super) fn with_target(target: Target) -> Self {
         return Self {
+            target,
             state: State::Data,
             offset: 0,
             markup_start: 0,
@@ -175,6 +199,7 @@ impl HeadOpenTagLocator {
             recent: [0; MAX_RECENT],
             recent_length: 0,
             html_evidence: None,
+            head_start: None,
         };
     }
 
@@ -182,6 +207,39 @@ impl HeadOpenTagLocator {
     /// is HTML rather than a fragment or some other content served as `text/html`.
     pub(super) fn html_evidence(&self) -> Option<usize> {
         return self.html_evidence;
+    }
+
+    /// Offset of the first `<html>`, `<meta>` or `<head>` start tag scanned, if any: the HTML
+    /// evidence of [`Target::HeadEnd`], where the `<head>` tag is not what is looked for.
+    pub(super) fn evidence(&self) -> Option<usize> {
+        return match (self.html_evidence, self.head_start) {
+            (Some(html), Some(head)) => Some(html.min(head)),
+            (html, head) => html.or(head),
+        };
+    }
+
+    /// Number of bytes scanned so far, across every chunk.
+    pub(super) fn offset(&self) -> usize {
+        return self.offset;
+    }
+
+    /// Offset of the `<` of an end tag being read while it may still turn out to be `</head>`,
+    /// looking for one: what precedes the snippet if it is, so what has to be held back meanwhile.
+    pub(super) fn pending_end_tag_start(&self) -> Option<usize> {
+        if self.target != Target::HeadEnd {
+            return None;
+        }
+        return match self.state {
+            State::TagOpen
+            | State::EndTagOpen
+            | State::Tag {
+                closing: true,
+                position: TagPosition::TagName,
+            } => Some(self.markup_start),
+            // The name is complete: only a `head` end tag is still pending, on its `>`.
+            State::Tag { closing: true, .. } if self.name_is(b"head") => Some(self.markup_start),
+            _ => None,
+        };
     }
 
     /// Offset of the `<` of the tag being read, while it may still turn out to be a `<head>`, a
@@ -199,7 +257,7 @@ impl HeadOpenTagLocator {
         };
     }
 
-    /// Whether a `<head>` tag may still be found in what follows: not once it has been, nor past
+    /// Whether the tag looked for may still be found in what follows: not once it has been, nor past
     /// markup that ends the search, a `<plaintext>` tag or a CDATA section.
     pub(super) fn is_searching(&self) -> bool {
         return !matches!(
@@ -208,7 +266,7 @@ impl HeadOpenTagLocator {
         );
     }
 
-    /// Scans the next chunk of the document, and returns the `<head>` start tag if it ends within it.
+    /// Scans the next chunk of the document, and returns the tag looked for if it ends within it.
     /// Only the first one is ever returned.
     pub(super) fn scan(&mut self, chunk: &[u8]) -> Option<HeadOpenTag> {
         let mut index = 0;
@@ -280,7 +338,7 @@ impl HeadOpenTagLocator {
             .any(|&byte| return byte == b'<' || byte == b'-');
     }
 
-    /// Consumes one byte at `offset`, and returns whether it is the `>` closing the `<head>` tag.
+    /// Consumes one byte at `offset`, and returns whether it is the `>` closing the tag looked for.
     fn step(&mut self, byte: u8, offset: usize) -> bool {
         self.state = match self.state {
             State::Found | State::PastHead | State::Plaintext | State::CdataSection => self.state,
@@ -309,10 +367,13 @@ impl HeadOpenTagLocator {
             State::EndTagOpen => match byte {
                 // `</>` is dropped altogether.
                 b'>' => State::Data,
-                _ if byte.is_ascii_alphabetic() => State::Tag {
-                    closing: true,
-                    position: TagPosition::TagName,
-                },
+                _ if byte.is_ascii_alphabetic() => {
+                    self.push_name(byte);
+                    State::Tag {
+                        closing: true,
+                        position: TagPosition::TagName,
+                    }
+                }
                 // `</` followed by anything but a letter is a bogus comment.
                 _ => State::BogusComment,
             },
@@ -335,10 +396,31 @@ impl HeadOpenTagLocator {
                         }
                     }
                     // The tag ends at this `>`.
-                    None if closing => State::Data,
+                    None if closing => match self.target {
+                        Target::HeadStart => State::Data,
+                        Target::HeadEnd if self.name_is(b"head") => {
+                            self.state = State::Found;
+                            return true;
+                        }
+                        // These close the head as well, implicitly: no `</head>` that follows
+                        // closes it.
+                        Target::HeadEnd
+                            if [b"body".as_slice(), b"html", b"br"]
+                                .iter()
+                                .any(|name| return self.name_is(name)) =>
+                        {
+                            State::PastHead
+                        }
+                        Target::HeadEnd => State::Data,
+                    },
                     None => {
                         self.complete_name();
                         if self.name_is(b"head") {
+                            if self.target == Target::HeadEnd {
+                                // Its own content is markup: carry on to its end tag.
+                                self.state = State::Data;
+                                return false;
+                            }
                             self.state = State::Found;
                             return true;
                         }
@@ -546,10 +628,13 @@ impl HeadOpenTagLocator {
     }
 
     /// Called once the name of a start tag is complete: the first `<html>` or `<meta>` start tag is
-    /// HTML evidence.
+    /// HTML evidence, and so is the first `<head>` one looking for the `</head>` tag.
     fn complete_name(&mut self) {
         if self.html_evidence.is_none() && (self.name_is(b"html") || self.name_is(b"meta")) {
             self.html_evidence = Some(self.markup_start);
+        }
+        if self.target == Target::HeadEnd && self.head_start.is_none() && self.name_is(b"head") {
+            self.head_start = Some(self.markup_start);
         }
     }
 

@@ -8,23 +8,30 @@ intercepts responses and injects the Datadog RUM SDK in the response body for re
 * Response code is `2xx` `4xx` or `5xx`
 * HTTP Content-Type header begins with `text/html`
 * HTTP `x-datadog-rum-injected` header is not present
-* Body contains a `<head>` tag
+* Body looks like an HTML document (see below)
 
-The snippet only ever goes within `<head>`:
-* if the `<head>` tag is within the first 1 KiB of the body, right after it, unless the head holds
-  `<meta>` tags declaring the character encoding, `X-UA-Compatible` or a `Content-Security-Policy`:
-  then right after the last of them, so a meta-delivered policy governs the snippet. Other `<meta>` tags (SEO, viewport, the tracer's `dd-trace-id`…) do not hold the snippet
-  back;
-* otherwise, if that 1 KiB looks like an HTML document (it holds an `<html>` or a `<meta>` tag),
-  right after the first `<head>` tag that follows;
-* otherwise not at all: the response is served untouched.
+The snippet only ever goes within `<head>`. Where is set by the `injectionStrategy` attribute of
+the `datadogRum` section:
 
-A `<head>` tag after body content (`<body>`, `<div>`…) does not count: browsers ignore it.
+* `headCloseTag` (the default): right before the first `</head>` end tag, wherever it is in the
+  body, if the first 1 KiB looks like an HTML document (it holds an `<html>`, `<meta>` or `<head>`
+  tag). Only a `</head>` before body content (`<body>`, `<div>`…) counts, and none written in a
+  comment, a script, a style or an attribute value. Nothing is held back but a `</head>` tag split
+  across writes: the response streams through.
+* `headOpenTag`: as early as possible. If the `<head>` tag is within the first 1 KiB, right after
+  it, unless the head holds `<meta>` tags declaring the character encoding, `X-UA-Compatible` or a
+  `Content-Security-Policy`: then right after the last of them, so a meta-delivered policy governs
+  the snippet. Other `<meta>` tags (SEO, viewport, the tracer's `dd-trace-id`…) do not hold it
+  back. Otherwise, if that 1 KiB looks like an HTML document (it holds an `<html>` or a `<meta>`
+  tag), right after the first `<head>` tag that follows. A `<head>` tag after body content does
+  not count: browsers ignore it. The first 1 KiB is held back, or up to 10 KiB while the head is
+  still a run of `<meta>` and `<title>` tags past it.
 
-Only that first 1 KiB is held back, or up to 10 KiB while the head is still a run of `<meta>` and
-`<title>` tags past it, where an `X-UA-Compatible` declaration may still come; the rest of the
-response streams through uncopied. Earlier
-releases injected right before `</head>`.
+```xml
+<datadogRum enabled="true" injectionStrategy="headOpenTag">
+```
+
+Either way, a response that does not look like an HTML document is served untouched.
 
 ## Build/installation steps
 1. Configure the project

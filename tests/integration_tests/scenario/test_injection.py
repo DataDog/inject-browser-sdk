@@ -77,11 +77,6 @@ def __fetch(path, timeout=60):
     return status, headers, rest
 
 
-def __after_head(page):
-    """Where the snippet goes in `page`, whose head holds no <meta> tag."""
-    return page.index(b"<head>") + len(b"<head>")
-
-
 def __assert_injected_once(page, body, at=None):
     """
     Verify `body` is `page` whole with exactly one insertion, the RUM
@@ -146,44 +141,18 @@ def test_proxy_injection(upstream_server):
     assert headers["x-datadog-rum-injected"] == "1"
     page = SIMPLE_HTML.encode()
     # Other servers bundle a library release whose placement may differ.
-    __assert_injected_once(page, body, at=__after_head(page) if IIS else None)
-
-
-# Other servers run this suite against the library release they bundle, which may predate the
-# placement rule below.
-@pytest.mark.skipif(
-    os.environ.get("WEBSERVER-FLAVOR", "") != "iis",
-    reason="Placement within <head> depends on the bundled library version",
-)
-def test_injection_early_in_head(upstream_server):
-    """
-    Verify the RUM Browser SDK is injected right after <head> when the head
-    holds no <meta> tag, before the rest of the head rather than before
-    </head>.
-    """
-
-    async def upstream_handler(request):
-        return web.Response(body=SIMPLE_HTML, content_type="text/html")
-
-    upstream_server.add_route("/early", upstream_handler)
-
-    status, headers, body = __fetch("/early")
-
-    assert status == 200
-    assert headers["x-datadog-rum-injected"] == "1"
-    page = SIMPLE_HTML.encode()
-    __assert_injected_once(page, body, at=__after_head(page))
+    __assert_injected_once(page, body, at=page.index(b"</head>") if IIS else None)
 
 
 @pytest.mark.skipif(
     os.environ.get("WEBSERVER-FLAVOR", "") != "iis",
-    reason="Placement within <head> depends on the bundled library version",
+    reason="HTML detection depends on the bundled library version",
 )
 def test_no_injection_without_html_in_first_kilobyte(upstream_server):
     """
     Verify a text/html response that does not look like an HTML document
-    in its first kilobyte (no <html> or <meta> tag, no <head>) is served
-    untouched, even if a <head> tag follows.
+    in its first kilobyte (no <html>, <meta> or <head> tag) is served
+    untouched, even if a </head> tag follows.
     """
     body = '{"data": "' + "x" * 2048 + '", "html": "<head></head>"}'
 
@@ -235,14 +204,16 @@ def test_large_proxied_response_is_served_whole(upstream_server, chunked):
     assert headers["x-datadog-rum-injected"] == "1"
     # The announced length grows by the snippet, and a chunked response stays chunked.
     assert ("content-length" in headers) != chunked
-    __assert_injected_once(LARGE_HTML, body, at=__after_head(LARGE_HTML) if IIS else None)
+    __assert_injected_once(
+        LARGE_HTML, body, at=LARGE_HTML.index(b"</head>") if IIS else None
+    )
 
 
 # Past the 256 KiB ARR hands IIS in its first part.
-LATE_HEAD_HTML = (
-    "<html><!--"
+LATE_HEAD_CLOSE_HTML = (
+    "<html><head><script>/*"
     + "x" * 300_000
-    + "--><head><title>t</title></head><body><p>hi</p></body></html>"
+    + "*/</script></head><body><p>hi</p></body></html>"
 ).encode()
 
 
@@ -251,22 +222,22 @@ LATE_HEAD_HTML = (
     reason="IIS gets a large response in several parts",
 )
 @pytest.mark.parametrize("chunked", [False, True])
-def test_head_past_the_first_part_is_served_untouched(upstream_server, chunked):
+def test_head_close_tag_past_the_first_part_is_served_untouched(upstream_server, chunked):
     """
-    Verify a proxied page whose <head> lies past the first part IIS gets
+    Verify a proxied page whose </head> lies past the first part IIS gets
     is served whole and untouched: the snippet can only go within the first
     part, and the announced length must not change.
     """
 
     async def upstream_handler(request):
         if not chunked:
-            return web.Response(body=LATE_HEAD_HTML, content_type="text/html")
+            return web.Response(body=LATE_HEAD_CLOSE_HTML, content_type="text/html")
         response = web.StreamResponse()
         response.content_type = "text/html"
         response.enable_chunked_encoding()
         await response.prepare(request)
-        for offset in range(0, len(LATE_HEAD_HTML), 65536):
-            await response.write(LATE_HEAD_HTML[offset : offset + 65536])
+        for offset in range(0, len(LATE_HEAD_CLOSE_HTML), 65536):
+            await response.write(LATE_HEAD_CLOSE_HTML[offset : offset + 65536])
         await response.write_eof()
         return response
 
@@ -277,7 +248,7 @@ def test_head_past_the_first_part_is_served_untouched(upstream_server, chunked):
 
     assert status == 200
     assert "x-datadog-rum-injected" not in headers
-    assert body == LATE_HEAD_HTML
+    assert body == LATE_HEAD_CLOSE_HTML
     assert ("content-length" in headers) != chunked
 
 

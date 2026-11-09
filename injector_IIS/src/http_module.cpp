@@ -553,7 +553,8 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  const InjectorPtr injector(injector_create(ctx.snippet), injector_cleanup);
+  const InjectorPtr injector(injector_create_with_strategy(ctx.snippet, ctx.injection_strategy),
+                             injector_cleanup);
   if (!injector) {
     logger.error("Error creating injector");
     return RQ_NOTIFICATION_CONTINUE;

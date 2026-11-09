@@ -2648,11 +2648,17 @@ mod tests {
             injector.write(b"<html><head><div>");
             assert!(!injector.is_pending());
 
-            // So does a first kilobyte without HTML evidence.
+            // So does text.
             let mut injector = Injector::new(b"{{SNIPPET}}");
-            injector.write("x".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 1).as_bytes());
+            injector.write(b"<html><head>text");
+            assert!(!injector.is_pending());
+
+            // And a first kilobyte without HTML evidence, here a comment.
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            let comment = format!("<!--{}", "c".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 5));
+            injector.write(comment.as_bytes());
             assert!(injector.is_pending());
-            injector.write(b"xx");
+            injector.write(b"cc");
             assert!(!injector.is_pending());
         }
 

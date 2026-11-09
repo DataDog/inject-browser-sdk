@@ -1,0 +1,64 @@
+name: fuzz
+
+# A short nightly run of every fuzz target, seeded with the corpus tests' fixtures and regressions,
+# which the job generates. A crash uploads the input that reproduces it: once fixed, reduce it to
+# the construct at fault and add it to `regressions()` in lib/inject-browser-sdk/tests/harness/fixtures.rs.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - "lib/inject-browser-sdk/src/injector/**"
+      - "lib/inject-browser-sdk/src/injector.rs"
+      - "lib/inject-browser-sdk/tests/harness/**"
+      - "lib/inject-browser-sdk/tests/injection.rs"
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    container:
+      image: rustlang/rust:nightly
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz-html-scanner
+          - chunking_invariance
+          - oracle_differential
+          - injector_c_api
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # rust-toolchain.toml pins a stable toolchain for the build, while fuzzing needs nightly.
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
+      - name: Generate the seeds
+        run: FUZZ_SEEDS_DIR=$PWD/seeds cargo +nightly test -p inject-browser-sdk --test injection write_fuzz_seeds
+      - name: Fuzz
+        # The release profile's LTO drops the sanitizer coverage symbols at link time
+        # (`undefined symbol: __sancov_gen_`), so the fuzz build goes without it.
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+          CARGO_PROFILE_RELEASE_STRIP: "false"
+        # Documents up to 12 KiB, past the 10 KiB the walk of a head made of `<meta>` tags reaches.
+        run: |
+          mkdir -p corpus artifacts
+          cargo +nightly fuzz run ${{ matrix.target }} corpus seeds -- \
+            -dict=fuzz/dictionaries/html.dict -max_len=12288 -max_total_time=60 \
+            -artifact_prefix=artifacts/
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: artifacts/

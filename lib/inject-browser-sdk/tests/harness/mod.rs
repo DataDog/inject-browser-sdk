@@ -1,0 +1,11 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache 2.0 License. This product includes software developed at
+// Datadog (https://www.datadoghq.com/).
+//
+// Copyright 2024-Present Datadog, Inc.
+
+//! Shared by the corpus tests and the fuzz targets, which include these files by path.
+
+pub mod fixtures;
+pub mod input;
+pub mod oracle;

@@ -60,8 +60,10 @@ so reading the first KiB costs nothing more, and encryption dominates the reques
 | 100k | +2% | +0% | +3% | −4% |
 | 1m | +0% | −1% | +0% | −1% |
 
-httpd `scan` is cheaper than httpd without the module: its `pread` replaces the per-response
-mapping mod_ssl reads through.
+httpd `scan` looks cheaper than httpd without the module only because of httpd's default
+`EnableMMAP On`: mod_ssl reads every file it encrypts through a fresh mapping, which `scan`'s
+`pread` skips. Against `EnableMMAP Off` (`verify/tls-mmapoff.jsonl`), which makes httpd 18–20%
+cheaper on its own, `scan` costs +4% at 2k, +6% at 16k and +2% at 100k, like nginx.
 
 ## 4. What a memory piece in front of the sendfile costs (`align.jsonl`, syscalls)
 
@@ -85,8 +87,18 @@ Sending the prefix by sendfile instead costs a second sendfile around the snippe
 
 ## Where it stands
 
-* Within budget, or close: every page under TLS from 16 KiB up; plaintext pages up to 4 KiB.
+* Within budget, or close: pages under TLS from about 100 KiB up (+4–6% below that); plaintext
+  pages up to 4 KiB.
 * Over budget: plaintext static pages past 8 KiB, sent by sendfile, at +12–17% on nginx and +8–9%
   on httpd. Reading the first KiB costs +4–6% of that and is unavoidable without knowing the file
   already (a decision cache keyed by inode, mtime and size, which the plan rules out); the rest is
   the bytes sent from memory rather than by sendfile, see section 4.
+
+## Verification on a second host (`verify/`)
+
+A fresh c7a.8xlarge, two code layouts per figure, same pinning. Plaintext reproduces within a
+point: nginx `scan` +0% (2k), +6% (4k), +14% (8k), +15–16% (16–32k), +12% (100k), +4% (1m);
+httpd `scan` +1%, +2%, +5%, +9%, +9%, +8%, +4%, `on` +37–39%. Under TLS, nginx came out a point
+or two higher than the first run (2k +6%, 16k +4%, 100k +1%, 1m +1%), and httpd's 16k figure
+against `EnableMMAP On` (−28% first, −15% here) does not reproduce; the comparison against
+`EnableMMAP Off` above is the one that counts.

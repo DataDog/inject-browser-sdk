@@ -385,7 +385,11 @@ fn head_open_point(observed: &Observed) -> Option<usize> {
     let mut gap_start = head.end;
     for child in &observed.head_children {
         let location = &child.location;
-        if location.start < head.end || location.start >= head_end {
+        // A template's content is inert, children of a `<head>` within one included.
+        if location.start < head.end
+            || location.start >= head_end
+            || in_template(observed, location.start)
+        {
             continue;
         }
         let name = child.name.as_str();
@@ -395,6 +399,14 @@ fn head_open_point(observed: &Observed) -> Option<usize> {
             continue;
         }
         if !ALLOWED_IN_HEAD.contains(&name) {
+            break;
+        }
+        // Text closes the head.
+        if observed.data_text.iter().any(|text| {
+            return gap_start <= text.start
+                && text.start < location.start
+                && !in_template(observed, text.start);
+        }) {
             break;
         }
         let in_run = name == "meta" || name == "title";
@@ -489,6 +501,10 @@ pub enum Exception {
     /// insertion mode closes the head. lol_html only pops elements its stack holds, and keeps the
     /// head open when it holds none of those.
     EndTagClosingHead,
+    /// A `<head>` or `<html>` start tag within the head, which the browser ignores or merges into the
+    /// root element, the injector walking on: lol_html takes what follows for the content of that
+    /// element, out of the head.
+    IgnoredStartTag,
     /// [`InjectionStrategy::HeadCloseTag`] injects before a `</head>` tag closing a head whose start
     /// tag the document omits, which HTML allows, or stops at it when no HTML evidence precedes it:
     /// lol_html, without a tree builder, sees no head to close before it, and pairs a later
@@ -527,6 +543,13 @@ pub fn exception(
         }
     }
     match (ours, oracle) {
+        (Some(ours), Some(oracle))
+            if [b"<html".as_slice(), b"<head"]
+                .iter()
+                .any(|tag| return contains(&lower[ours.min(oracle)..ours.max(oracle)], tag)) =>
+        {
+            return Some(Exception::IgnoredStartTag);
+        }
         (Some(ours), Some(oracle)) if ours < oracle => {
             if contains(&lower[ours..oracle], b"<![cdata[") {
                 return Some(Exception::CdataSection);
@@ -585,7 +608,7 @@ fn head_close_exception(
     match (ours, oracle) {
         // lol_html closed a template still open at this `</head>`, along with the head: the
         // browser, and the injector, ignore an end tag within a template.
-        (None, Some(end))
+        (_, Some(end))
             if observed
                 .templates
                 .iter()

@@ -37,8 +37,8 @@ struct InjectionPoint {
 // chunks before, minus the withheld suffix; one chunk per slice of `result`; the chunks after,
 // untouched. A slice that points into the chunk at `injected_at` is referenced where it is.
 // Anything else lives in the injector, which reuses that memory on its next call, so it is copied
-// into request memory: at most the head window the strategy holds back, a partial tag, and the
-// snippet. Nothing past the injection point is copied, whatever the size of the response.
+// into request memory: at most the head window the injector holds back, and the snippet. Nothing
+// past the injection point is copied, whatever the size of the response.
 //
 // The body goes through IIS's own API: the chunk descriptors are copied out, the body emptied, and
 // each chunk written back by reference. IIS keeps managing its chunk array, so a write after this
@@ -231,10 +231,10 @@ struct Injection {
 // are: they already carry every byte in order, which is how they serve a response the snippet never
 // goes into. Returns nullopt then.
 //
-// While it looks for the injection point, the injector holds data back: a partially matched
-// `</head>`, or for the head-open strategies up to the first kilobyte, which has to be scanned for
-// an encoding declaration before anything can go ahead of it. Past that it streams. What it holds
-// back is always the end of what it was given, and it reports how much
+// While it looks for the injection point, the injector holds back the first kilobyte, which decides
+// where in `<head>` the snippet goes, and up to 10 KiB when the head is a run of `<meta>` and
+// `<title>` tags that goes on past it. Past that it streams. What it holds back is always
+// the end of what it was given, and it reports how much
 // (`injector_held_back_length`), read before each call: that is what the result that injects brings
 // back out, and what is trimmed off the queued chunks in its place.
 //
@@ -553,8 +553,7 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  const InjectorPtr injector(injector_create_with_strategy(ctx.snippet, ctx.injection_strategy),
-                             injector_cleanup);
+  const InjectorPtr injector(injector_create(ctx.snippet), injector_cleanup);
   if (!injector) {
     logger.error("Error creating injector");
     return RQ_NOTIFICATION_CONTINUE;

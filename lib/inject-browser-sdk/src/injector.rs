@@ -9,56 +9,41 @@ use alloc::vec::Vec;
 use core::mem;
 
 mod encoding;
-mod head_close_tag;
+mod head_open_tag;
 mod parser;
 
-use head_close_tag::{HeadCloseTagLocator, Location};
-use parser::InjectionPointLocator;
+use head_open_tag::{HeadOpenTag, HeadOpenTagLocator};
+use parser::Placement;
 
 /// Window at the start of the document within which a character encoding declaration is honoured by
 /// browsers, as per the HTML spec
 /// (<https://html.spec.whatwg.org/multipage/semantics.html#the-meta-element>).
 ///
 /// Injecting before a `<meta charset>` could push it out of this window and change how the document
-/// is decoded, so the earliest valid point is looked for within these bytes and no further.
+/// is decoded, so the head is walked within these bytes, and past them only as long as it is a run
+/// of `<meta>` and `<title>` tags, see [`WALK_LIMIT`]. They are also the bytes that tell whether the
+/// document is HTML at all, and the ones a `<head>` tag has to start within to be walked from.
 const DOCUMENT_CHARSET_SCAN_LIMIT: usize = 1024;
 
-/// Where the snippet should be injected within the HTML document.
-///
-/// The earlier the snippet runs, the more of the page lifecycle RUM observes, but injecting early
-/// means proving that no character encoding declaration follows, which takes buffering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum InjectionStrategy {
-    /// Inject right before the `</head>` tag, the default and what [`Injector::new`] selects.
-    ///
-    /// Holds back no more than a partially matched tag, at the cost of the snippet running as late
-    /// as possible within the head.
-    #[default]
-    HeadCloseTag,
-
-    /// Inject at the earliest valid position within the `<head>` tag, and not at all if there is
-    /// none within the first DOCUMENT_CHARSET_SCAN_LIMIT bytes.
-    ///
-    /// Holds that many bytes back, delaying the start of the response body by as much.
-    HeadOpenTag,
-
-    /// Like [`InjectionStrategy::HeadOpenTag`], but falls back to
-    /// [`InjectionStrategy::HeadCloseTag`] rather than giving up, which instruments documents whose
-    /// head does not start within the window. Same buffering cost.
-    HeadOpenTagWithCloseTagFallback,
-}
+/// How far into the document the walk of the head may go, when it is still a run of `<meta>` and
+/// `<title>` tags past [`DOCUMENT_CHARSET_SCAN_LIMIT`]: an `X-UA-Compatible` declaration is honoured
+/// anywhere within such a run. Past this limit the snippet goes at the best point found so far, so
+/// that no more than this is ever held back.
+const WALK_LIMIT: usize = 10 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 enum InjectorState {
-    /// Holding back the first DOCUMENT_CHARSET_SCAN_LIMIT bytes, looking for the earliest valid
-    /// injection point within the `<head>` tag.
+    /// Holding back the first bytes of the document, which decide where the snippet goes: the first
+    /// DOCUMENT_CHARSET_SCAN_LIMIT, and more, up to WALK_LIMIT, while the head they hold is a run of
+    /// `<meta>` and `<title>` tags that has not ended.
     BufferingHeadWindow,
 
-    /// Stream-scanning for the `</head>` tag.
-    ScanningForHeadCloseTag,
+    /// The window holds no `<head>` start tag but looks like an HTML document: stream-scanning for
+    /// the `<head>` tag, to inject right after it.
+    ScanningForHeadOpenTag,
 
-    /// Nothing left to look for, either because the snippet was injected or because no injection
-    /// point will be found. Chunks are passed through untouched.
+    /// Nothing left to look for, either because the snippet was injected or because it never will
+    /// be. Chunks are passed through untouched.
     PassingThrough,
 
     /// [`Injector::end`] has been called, there is nothing left to emit.
@@ -67,27 +52,43 @@ enum InjectorState {
 
 /// The data [`Injector::scan_head_window`] works on: the head window itself, and whatever of the
 /// incoming chunk follows it.
+#[derive(Clone, Copy)]
 enum HeadWindow<'a> {
     /// The window was accumulated in `incomplete_data` over several writes. `tail` is the part of
     /// the incoming chunk that completed it, minus the bytes that went into the window. It is empty
     /// at EOF, and when the window was completed exactly.
     Buffered { tail: &'a [u8] },
 
-    /// A single incoming chunk covered the whole window, so it is scanned in place: `window` is its
-    /// first DOCUMENT_CHARSET_SCAN_LIMIT bytes, and `tail` everything after them.
-    InPlace { window: &'a [u8], tail: &'a [u8] },
+    /// Nothing was held back, and the incoming chunk covers the whole window, so it is scanned in
+    /// place.
+    InPlace { chunk: &'a [u8] },
 }
 
 /// Stateful object used to inject the provided snippet within a streamed HTML document.
 ///
-/// See [`InjectionStrategy`] for where the snippet is injected. [`Injector::new`] keeps the
-/// historical `</head>` behaviour; use [`Injector::with_strategy`] to opt into injecting earlier.
+/// The snippet only ever goes within the `<head>` of the document:
+/// * if the `<head>` start tag is within the first DOCUMENT_CHARSET_SCAN_LIMIT bytes, right after
+///   it, unless the head holds `<meta>` tags declaring the character encoding or
+///   `X-UA-Compatible`: then right after the last of them. Other `<meta>` tags, SEO, viewport or
+///   the tracer's, do not hold the snippet back (see [`parser::find_injection_point`] for the
+///   details);
+/// * otherwise, if those bytes look like an HTML document, as they hold an `<html>` or a `<meta>`
+///   start tag, right after the first `<head>` start tag that follows;
+/// * otherwise not at all: the document passes through untouched, padded as [`Injector::end`]
+///   describes. This keeps the snippet out of fragments, JSON, plain text and any other content
+///   served as `text/html`, and out of documents that have no `<head>` tag.
+///
+/// Either way, a `<head>` tag only counts before any start tag but `<html>` and the ones the head
+/// may hold: past a `<body>`, a `<div>` or any other body content, the browser ignores one, and the
+/// search for it ends there rather than read the rest of the document.
+///
+/// The first DOCUMENT_CHARSET_SCAN_LIMIT bytes are held back until they are complete, which delays
+/// the start of the response body by as much. When they end within a head that is still a run of
+/// `<meta>` and `<title>` tags, more is held back, up to WALK_LIMIT bytes, until the run ends. Once
+/// the snippet is placed, or the window holds no `<head>` tag, nothing is held back.
 pub struct Injector<'snippet> {
     /// Snippet to inject.
     snippet: &'snippet [u8],
-
-    /// Where to inject the snippet.
-    strategy: InjectionStrategy,
 
     /// Tracks the current state of the injection process.
     injector_state: InjectorState,
@@ -95,21 +96,24 @@ pub struct Injector<'snippet> {
     /// Whether the snippet has been emitted. Sticky: once injected, we never inject again.
     injected: bool,
 
-    /// Locator for the `</head>` tag, see [`InjectorState::ScanningForHeadCloseTag`].
-    head_close_locator: HeadCloseTagLocator,
+    /// Locator for the `<head>` start tag, over the head window and then the rest of the document.
+    head_locator: HeadOpenTagLocator,
 
-    /// Data that cannot be emitted yet: the head window as it accumulates, or a partially matched
-    /// `</head>` that more data may turn into an injection point.
+    /// Index just past the `<head>` tag the head window holds, once it has been found there: the
+    /// walk of the head starts from it. Set while the walk needs more data than the window.
+    head_end: Option<usize>,
+
+    /// How many bytes to hold back before walking the head again: DOCUMENT_CHARSET_SCAN_LIMIT at
+    /// first, then twice what the last walk was given, up to WALK_LIMIT, so that walking again and
+    /// again over a growing window stays linear in its size.
+    hold_target: usize,
+
+    /// The head window as it accumulates, bounded by `hold_target`: a chunk only ever contributes the
+    /// bytes that complete it, unless the walk asks for more of them.
     ///
-    /// Bounded by DOCUMENT_CHARSET_SCAN_LIMIT either way. A chunk only ever contributes the bytes
-    /// that complete the window, and the `</head>` locator abandons a match spanning more than
-    /// MAX_PENDING_CLOSE_TAG bytes, which is the same figure.
-    ///
-    /// Two buffers, because a single call may have to emit previously held data *and* hold part of
-    /// the incoming chunk back. By convention only `incomplete_data` is written to, and it is moved
-    /// into `incomplete_data_public_ref` when it goes out, so nothing is emitted twice: writing
-    /// `foo</he` then `ader>bar</` emits `foo`, then `</he` and `ader>bar` once `</he` turns out not
-    /// to be a tag, while `</` goes back into the buffer.
+    /// It moves into `incomplete_data_public_ref` when the window is complete, so that the slices
+    /// returned can point into it while `incomplete_data` is left empty: nothing is held back past
+    /// the window.
     incomplete_data: Vec<u8>,
     incomplete_data_public_ref: Vec<u8>,
 
@@ -120,9 +124,18 @@ pub struct Injector<'snippet> {
 }
 
 impl<'snippet> Injector<'snippet> {
-    /// Creates an injector using the default [`InjectionStrategy`].
     pub fn new(snippet: &'snippet [u8]) -> Self {
-        return Self::with_strategy(snippet, InjectionStrategy::default());
+        return Self {
+            snippet,
+            injector_state: InjectorState::BufferingHeadWindow,
+            injected: false,
+            head_locator: HeadOpenTagLocator::new(),
+            head_end: None,
+            hold_target: DOCUMENT_CHARSET_SCAN_LIMIT,
+            incomplete_data: Vec::new(),
+            incomplete_data_public_ref: Vec::new(),
+            padding_spaces: Vec::new(),
+        };
     }
 
     /// How many bytes of the input written so far are held back: not returned in any result yet.
@@ -134,27 +147,6 @@ impl<'snippet> Injector<'snippet> {
     /// place: see the `chunk_rebuild` tests.
     pub fn held_back(&self) -> usize {
         return self.incomplete_data.len();
-    }
-
-    /// Creates an injector using the given [`InjectionStrategy`].
-    pub fn with_strategy(snippet: &'snippet [u8], strategy: InjectionStrategy) -> Self {
-        return Self {
-            snippet,
-            strategy,
-            injector_state: match strategy {
-                // No head window to buffer: start scanning for `</head>` right away.
-                InjectionStrategy::HeadCloseTag => InjectorState::ScanningForHeadCloseTag,
-                InjectionStrategy::HeadOpenTag
-                | InjectionStrategy::HeadOpenTagWithCloseTagFallback => {
-                    InjectorState::BufferingHeadWindow
-                }
-            },
-            injected: false,
-            head_close_locator: HeadCloseTagLocator::new(),
-            incomplete_data: Vec::new(),
-            incomplete_data_public_ref: Vec::new(),
-            padding_spaces: Vec::new(),
-        };
     }
 
     /// The length a response that announced `content_length`, the value of its `Content-Length`
@@ -184,10 +176,10 @@ impl<'snippet> Injector<'snippet> {
     pub fn write<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
         match self.injector_state {
             InjectorState::BufferingHeadWindow => {
-                // This state is left as soon as the window is complete, so it is always short of at
-                // least one byte here.
-                debug_assert!(self.incomplete_data.len() < DOCUMENT_CHARSET_SCAN_LIMIT);
-                let missing = DOCUMENT_CHARSET_SCAN_LIMIT - self.incomplete_data.len();
+                // This state is left or the target raised as soon as the window reaches it, so it is
+                // always short of at least one byte here.
+                debug_assert!(self.incomplete_data.len() < self.hold_target);
+                let missing = self.hold_target - self.incomplete_data.len();
 
                 if chunk.len() < missing {
                     // Still not enough data to tell where the injection point is.
@@ -198,8 +190,7 @@ impl<'snippet> Injector<'snippet> {
                 if self.incomplete_data.is_empty() {
                     // The chunk already covers the whole window: scan it in place rather than copy
                     // it into the buffer first.
-                    let (window, tail) = chunk.split_at(DOCUMENT_CHARSET_SCAN_LIMIT);
-                    return self.scan_head_window(HeadWindow::InPlace { window, tail }, false);
+                    return self.scan_head_window(HeadWindow::InPlace { chunk }, false);
                 }
 
                 // Buffer only what completes the window; the rest is emitted by this very call, so
@@ -209,7 +200,7 @@ impl<'snippet> Injector<'snippet> {
                 return self.scan_head_window(HeadWindow::Buffered { tail }, false);
             }
 
-            InjectorState::ScanningForHeadCloseTag => return self.scan_head_close_tag(chunk),
+            InjectorState::ScanningForHeadOpenTag => return self.scan_head_open_tag(chunk),
 
             InjectorState::PassingThrough | InjectorState::Ended => {
                 return self.create_result(&[BytesSlice::new(chunk, true)]);
@@ -241,13 +232,9 @@ impl<'snippet> Injector<'snippet> {
                 return self.scan_head_window(HeadWindow::Buffered { tail: b"" }, true);
             }
 
-            InjectorState::ScanningForHeadCloseTag | InjectorState::PassingThrough => {
+            InjectorState::ScanningForHeadOpenTag | InjectorState::PassingThrough => {
                 self.injector_state = InjectorState::Ended;
-                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                return self.create_result(&[
-                    BytesSlice::new(&self.incomplete_data_public_ref, false),
-                    BytesSlice::new(&self.padding_spaces, false),
-                ]);
+                return self.create_result(&[BytesSlice::new(&self.padding_spaces, false)]);
             }
 
             // Already ended: everything has been emitted and padded for, so emit nothing rather
@@ -256,110 +243,119 @@ impl<'snippet> Injector<'snippet> {
         }
     }
 
-    /// Looks for the earliest valid injection point within the head window, falling back to the
-    /// `</head>` tag over the very same data when there is none.
+    /// Decides where the snippet goes from the head window, and scans whatever of the chunk follows
+    /// it for the `<head>` tag when the window holds none.
     ///
     /// The data following the window within the chunk is emitted by this call rather than buffered,
-    /// so completing the window never requires holding more than the window itself.
-    fn scan_head_window<'a>(&'a mut self, input: HeadWindow<'a>, eof: bool) -> Result<'a> {
-        let (window, tail, from_incoming_chunk) = match input {
-            HeadWindow::InPlace { window, tail } => (window, tail, true),
-            HeadWindow::Buffered { tail } => {
-                // Hand the held data out through `incomplete_data_public_ref`, so the `</head>`
-                // pass can start refilling `incomplete_data`.
-                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                (&self.incomplete_data_public_ref[..], tail, false)
+    /// so completing the window never requires holding more than the window itself, short of a walk
+    /// of the head that needs more of it.
+    fn scan_head_window<'a>(&'a mut self, mut input: HeadWindow<'a>, eof: bool) -> Result<'a> {
+        let head_end = match self.head_end {
+            Some(head_end) => head_end,
+            None => {
+                let held = match input {
+                    HeadWindow::InPlace { chunk } => chunk,
+                    HeadWindow::Buffered { .. } => &self.incomplete_data[..],
+                };
+                let window = &held[..held.len().min(DOCUMENT_CHARSET_SCAN_LIMIT)];
+                match self.head_locator.scan(window) {
+                    Some(head) => *self.head_end.insert(head.end),
+                    None => return self.scan_past_head_window(input, eof),
+                }
             }
         };
 
-        if let Some(point) = InjectionPointLocator::find(window) {
+        let placement = loop {
+            let held = match input {
+                HeadWindow::InPlace { chunk } => chunk,
+                HeadWindow::Buffered { .. } => &self.incomplete_data[..],
+            };
+            let placement = parser::find_injection_point(held, head_end, eof);
+            if placement != Placement::NeedMore {
+                break placement;
+            }
+            match input {
+                // Hold it all back: the walk is short of data, so the chunk is shorter than the
+                // limit.
+                HeadWindow::InPlace { chunk } => self.incomplete_data.extend_from_slice(chunk),
+                // Walk the rest of the chunk as well, as much of it as the limit lets.
+                HeadWindow::Buffered { tail } if !tail.is_empty() => {
+                    let taken = tail.len().min(WALK_LIMIT - self.incomplete_data.len());
+                    self.incomplete_data.extend_from_slice(&tail[..taken]);
+                    input = HeadWindow::Buffered {
+                        tail: &tail[taken..],
+                    };
+                    continue;
+                }
+                HeadWindow::Buffered { .. } => {}
+            }
+            debug_assert!(self.incomplete_data.len() < WALK_LIMIT);
+            self.hold_target = (2 * self.incomplete_data.len()).min(WALK_LIMIT);
+            return self.create_result(&[]);
+        };
+
+        let (held, tail, from_incoming_chunk) = {
+            if let HeadWindow::Buffered { .. } = input {
+                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
+            }
+            take_head_window(&self.incomplete_data_public_ref, input)
+        };
+        self.injector_state = match eof {
+            true => InjectorState::Ended,
+            false => InjectorState::PassingThrough,
+        };
+        if let Placement::At(point) = placement {
             self.injected = true;
-            self.injector_state = InjectorState::PassingThrough;
             return self.create_result(&[
-                BytesSlice::new(&window[..point], from_incoming_chunk),
+                BytesSlice::new(&held[..point], from_incoming_chunk),
                 BytesSlice::new(self.snippet, false),
-                BytesSlice::new(&window[point..], from_incoming_chunk),
+                BytesSlice::new(&held[point..], from_incoming_chunk),
                 BytesSlice::new(tail, true),
             ]);
         }
+        return self.create_result(&[
+            BytesSlice::new(held, from_incoming_chunk),
+            BytesSlice::new(tail, true),
+            BytesSlice::new(&self.padding_spaces, false),
+        ]);
+    }
 
-        if self.strategy == InjectionStrategy::HeadOpenTagWithCloseTagFallback {
-            self.injector_state = InjectorState::ScanningForHeadCloseTag;
+    /// The head window holds no `<head>` tag: scans whatever of the chunk follows it for one, when
+    /// the window looks like an HTML document.
+    fn scan_past_head_window<'a>(&'a mut self, input: HeadWindow<'a>, eof: bool) -> Result<'a> {
+        let (held, tail, from_incoming_chunk) = {
+            if let HeadWindow::Buffered { .. } = input {
+                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
+            }
+            take_head_window(&self.incomplete_data_public_ref, input)
+        };
+        // Before the walk asks for more, the window is all that is held back.
+        let (window, tail) = match from_incoming_chunk {
+            true => held.split_at(held.len().min(DOCUMENT_CHARSET_SCAN_LIMIT)),
+            false => (held, tail),
+        };
+        self.injector_state = InjectorState::PassingThrough;
 
+        if self.may_find_injection_point() {
+            // Without HTML evidence in the window, only a `<head>` tag starting within it could be
+            // injected after: the tail is not scanned when none can, a body that is not HTML
+            // would otherwise be read to the end of the chunk for nothing.
+            //
             // The locator is sequential, so scanning the window then the tail is the same as
             // scanning their concatenation; they are split only because they are emitted separately.
-            // `window_location` cannot be a `*FromPreviousChunk` variant, being the first data the
-            // locator sees.
-            let window_location = self.head_close_locator.scan(window);
-            if let Location::MatchFromIndex(index) = window_location {
-                self.injected = true;
-                self.injector_state = InjectorState::PassingThrough;
-                return self.create_result(&[
-                    BytesSlice::new(&window[..index], from_incoming_chunk),
-                    BytesSlice::new(self.snippet, false),
-                    BytesSlice::new(&window[index..], from_incoming_chunk),
-                    BytesSlice::new(tail, true),
-                ]);
-            }
-
-            match self.head_close_locator.scan(tail) {
-                // A `</head>` that starts and ends within the tail. Any partial match left by the
-                // window was invalidated along the way, so the window is emitted whole.
-                Location::MatchFromIndex(index) => {
+            if let Some(head) = self.head_locator.scan(tail) {
+                if self.may_inject_after(head) {
                     self.injected = true;
-                    self.injector_state = InjectorState::PassingThrough;
                     return self.create_result(&[
                         BytesSlice::new(window, from_incoming_chunk),
-                        BytesSlice::new(&tail[..index], true),
+                        BytesSlice::new(&tail[..head.end], true),
                         BytesSlice::new(self.snippet, false),
-                        BytesSlice::new(&tail[index..], true),
+                        BytesSlice::new(&tail[head.end..], true),
                     ]);
                 }
-
-                // The partial match left by the window turned out to be a real `</head>`.
-                Location::MatchFromPreviousChunk => {
-                    let Location::PotentialFromIndex(index) = window_location else {
-                        unreachable!("a match from previous data implies a pending partial match")
-                    };
-                    self.injected = true;
-                    self.injector_state = InjectorState::PassingThrough;
-                    return self.create_result(&[
-                        BytesSlice::new(&window[..index], from_incoming_chunk),
-                        BytesSlice::new(self.snippet, false),
-                        BytesSlice::new(&window[index..], from_incoming_chunk),
-                        BytesSlice::new(tail, true),
-                    ]);
-                }
-
-                // A partial `</head>` at the very end of the data: hold it back, unless the
-                // document ends here and it was never a tag. The locator caps a pending match at
-                // MAX_PENDING_CLOSE_TAG bytes, so buffering stays bounded.
-                Location::PotentialFromIndex(index) if !eof => {
-                    self.incomplete_data.extend_from_slice(&tail[index..]);
-                    return self.create_result(&[
-                        BytesSlice::new(window, from_incoming_chunk),
-                        BytesSlice::new(&tail[..index], true),
-                    ]);
-                }
-
-                // Same, for a partial match that started within the window and runs to the end of
-                // the tail.
-                Location::PotentialFromPreviousChunk if !eof => {
-                    let Location::PotentialFromIndex(index) = window_location else {
-                        unreachable!("a partial match from previous data implies a pending one")
-                    };
-                    self.incomplete_data.extend_from_slice(&window[index..]);
-                    self.incomplete_data.extend_from_slice(tail);
-                    return self
-                        .create_result(&[BytesSlice::new(&window[..index], from_incoming_chunk)]);
-                }
-
-                // `Location::None`, or an `eof` partial match.
-                _ => {}
+            } else if !eof && self.may_find_injection_point() {
+                self.injector_state = InjectorState::ScanningForHeadOpenTag;
             }
-        } else {
-            // No fallback: there is nothing left to look for.
-            self.injector_state = InjectorState::PassingThrough;
         }
 
         if eof {
@@ -377,54 +373,54 @@ impl<'snippet> Injector<'snippet> {
         ]);
     }
 
-    /// Second pass: stream-scan for the `</head>` tag, holding back only partially matched tags.
-    fn scan_head_close_tag<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
-        match self.head_close_locator.scan(chunk) {
-            Location::None => {
-                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                return self.create_result(&[
-                    BytesSlice::new(&self.incomplete_data_public_ref, false),
-                    BytesSlice::new(chunk, true),
-                ]);
-            }
-
-            Location::PotentialFromPreviousChunk => {
-                self.incomplete_data.extend_from_slice(chunk);
-                return self.create_result(&[]);
-            }
-
-            Location::PotentialFromIndex(index) => {
-                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                self.incomplete_data.extend_from_slice(&chunk[index..]);
-                return self.create_result(&[
-                    BytesSlice::new(&self.incomplete_data_public_ref, false),
-                    BytesSlice::new(&chunk[..index], true),
-                ]);
-            }
-
-            Location::MatchFromPreviousChunk => {
-                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                self.injected = true;
+    /// Past the head window: stream-scan for the `<head>` tag. The snippet goes after it, so nothing
+    /// has to be held back.
+    fn scan_head_open_tag<'a>(&'a mut self, chunk: &'a [u8]) -> Result<'a> {
+        match self.head_locator.scan(chunk) {
+            Some(head) => {
                 self.injector_state = InjectorState::PassingThrough;
-                return self.create_result(&[
-                    BytesSlice::new(self.snippet, false),
-                    BytesSlice::new(&self.incomplete_data_public_ref, false),
-                    BytesSlice::new(chunk, true),
-                ]);
+                if self.may_inject_after(head) {
+                    self.injected = true;
+                    return self.create_result(&[
+                        BytesSlice::new(&chunk[..head.end], true),
+                        BytesSlice::new(self.snippet, false),
+                        BytesSlice::new(&chunk[head.end..], true),
+                    ]);
+                }
             }
-
-            Location::MatchFromIndex(index) => {
-                self.incomplete_data_public_ref = mem::take(&mut self.incomplete_data);
-                self.injected = true;
+            None if !self.may_find_injection_point() => {
                 self.injector_state = InjectorState::PassingThrough;
-                return self.create_result(&[
-                    BytesSlice::new(&self.incomplete_data_public_ref, false),
-                    BytesSlice::new(&chunk[..index], true),
-                    BytesSlice::new(self.snippet, false),
-                    BytesSlice::new(&chunk[index..], true),
-                ]);
             }
+            None => {}
         }
+        return self.create_result(&[BytesSlice::new(chunk, true)]);
+    }
+
+    /// Whether the snippet may go after `head`, a `<head>` tag found past the head window or ending
+    /// past it: only if the tag starts within the window, or if the window looks like an HTML
+    /// document.
+    fn may_inject_after(&self, head: HeadOpenTag) -> bool {
+        return head.start < DOCUMENT_CHARSET_SCAN_LIMIT || self.window_holds_html_evidence();
+    }
+
+    /// Whether a `<head>` tag found in what follows may still be injected after, see
+    /// [`Injector::may_inject_after`]. Once it may not, scanning the rest of the document is pointless.
+    fn may_find_injection_point(&self) -> bool {
+        if !self.head_locator.is_searching() {
+            return false;
+        }
+        return self.window_holds_html_evidence()
+            || self
+                .head_locator
+                .pending_tag_start()
+                .is_some_and(|start| return start < DOCUMENT_CHARSET_SCAN_LIMIT);
+    }
+
+    fn window_holds_html_evidence(&self) -> bool {
+        return self
+            .head_locator
+            .html_evidence()
+            .is_some_and(|start| return start < DOCUMENT_CHARSET_SCAN_LIMIT);
     }
 
     fn create_result<'a>(&'a self, slices: &[BytesSlice<'a>]) -> Result<'a> {
@@ -448,6 +444,15 @@ impl<'snippet> Injector<'snippet> {
             injected: self.injected,
         };
     }
+}
+
+/// The head window, once decided on, with what of the incoming chunk follows it and whether it is
+/// part of that chunk, given `public_ref`, what `incomplete_data` held: nothing is held back anymore.
+fn take_head_window<'a>(public_ref: &'a [u8], input: HeadWindow<'a>) -> (&'a [u8], &'a [u8], bool) {
+    return match input {
+        HeadWindow::InPlace { chunk } => (chunk, b"", true),
+        HeadWindow::Buffered { tail } => (public_ref, tail, false),
+    };
 }
 
 #[derive(Default, Copy, Clone)]
@@ -490,187 +495,106 @@ mod tests {
 
     use super::*;
 
-    /// The default strategy, and the behaviour every existing consumer of [`Injector::new`] gets.
-    /// These cases are the historical `</head>` test suite and must keep passing unchanged.
-    mod head_close_tag {
-        use super::*;
-
-        fn test_injector<T: AsRef<[u8]> + core::fmt::Debug>(
-            input_chunks: impl IntoIterator<Item = T>,
-            expected: &str,
-        ) {
-            // Goes through `Injector::new`, not `with_strategy`, so this also pins the default.
-            return test_injector_with_default_strategy(input_chunks, expected);
+    /// Generates documents from `parts` and checks the snippet lands right after the first part
+    /// holding a `<head>` tag, if `injects` lets it in at all, whatever the chunking.
+    fn fuzz_head_open_tag(prefix: &str, injects: bool) {
+        struct Part {
+            string: &'static str,
+            has_head: bool,
+            /// A start tag the head cannot follow, which ends the search for one.
+            ends_search: bool,
         }
 
-        #[test]
-        fn basic() {
-            test_injector(["abc</head>def"], "abc{{SNIPPET}}</head>def");
-            test_injector(["abc</he", "ad>def"], "abc{{SNIPPET}}</head>def");
-            test_injector(["abc", "</head>def"], "abc{{SNIPPET}}</head>def");
-            test_injector(["abc</head>", "def"], "abc{{SNIPPET}}</head>def");
-            test_injector(["abc</h", "ea", "d>def"], "abc{{SNIPPET}}</head>def");
-            test_injector(["abc", "</hea", "d>def"], "abc{{SNIPPET}}</head>def");
-        }
-
-        #[test]
-        fn no_head() {
-            test_injector(["abc"], "abc           ");
-            test_injector(["abc</hea"], "abc</hea           ");
-        }
-
-        #[test]
-        fn empty() {
-            test_injector::<&str>([], "           ");
-            test_injector([""], "           ");
-            test_injector(["", ""], "           ");
-        }
-
-        #[test]
-        fn multiple_head() {
-            test_injector(
-                ["abc</head>def</head>ghi"],
-                "abc{{SNIPPET}}</head>def</head>ghi",
-            );
-            test_injector(
-                ["abc</head>def</h", "ead>ghi"],
-                "abc{{SNIPPET}}</head>def</head>ghi",
-            );
-            test_injector(
-                ["abc</head>d", "ef</head>ghi"],
-                "abc{{SNIPPET}}</head>def</head>ghi",
-            );
-        }
-
-        #[test]
-        fn incomplete_head() {
-            test_injector(["abc</he</head>def"], "abc</he{{SNIPPET}}</head>def");
-            test_injector(["abc</he", "</head>def"], "abc</he{{SNIPPET}}</head>def");
-            test_injector(
-                ["abc</he", "</", "head>def"],
-                "abc</he{{SNIPPET}}</head>def",
-            );
-        }
-
-        #[test]
-        fn casing() {
-            test_injector(["abc</HeAd>def"], "abc{{SNIPPET}}</HeAd>def");
-            test_injector(["abc</HEAD>def"], "abc{{SNIPPET}}</HEAD>def");
-        }
-
-        #[test]
-        fn spaces() {
-            test_injector(["abc </head>def"], "abc {{SNIPPET}}</head>def");
-            test_injector(["abc< /head>def"], "abc< /head>def           ");
-            // `</` followed by anything but a letter is a bogus comment, not an end tag.
-            test_injector(["abc</ head>def"], "abc</ head>def           ");
-            test_injector(["abc</h ead>def"], "abc</h ead>def           ");
-            test_injector(["abc</he ad>def"], "abc</he ad>def           ");
-            test_injector(["abc</hea d>def"], "abc</hea d>def           ");
-            test_injector(["abc</head >def"], "abc{{SNIPPET}}</head >def");
-            test_injector(["abc</head> def"], "abc{{SNIPPET}}</head> def");
-        }
-
-        /// The open `<head>` tag is never an injection point for this strategy, however early it is.
-        #[test]
-        fn ignores_head_open_tag() {
-            test_injector(["<head>abc"], "<head>abc           ");
-            test_injector(
-                ["<head><meta charset='utf-8'>abc</head>def"],
-                "<head><meta charset='utf-8'>abc{{SNIPPET}}</head>def",
-            );
-        }
-
-        #[test]
-        fn fuzzy() {
-            struct Part {
-                string: &'static str,
-                has_head: bool,
+        impl Part {
+            fn new(string: &'static str, has_head: bool) -> Self {
+                return Self {
+                    string,
+                    has_head,
+                    ends_search: false,
+                };
             }
 
-            impl Part {
-                fn new(string: &'static str, has_head: bool) -> Self {
-                    return Self { string, has_head };
+            fn body_content(string: &'static str) -> Self {
+                return Self {
+                    string,
+                    has_head: false,
+                    ends_search: true,
+                };
+            }
+        }
+
+        // None of these parts can combine into a tag across a boundary, so a `<head>` can only ever
+        // come from a single `has_head` part, and no part can follow it within the head as a meta
+        // the snippet has to stay behind.
+        let parts: [Part; 18] = [
+            Part::new("<head>", true),
+            Part::new("<head >", true),
+            Part::new("<HeAd>", true),
+            Part::new("<HEAD>", true),
+            Part::body_content("<h ead>"),
+            Part::body_content("<he ad>"),
+            Part::body_content("<header>"),
+            Part::new("h>", false),
+            Part::new("/>", false),
+            Part::new(">", false),
+            Part::new(" ", false),
+            Part::new("foo", false),
+            Part::new("bar", false),
+            Part::new("&nbsp;", false),
+            Part::new("😊", false),
+            Part::new("网络", false),
+            // Metas the snippet need not stay behind: it still goes right after the `<head>` tag.
+            Part::new("<meta name=description content=x>", false),
+            Part::new("<meta name=dd-trace-id content=1>", false),
+        ];
+
+        let mut rng = rand::rng();
+
+        for _ in 0..1000 {
+            let mut input = String::from(prefix);
+            let mut expected = String::from(prefix);
+            let mut has_head = false;
+            let mut search_ended = false;
+
+            let parts_count = rng.random_range(0usize..20);
+            for part in parts.choose_multiple(&mut rng, parts_count) {
+                input.push_str(part.string);
+                expected.push_str(part.string);
+
+                if injects && !has_head && !search_ended && part.has_head {
+                    expected.push_str("{{SNIPPET}}");
+                    has_head = true;
                 }
+                search_ended |= part.ends_search;
+            }
+            if !has_head {
+                expected.push_str("           ");
             }
 
-            let parts: [Part; 16] = [
-                Part::new("</head>", true),
-                Part::new("</ head>", false),
-                Part::new("</HeAd>", true),
-                Part::new("</HEAD>", true),
-                Part::new("</h ead>", false),
-                Part::new("</he ad>", false),
-                Part::new("</header>", false),
-                Part::new("</h", false),
-                Part::new("</", false),
-                Part::new("<", false),
-                Part::new(" ", false),
-                Part::new("foo", false),
-                Part::new("bar", false),
-                Part::new("&nbsp;", false),
-                Part::new("😊", false),
-                Part::new("网络", false),
-            ];
-
-            let mut rng = rand::rng();
-
-            for _ in 0..1000 {
-                // Build a random input from 'parts'
-                let mut input = String::new();
-                let mut expected = String::new();
-                let mut has_head = false;
-
-                let parts_count = rng.random_range(0usize..20);
-                for part in parts.choose_multiple(&mut rng, parts_count) {
-                    input.push_str(part.string);
-
-                    if !has_head && part.has_head {
-                        expected.push_str("{{SNIPPET}}");
-                        has_head = true;
+            // Split `input` into chunks of random sizes. Because chunks might not end at a
+            // character boundary, we need to use &[u8] chunks instead of &str.
+            let chunks = rng
+                .clone()
+                .sample_iter(Uniform::new(0usize, input.len() + 1).unwrap())
+                .scan(input.as_bytes(), |input, chunk_size| {
+                    if input.is_empty() {
+                        return None;
+                    } else {
+                        let chunk_size = chunk_size.min(input.len());
+                        let chunk = &input[..chunk_size];
+                        *input = &input[chunk_size..];
+                        return Some(chunk);
                     }
+                });
 
-                    expected.push_str(part.string);
-                }
-                if !has_head {
-                    expected.push_str("           ");
-                }
-
-                // Split `input` into chunks of random sizes. Because chunks might not end at a
-                // character boundary, we need to use &[u8] chunks instead of &str.
-                let chunks = rng
-                    .clone()
-                    .sample_iter(Uniform::new(0usize, input.len() + 1).unwrap())
-                    .scan(input.as_bytes(), |input, chunk_size| {
-                        if input.is_empty() {
-                            return None;
-                        } else {
-                            let chunk_size = chunk_size.min(input.len());
-                            let chunk = &input[..chunk_size];
-                            *input = &input[chunk_size..];
-                            return Some(chunk);
-                        }
-                    });
-
-                test_injector(chunks, expected.as_str());
-            }
+            test_injector(chunks, expected.as_str());
         }
     }
 
-    /// Inject inside the `<head>` tag or not at all.
-    mod head_open_tag {
+    /// A `<head>` start tag within the first DOCUMENT_CHARSET_SCAN_LIMIT bytes.
+    mod head_in_the_window {
         use super::*;
-
-        fn test_injector<T: AsRef<[u8]> + core::fmt::Debug>(
-            input_chunks: impl IntoIterator<Item = T>,
-            expected: &str,
-        ) {
-            return test_injector_with_strategy(
-                InjectionStrategy::HeadOpenTag,
-                input_chunks,
-                expected,
-            );
-        }
+        use pretty_assertions::assert_eq;
 
         #[test]
         fn basic() {
@@ -678,207 +602,95 @@ mod tests {
                 ["<head", ">abc</he", "ad>def"],
                 "<head>{{SNIPPET}}abc</head>def",
             );
+            test_injector(["abc<head>def"], "abc<head>{{SNIPPET}}def");
+            test_injector(["<HeAd lang=en>def"], "<HeAd lang=en>{{SNIPPET}}def");
         }
 
         #[test]
-        fn injects_after_meta_charset() {
+        fn after_the_last_relevant_meta() {
             test_injector(
-                ["<head><meta charset='utf-8'>abc</head>def"],
-                "<head><meta charset='utf-8'>{{SNIPPET}}abc</head>def",
+                ["<html><head><meta charset='utf-8'><meta name=viewport content=x><title>t</title><meta http-equiv=X-UA-Compatible content=IE=edge><meta name=x></head><body><meta name=y>"],
+                "<html><head><meta charset='utf-8'><meta name=viewport content=x><title>t</title><meta http-equiv=X-UA-Compatible content=IE=edge>{{SNIPPET}}<meta name=x></head><body><meta name=y>",
+            );
+            test_injector(
+                ["<head><link rel=icon><meta charset=utf-8><script>1</script><style>a{}</style>x</head>"],
+                "<head><link rel=icon><meta charset=utf-8>{{SNIPPET}}<script>1</script><style>a{}</style>x</head>",
+            );
+            // Other metas, the tracer's among them, do not hold the snippet back.
+            test_injector(
+                ["<html><head><meta name=dd-trace-id content=1><meta name=dd-trace-time content=2><meta name=description content=x></head>"],
+                "<html><head>{{SNIPPET}}<meta name=dd-trace-id content=1><meta name=dd-trace-time content=2><meta name=description content=x></head>",
             );
         }
 
-        /// Unlike the fallback strategy, a `</head>` is never used as a second chance.
+        /// The head ends at the first start tag it cannot hold, and so does the walk.
         #[test]
-        fn does_not_fall_back_to_head_close_tag() {
-            test_injector(["abc</head>def"], "abc</head>def           ");
-
-            let input = "A".repeat(1024) + "<head>def</head>ghi";
-            let expected = input.clone() + "           ";
-            test_injector([input], &expected);
+        fn stops_at_a_tag_the_head_cannot_hold() {
+            test_injector(
+                ["<head><meta charset=utf-8><div><meta charset=utf-8>"],
+                "<head><meta charset=utf-8>{{SNIPPET}}<div><meta charset=utf-8>",
+            );
+            test_injector(
+                ["<head><head><meta name=a>"],
+                "<head>{{SNIPPET}}<head><meta name=a>",
+            );
+            test_injector(
+                ["<head><body><meta name=a>"],
+                "<head>{{SNIPPET}}<body><meta name=a>",
+            );
         }
 
+        /// Past the window, the head is only walked while it is a run of `<meta>` and `<title>`
+        /// tags: text or any other tag ends it.
         #[test]
-        fn pads_at_eof_when_head_is_past_the_window() {
-            let input = "A".repeat(1024) + "<head>def";
-            let expected = input.clone() + "           ";
-            test_injector([input], &expected);
+        fn ignores_meta_tags_past_the_window() {
+            let filler = "a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT);
+            test_injector(
+                [format!("<head>{filler}<meta charset='utf-8'></head>def")],
+                &format!("<head>{{{{SNIPPET}}}}{filler}<meta charset='utf-8'></head>def"),
+            );
+            let script = format!("<script>{filler}</script>");
+            test_injector(
+                [format!("<head><meta charset=utf-8>{script}<meta http-equiv=x-ua-compatible>")],
+                &format!(
+                    "<head><meta charset=utf-8>{{{{SNIPPET}}}}{script}<meta http-equiv=x-ua-compatible>"
+                ),
+            );
         }
 
+        /// The first encoding declaration of the document lies past where the snippet would go: any
+        /// point would push it further, so the document is left alone.
         #[test]
-        fn empty() {
-            test_injector::<&str>([], "           ");
-            test_injector([""], "           ");
+        fn declines_before_an_encoding_declaration_out_of_the_head() {
+            test_injector(
+                ["<head></head><body><meta charset=utf-8>"],
+                "<head></head><body><meta charset=utf-8>           ",
+            );
+            // Unless one already lies behind the point.
+            test_injector(
+                ["<head><meta charset=utf-8></head><body><meta charset=utf-8>"],
+                "<head><meta charset=utf-8>{{SNIPPET}}</head><body><meta charset=utf-8>",
+            );
+        }
+
+        /// The `<head>` tag starts within the window but ends past it: the snippet goes right after it.
+        #[test]
+        fn head_tag_straddling_the_window_end() {
+            let filler = "a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 3);
+            test_injector(
+                [filler.clone() + "<head><meta name=a>"],
+                &(filler.clone() + "<head>{{SNIPPET}}<meta name=a>"),
+            );
+            test_injector(
+                [filler.clone(), String::from("<he"), String::from("ad>x")],
+                &(filler + "<head>{{SNIPPET}}x"),
+            );
         }
 
         /// The chunk that completes the window carries more data than the window needs: the rest of
         /// it has to be emitted, not buffered.
         #[test]
         fn emits_the_rest_of_the_chunk_completing_the_window() {
-            let filler = "A".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 1);
-            let input = [filler.clone(), String::from("B<head>def")];
-            let expected = filler + "B<head>def           ";
-
-            test_injector(input, &expected);
-        }
-    }
-
-    /// Inject inside the `<head>` tag, falling back to just before `</head>`.
-    mod head_open_tag_with_close_tag_fallback {
-        use super::*;
-
-        #[test]
-        fn basic() {
-            test_injector(
-                ["<head", ">abc</he", "ad>def"],
-                "<head>{{SNIPPET}}abc</head>def",
-            );
-        }
-
-        #[test]
-        fn ignore_head_after_1_kb() {
-            let input = "A".repeat(1024) + "<head>def";
-            let expected = input.clone() + "           ";
-
-            test_injector([input], &expected);
-        }
-
-        #[test]
-        fn meta_after_1_kb_fallback_to_head() {
-            let input = format!("<head>{}<meta charset='utf-8'></head>def", "a".repeat(1024));
-            let expected = format!(
-                "<head>{}{}<meta charset='utf-8'></head>def",
-                "{{SNIPPET}}",
-                "a".repeat(1024)
-            );
-
-            test_injector([input], &expected);
-        }
-
-        #[test]
-        fn padding_at_eof_if_no_injection_point() {
-            let input = ["a".repeat(1024), String::from("bb")];
-            let expected = input.join("") + "           ";
-            test_injector(input, &expected);
-        }
-
-        #[test]
-        fn no_head_or_meta() {
-            test_injector(["<html></html>"], "<html></html>           ");
-        }
-
-        #[test]
-        fn ending_again_after_injecting_at_eof_emits_nothing() {
-            for padded in [true, false] {
-                let mut injector = Injector::with_strategy(
-                    b"{{SNIPPET}}",
-                    InjectionStrategy::HeadOpenTagWithCloseTagFallback,
-                );
-                injector.write(b"<head>abc");
-                assert!(injector.end().injected);
-
-                let second_end = match padded {
-                    true => injector.end(),
-                    false => injector.end_without_padding(),
-                };
-                pretty_assertions::assert_eq!(second_end.length, 0);
-            }
-        }
-
-        #[test]
-        fn partial_head_close_tag_in_the_window_at_eof() {
-            test_injector(["abc</hea"], "abc</hea           ");
-        }
-
-        #[test]
-        fn head_close_tag_without_open_head() {
-            // No open `<head>` to inject after, so fall back to injecting before `</head>`.
-            test_injector(["abc</head>def"], "abc{{SNIPPET}}</head>def");
-        }
-
-        #[test]
-        fn head_after_1_kb_falls_back_to_head_close_tag() {
-            // The open `<head>` is past the charset window so it cannot be used, but `</head>` can be:
-            // injecting there can never displace a character encoding declaration.
-            let input = "A".repeat(1024) + "<head>def</head>ghi";
-            let expected = "A".repeat(1024) + "<head>def{{SNIPPET}}</head>ghi";
-
-            test_injector([input], &expected);
-        }
-
-        #[test]
-        fn head_close_tag_straddling_chunks_after_the_window() {
-            let expected = "A".repeat(1024) + "abc{{SNIPPET}}</head>def";
-
-            test_injector(
-                [
-                    "A".repeat(1024),
-                    String::from("abc</he"),
-                    String::from("ad>def"),
-                ],
-                &expected,
-            );
-        }
-
-        #[test]
-        fn head_close_tag_split_one_byte_at_a_time() {
-            let input = "A".repeat(1024) + "abc</head>def";
-            let expected = "A".repeat(1024) + "abc{{SNIPPET}}</head>def";
-
-            // One chunk to get past the window, then a chunk per remaining byte.
-            let mut chunks = alloc::vec!["A".repeat(1024)];
-            chunks.extend(input[1024..].chars().map(String::from));
-
-            test_injector(chunks, &expected);
-        }
-
-        /// The chunk that completes the window carries the injection point of the `</head>` pass:
-        /// the window and the rest of that chunk are scanned and emitted within the same call.
-        #[test]
-        fn head_close_tag_in_the_rest_of_the_chunk_completing_the_window() {
-            let filler = "A".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 1);
-            let input = [filler.clone(), String::from("Bcd</head>efg")];
-            let expected = filler + "Bcd{{SNIPPET}}</head>efg";
-
-            test_injector(input, &expected);
-        }
-
-        #[test]
-        fn head_close_tag_straddling_the_window_boundary() {
-            let filler = "A".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 4);
-            // The window ends within the `</head>` tag, four bytes in.
-            let input = [filler.clone(), String::from("</head>xyz")];
-            let expected = filler + "{{SNIPPET}}</head>xyz";
-
-            test_injector(input, &expected);
-        }
-
-        #[test]
-        fn partial_head_close_tag_at_the_end_of_the_chunk_completing_the_window() {
-            let filler = "A".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 1);
-            let input = [
-                filler.clone(),
-                String::from("Bxy</he"),
-                String::from("ad>z"),
-            ];
-            let expected = filler + "Bxy{{SNIPPET}}</head>z";
-
-            test_injector(input, &expected);
-        }
-
-        /// A partial `</head>` that starts within the window and runs to the end of the chunk
-        /// completing it: both parts have to be held back together.
-        #[test]
-        fn partial_head_close_tag_straddling_the_window_boundary() {
-            let filler = "A".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 2);
-            let input = [filler.clone(), String::from("</h"), String::from("ead>z")];
-            let expected = filler + "{{SNIPPET}}</head>z";
-
-            test_injector(input, &expected);
-        }
-
-        #[test]
-        fn injects_in_the_buffered_window_and_emits_the_rest_of_the_chunk() {
             let filler = "a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - "<head>".len());
             let input = [String::from("<head>"), filler.clone() + "tail data"];
             let expected = String::from("<head>{{SNIPPET}}") + &filler + "tail data";
@@ -886,16 +698,362 @@ mod tests {
             test_injector(input, &expected);
         }
 
-        /// Completing the window must not pull a whole large chunk into the buffers: everything past
-        /// the window is emitted straight away.
         #[test]
-        fn buffering_stays_bounded_by_the_window_size() {
-            let mut injector = Injector::with_strategy(
-                b"{{SNIPPET}}",
-                InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+        fn only_injects_once() {
+            test_injector(
+                ["<head>abc</head>def<head>ghi"],
+                "<head>{{SNIPPET}}abc</head>def<head>ghi",
+            );
+        }
+
+        #[test]
+        fn ending_again_after_injecting_at_eof_emits_nothing() {
+            for padded in [true, false] {
+                let mut injector = Injector::new(b"{{SNIPPET}}");
+                injector.write(b"<head>abc");
+                assert!(injector.end().injected);
+
+                let second_end = match padded {
+                    true => injector.end(),
+                    false => injector.end_without_padding(),
+                };
+                assert_eq!(second_end.length, 0);
+            }
+        }
+
+        #[test]
+        fn fuzzy() {
+            fuzz_head_open_tag("", true);
+        }
+    }
+
+    /// The head is a run of `<meta>` and `<title>` tags past the first DOCUMENT_CHARSET_SCAN_LIMIT
+    /// bytes: the walk goes on, up to WALK_LIMIT, for an `X-UA-Compatible` declaration may follow.
+    mod meta_run_past_the_window {
+        use super::*;
+        use pretty_assertions::assert_eq;
+
+        const CHARSET: &str = "<meta charset=utf-8>";
+        const COMPATIBLE: &str = "<meta http-equiv=X-UA-Compatible content=IE=edge>";
+
+        /// Non relevant metas, one per line, at least `length` bytes of them.
+        fn metas(length: usize) -> String {
+            let mut metas = String::new();
+            while metas.len() < length {
+                metas.push_str(&format!(
+                    "<meta name=description content=\"{}\">\n",
+                    metas.len()
+                ));
+            }
+            return metas;
+        }
+
+        /// Checks `template`, with `{{SNIPPET}}` where the snippet goes, whatever the chunking.
+        fn check(template: &str) {
+            let document = template.replace("{{SNIPPET}}", "");
+            let expected = match template.contains("{{SNIPPET}}") {
+                true => String::from(template),
+                false => format!("{template}           "),
+            };
+            let bytes = document.as_bytes();
+            test_injector([bytes], &expected);
+            for size in [1, 7, 100, 1000, 1024, 1025, 3000] {
+                test_injector(bytes.chunks(size), &expected);
+            }
+            for point in [
+                1,
+                1023,
+                1024,
+                1025,
+                2047,
+                2048,
+                4096,
+                10 * 1024 - 1,
+                10 * 1024,
+            ] {
+                if point < bytes.len() {
+                    test_injector([&bytes[..point], &bytes[point..]], &expected);
+                }
+            }
+        }
+
+        #[test]
+        fn x_ua_compatible_after_a_long_meta_run() {
+            let run = metas(3000);
+            check(&format!(
+                "<!DOCTYPE html><html><head>{CHARSET}\n<title>t</title>\n{run}{COMPATIBLE}{{{{SNIPPET}}}}\n<link rel=icon></head><body></body></html>"
+            ));
+        }
+
+        #[test]
+        fn relevant_meta_cut_by_the_window_end() {
+            // Within the run.
+            let prefix = "<html><head>";
+            let run = metas(DOCUMENT_CHARSET_SCAN_LIMIT - prefix.len() - 60);
+            let run = &run[..run.rfind("<meta").unwrap()];
+            let padding = " ".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - prefix.len() - run.len() - 10);
+            check(&format!(
+                "{prefix}{run}{padding}{COMPATIBLE}{{{{SNIPPET}}}}<link rel=icon></head>"
+            ));
+            // Past the end of the run: a meta starting within the window is walked all the same.
+            let href = "x".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - prefix.len() - 30);
+            check(&format!(
+                "{prefix}<link href={href}>{COMPATIBLE}{{{{SNIPPET}}}}<meta name=a></head>"
+            ));
+            // But not one starting past it.
+            check(&format!(
+                "{prefix}{{{{SNIPPET}}}}<link href={href}><meta name=a content=xxxxxxxxxxxxxxxxxxxxxxx>{COMPATIBLE}</head>"
+            ));
+        }
+
+        #[test]
+        fn run_still_going_at_the_walk_limit() {
+            // The best point found within the limit stands, even one the walk found past the window.
+            let run = metas(WALK_LIMIT);
+            check(&format!(
+                "<html><head>{CHARSET}{{{{SNIPPET}}}}{run}{COMPATIBLE}</head>"
+            ));
+            let run = metas(4000);
+            let more = metas(WALK_LIMIT);
+            check(&format!(
+                "<html><head>{run}{COMPATIBLE}{{{{SNIPPET}}}}{more}{COMPATIBLE}</head>"
+            ));
+            // A meta tag the limit cuts is not walked.
+            let run = metas(WALK_LIMIT - 30);
+            let run = &run[..run.rfind("<meta").unwrap()];
+            let padding = " ".repeat(WALK_LIMIT - "<html><head>".len() - run.len() - 10);
+            check(&format!(
+                "<html><head>{{{{SNIPPET}}}}{run}{padding}{COMPATIBLE}</head>"
+            ));
+        }
+
+        #[test]
+        fn tracer_and_seo_metas_stay_behind_the_snippet() {
+            let run = metas(2000);
+            check(&format!(
+                "<html><head>{CHARSET}{{{{SNIPPET}}}}{run}<meta name=dd-trace-id content=1><meta name=dd-trace-time content=2><meta property=og:title content=t></head>"
+            ));
+        }
+
+        #[test]
+        fn declarations_that_are_no_tags_past_the_window() {
+            let run = metas(2000);
+            check(&format!(
+                "<html><head>{CHARSET}{{{{SNIPPET}}}}{run}<!-- {COMPATIBLE} --><title>{COMPATIBLE}</title><meta name=a content='{COMPATIBLE}'></head>"
+            ));
+            // An encoding declaration in raw text past the window is out of the prescan's reach.
+            check(&format!(
+                "<html><head>{{{{SNIPPET}}}}{run}<title>{CHARSET}</title></head>"
+            ));
+        }
+
+        #[test]
+        fn text_or_any_other_tag_ends_the_run() {
+            let run = metas(2000);
+            for end in [
+                "text",
+                "<link rel=icon>",
+                "<script></script>",
+                "<base href=/>",
+            ] {
+                check(&format!(
+                    "<html><head>{CHARSET}{{{{SNIPPET}}}}{run}{end}{COMPATIBLE}</head>"
+                ));
+            }
+            // Whitespace, comments and stray end tags do not.
+            check(&format!(
+                "<html><head>{CHARSET}{run} \n\t<!-- c --></p><title>t</title>{COMPATIBLE}{{{{SNIPPET}}}}</head>"
+            ));
+        }
+
+        #[test]
+        fn mixed_case_and_bogus_charset() {
+            let run = metas(2000);
+            check(&format!(
+                "<HTML><HEAD>{run}<META HTTP-EQUIV=\"x-ua-compatible\" CONTENT=\"IE=edge\">{{{{SNIPPET}}}}<META CHARSET=BOGUS></HEAD>"
+            ));
+            check(&format!(
+                "<html><head>{{{{SNIPPET}}}}<meta charset=bogus>{run}</head>"
+            ));
+        }
+
+        #[test]
+        fn late_head_tag() {
+            // Starting within the window, it is walked from, past the window as well.
+            let comment = format!("<!-- {} -->", "c".repeat(900));
+            let run = metas(1000);
+            check(&format!(
+                "<html>{comment}<head>{run}{COMPATIBLE}{{{{SNIPPET}}}}<link rel=icon></head>"
+            ));
+            // Starting past it, the snippet goes right after it.
+            let comment = format!("<!-- {} -->", "c".repeat(DOCUMENT_CHARSET_SCAN_LIMIT));
+            check(&format!(
+                "<html>{comment}<head>{{{{SNIPPET}}}}{COMPATIBLE}</head>"
+            ));
+        }
+
+        #[test]
+        fn short_documents() {
+            check(&format!("<head>{CHARSET}{{{{SNIPPET}}}}<meta name=a>"));
+            check("<head>{{SNIPPET}}<meta name=a><title>t</title>");
+            check(&format!("<head>{}{COMPATIBLE}{{{{SNIPPET}}}}", metas(500)));
+            check("<head>{{SNIPPET}}<meta http-equiv=x-ua-compatible");
+            check("<head><meta charset=utf-8");
+        }
+
+        #[test]
+        fn holds_back_while_the_run_goes_on() {
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            let run = metas(3000);
+            // Walked again once twice as much is held back.
+            let body = "b".repeat(3000);
+            let document = format!("<html><head>{run}{COMPATIBLE}<link rel=icon>{body}");
+            let bytes = document.as_bytes();
+            let result = injector.write(&bytes[..2500]);
+            assert_eq!(result.length, 0);
+            assert_eq!(injector.held_back(), 2500);
+            assert!(injector.write(&bytes[2500..]).injected);
+            assert_eq!(injector.held_back(), 0);
+
+            // Never past the limit, however the run goes on.
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            let document = format!("<html><head>{}", metas(3 * WALK_LIMIT));
+            for chunk in document.as_bytes().chunks(500) {
+                injector.write(chunk);
+                assert!(injector.held_back() < WALK_LIMIT);
+            }
+        }
+    }
+
+    /// No `<head>` start tag within the first DOCUMENT_CHARSET_SCAN_LIMIT bytes.
+    mod head_past_the_window {
+        use super::*;
+        use pretty_assertions::assert_eq;
+
+        /// A comment long enough to fill the window, which holds no HTML evidence of its own.
+        fn filler() -> String {
+            return format!("<!-- {} -->", "c".repeat(DOCUMENT_CHARSET_SCAN_LIMIT));
+        }
+
+        #[test]
+        fn injects_after_the_head_tag_when_the_window_looks_like_html() {
+            for evidence in [
+                "<html>",
+                "<!DOCTYPE html><HTML lang=en>",
+                "<meta charset=utf-8>",
+            ] {
+                let input = format!("{evidence}{}<head><meta name=a></head>", filler());
+                let expected = format!(
+                    "{evidence}{}<head>{{{{SNIPPET}}}}<meta name=a></head>",
+                    filler()
+                );
+                test_injector([input], &expected);
+            }
+        }
+
+        #[test]
+        fn does_not_inject_when_the_window_does_not_look_like_html() {
+            // A doctype alone is no evidence, and neither are tags within comments or raw text.
+            for prefix in [
+                "",
+                "<!DOCTYPE html>",
+                "<!-- <html> -->",
+                "<script>'<html>'</script>",
+                "<div><p>",
+                "<metadata><htmlx>",
+            ] {
+                let input = format!("{prefix}{}<head></head>", filler());
+                let expected = input.clone() + "           ";
+                test_injector([input], &expected);
+            }
+        }
+
+        /// Non-HTML content served as `text/html` passes through untouched.
+        #[test]
+        fn non_html_content() {
+            let json = format!(
+                "{{\"data\": \"{}\", \"html\": \"<head>\"}}",
+                "x".repeat(1100)
+            );
+            test_injector([json.clone()], &(json + "           "));
+
+            let text = "Lorem ipsum <head> dolor\n".repeat(10);
+            let text = "a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT) + &text;
+            test_injector([text.clone()], &(text + "           "));
+        }
+
+        /// Evidence that starts within the window counts, wherever it ends.
+        #[test]
+        fn evidence_straddling_the_window_end() {
+            let filler = "a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 2);
+            test_injector(
+                [filler.clone() + "<meta charset=utf-8>x<head>y"],
+                &(filler.clone() + "<meta charset=utf-8>x<head>{{SNIPPET}}y"),
+            );
+            test_injector(
+                [
+                    filler.clone(),
+                    String::from("<m"),
+                    String::from("eta>x<head>y"),
+                ],
+                &(filler.clone() + "<meta>x<head>{{SNIPPET}}y"),
+            );
+            // A tag that starts there and turns out to be something else is no evidence.
+            test_injector(
+                [
+                    filler.clone(),
+                    String::from("<m"),
+                    String::from("ark>x<head>y"),
+                ],
+                &(filler.clone() + "<mark>x<head>y           "),
+            );
+            // Nor is one that only starts past the window.
+            let filler = "a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT);
+            test_injector(
+                [filler.clone() + "<html><head>y"],
+                &(filler + "<html><head>y           "),
+            );
+        }
+
+        #[test]
+        fn head_tag_split_one_byte_at_a_time() {
+            let input = String::from("<html>") + &filler() + "abc<head lang=en>def";
+            let expected = String::from("<html>") + &filler() + "abc<head lang=en>{{SNIPPET}}def";
+
+            // One chunk to get past the window, then a chunk per remaining byte.
+            let mut chunks = alloc::vec![String::from(&input[..DOCUMENT_CHARSET_SCAN_LIMIT])];
+            chunks.extend(
+                input[DOCUMENT_CHARSET_SCAN_LIMIT..]
+                    .chars()
+                    .map(String::from),
             );
 
-            injector.write(b"a");
+            test_injector(chunks, &expected);
+        }
+
+        /// The `<head>` tag is in the rest of the chunk that completes the window.
+        #[test]
+        fn head_tag_in_the_rest_of_the_chunk_completing_the_window() {
+            let filler = String::from("<html>") + &"a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 7);
+            let input = [filler.clone(), String::from("Bcd<head>efg")];
+            let expected = filler + "Bcd<head>{{SNIPPET}}efg";
+
+            test_injector(input, &expected);
+        }
+
+        #[test]
+        fn no_head() {
+            let input = String::from("<html>") + &filler() + "<body>hi</body></html>";
+            test_injector([input.clone()], &(input + "           "));
+        }
+
+        /// Completing the window must not pull a whole large chunk into the buffers: everything past
+        /// the window is emitted straight away, and nothing is held back past it.
+        #[test]
+        fn buffering_stays_bounded_by_the_window_size() {
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+
+            injector.write(b"<html>");
             let big_chunk = alloc::vec![b'b'; 8 * DOCUMENT_CHARSET_SCAN_LIMIT];
             let emitted: usize = injector
                 .write(&big_chunk)
@@ -903,202 +1061,46 @@ mod tests {
                 .map(|slice| return slice.bytes.len())
                 .sum();
 
-            pretty_assertions::assert_eq!(emitted, 1 + big_chunk.len());
-            assert!(
-                injector.incomplete_data.len() + injector.incomplete_data_public_ref.len()
-                    <= DOCUMENT_CHARSET_SCAN_LIMIT
+            assert_eq!(emitted, "<html>".len() + big_chunk.len());
+            assert_eq!(injector.held_back(), 0);
+            assert_eq!(
+                injector.injector_state,
+                InjectorState::ScanningForHeadOpenTag
             );
         }
 
+        /// Without evidence, the rest of the document is not even scanned.
         #[test]
-        fn only_injects_once_across_passes() {
-            // A `</head>` following an already-used injection point must not inject a second time.
-            test_injector(
-                ["<head>abc</head>def</head>ghi"],
-                "<head>{{SNIPPET}}abc</head>def</head>ghi",
-            );
-        }
-
-        #[test]
-        fn empty() {
-            test_injector::<&str>([], "           ");
-            test_injector([""], "           ");
-            test_injector(["", ""], "           ");
+        fn stops_scanning_without_evidence() {
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            injector.write(filler().as_bytes());
+            assert_eq!(injector.injector_state, InjectorState::PassingThrough);
         }
 
         #[test]
         fn fuzzy() {
-            struct Part {
-                string: &'static str,
-                has_head: bool,
-            }
-
-            impl Part {
-                fn new(string: &'static str, has_head: bool) -> Self {
-                    return Self { string, has_head };
-                }
-            }
-
-            let parts: [Part; 16] = [
-                Part::new("<head>", true),
-                Part::new("<head >", true),
-                Part::new("<HeAd>", true),
-                Part::new("<HEAD>", true),
-                Part::new("<h ead>", false),
-                Part::new("<he ad>", false),
-                Part::new("<header>", false),
-                Part::new("h>", false),
-                Part::new("/>", false),
-                Part::new(">", false),
-                Part::new(" ", false),
-                Part::new("foo", false),
-                Part::new("bar", false),
-                Part::new("&nbsp;", false),
-                Part::new("😊", false),
-                Part::new("网络", false),
-            ];
-
-            let mut rng = rand::rng();
-
-            for _ in 0..1000 {
-                // Build a random input from 'parts'
-                let mut input = String::new();
-                let mut expected = String::new();
-                let mut has_head = false;
-
-                let parts_count = rng.random_range(0usize..20);
-                for part in parts.choose_multiple(&mut rng, parts_count) {
-                    input.push_str(part.string);
-                    expected.push_str(part.string);
-
-                    if !has_head && part.has_head {
-                        expected.push_str("{{SNIPPET}}");
-                        has_head = true;
-                    }
-                }
-                if !has_head {
-                    expected.push_str("           ");
-                }
-
-                // Split `input` into chunks of random sizes. Because chunks might not end at a
-                // character boundary, we need to use &[u8] chunks instead of &str.
-                let chunks = rng
-                    .clone()
-                    .sample_iter(Uniform::new(0usize, input.len() + 1).unwrap())
-                    .scan(input.as_bytes(), |input, chunk_size| {
-                        if input.is_empty() {
-                            return None;
-                        } else {
-                            let chunk_size = chunk_size.min(input.len());
-                            let chunk = &input[..chunk_size];
-                            *input = &input[chunk_size..];
-                            return Some(chunk);
-                        }
-                    });
-
-                test_injector(chunks, expected.as_str());
-            }
-        }
-
-        /// Same as [`fuzzy`], but behind a filler prefix long enough to exhaust the charset window, so
-        /// the `</head>` fallback pass is the one under test.
-        #[test]
-        fn fuzzy_head_close_tag_fallback() {
-            struct Part {
-                string: &'static str,
-                has_head_close: bool,
-            }
-
-            impl Part {
-                fn new(string: &'static str, has_head_close: bool) -> Self {
-                    return Self {
-                        string,
-                        has_head_close,
-                    };
-                }
-            }
-
-            // None of these parts can combine into a `</head>` across a boundary, so a match can only
-            // ever come from a single `has_head_close` part.
-            let parts: [Part; 16] = [
-                Part::new("</head>", true),
-                Part::new("</ head>", false),
-                Part::new("</HeAd>", true),
-                Part::new("</HEAD>", true),
-                Part::new("</h ead>", false),
-                Part::new("</he ad>", false),
-                Part::new("</header>", false),
-                Part::new("</h", false),
-                Part::new("</", false),
-                Part::new("<", false),
-                Part::new(" ", false),
-                Part::new("foo", false),
-                Part::new("bar", false),
-                Part::new("&nbsp;", false),
-                Part::new("😊", false),
-                Part::new("网络", false),
-            ];
-
-            // Contains no injection point of its own, and is long enough that the `<head>` pass gives up.
-            let filler = "A".repeat(DOCUMENT_CHARSET_SCAN_LIMIT);
-            let mut rng = rand::rng();
-
-            for _ in 0..1000 {
-                let mut input = filler.clone();
-                let mut expected = filler.clone();
-                let mut has_head_close = false;
-
-                let parts_count = rng.random_range(0usize..20);
-                for part in parts.choose_multiple(&mut rng, parts_count) {
-                    input.push_str(part.string);
-
-                    // The snippet goes *before* the closing tag, unlike the `<head>` pass.
-                    if !has_head_close && part.has_head_close {
-                        expected.push_str("{{SNIPPET}}");
-                        has_head_close = true;
-                    }
-
-                    expected.push_str(part.string);
-                }
-                if !has_head_close {
-                    expected.push_str("           ");
-                }
-
-                // Split `input` into chunks of random sizes. Because chunks might not end at a
-                // character boundary, we need to use &[u8] chunks instead of &str.
-                let chunks = rng
-                    .clone()
-                    .sample_iter(Uniform::new(0usize, input.len() + 1).unwrap())
-                    .scan(input.as_bytes(), |input, chunk_size| {
-                        if input.is_empty() {
-                            return None;
-                        } else {
-                            let chunk_size = chunk_size.min(input.len());
-                            let chunk = &input[..chunk_size];
-                            *input = &input[chunk_size..];
-                            return Some(chunk);
-                        }
-                    });
-
-                test_injector(chunks, expected.as_str());
-            }
-        }
-
-        fn test_injector<T: AsRef<[u8]> + core::fmt::Debug>(
-            input_chunks: impl IntoIterator<Item = T>,
-            expected: &str,
-        ) {
-            return test_injector_with_strategy(
-                InjectionStrategy::HeadOpenTagWithCloseTagFallback,
-                input_chunks,
-                expected,
-            );
+            fuzz_head_open_tag(&(String::from("<html>") + &filler()), true);
+            fuzz_head_open_tag(&filler(), false);
         }
     }
 
     #[test]
+    fn no_head() {
+        test_injector(["abc"], "abc           ");
+        test_injector(["<html></html>"], "<html></html>           ");
+        test_injector(["abc</head>def"], "abc</head>def           ");
+    }
+
+    #[test]
+    fn empty() {
+        test_injector::<&str>([], "           ");
+        test_injector([""], "           ");
+        test_injector(["", ""], "           ");
+    }
+
+    #[test]
     fn content_length_with_snippet() {
-        let injector = Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadCloseTag);
+        let injector = Injector::new(b"{{SNIPPET}}");
         assert_eq!(injector.content_length_with_snippet(b"100"), Some(111));
         assert_eq!(injector.content_length_with_snippet(b" 0\t"), Some(11));
         assert_eq!(
@@ -1136,14 +1138,8 @@ mod tests {
         use alloc::vec::Vec;
         use pretty_assertions::assert_eq;
 
-        const STRATEGIES: [InjectionStrategy; 3] = [
-            InjectionStrategy::HeadCloseTag,
-            InjectionStrategy::HeadOpenTag,
-            InjectionStrategy::HeadOpenTagWithCloseTagFallback,
-        ];
-
-        fn rebuild(strategy: InjectionStrategy, chunks: &[&[u8]]) -> Vec<u8> {
-            let mut injector = Injector::with_strategy(b"{{SNIPPET}}", strategy);
+        fn rebuild(chunks: &[&[u8]]) -> Vec<u8> {
+            let mut injector = Injector::new(b"{{SNIPPET}}");
             for (index, chunk) in chunks.iter().enumerate() {
                 let held = injector.held_back();
                 let result = injector.write(chunk);
@@ -1179,15 +1175,12 @@ mod tests {
                 start = point;
             }
             chunks.push(&document[start..]);
-            for strategy in STRATEGIES {
-                assert_eq!(
-                    String::from_utf8(rebuild(strategy, &chunks)).unwrap(),
-                    String::from_utf8(rebuild(strategy, &[document])).unwrap(),
-                    "{:?} split at {:?}",
-                    strategy,
-                    split_points
-                );
-            }
+            assert_eq!(
+                String::from_utf8(rebuild(&chunks)).unwrap(),
+                String::from_utf8(rebuild(&[document])).unwrap(),
+                "split at {:?}",
+                split_points
+            );
         }
 
         fn documents() -> Vec<Vec<u8>> {
@@ -1195,10 +1188,9 @@ mod tests {
                 String::from("<!DOCTYPE html><html><head><meta charset='utf-8'><title>");
             long_head.push_str(&"x".repeat(1500));
             long_head.push_str("</title></head><body>hi</body></html>");
-            let mut head_past_window = String::from("<!-- ");
+            let mut head_past_window = String::from("<html><!-- ");
             head_past_window.push_str(&"c".repeat(1100));
-            head_past_window
-                .push_str(" --><html><head><title>t</title></head><body>hi</body></html>");
+            head_past_window.push_str(" --><head><title>t</title></head><body>hi</body></html>");
             return [
                 long_head.as_str(),
                 head_past_window.as_str(),
@@ -1233,12 +1225,12 @@ mod tests {
             }
         }
 
-        // Every split within and around the window end and the `</head>` that follows it, where
-        // the head-open fallback hands over to the `</head>` scan.
+        // Every split within and around the window end and the `<head>` tag that follows it, where
+        // the window hands over to the stream scan.
         #[test]
-        fn around_the_window_end_and_head_close_tag() {
+        fn around_the_window_end_and_head_tag() {
             for document in documents() {
-                let Some(tag) = document.windows(7).position(|w| return w == b"</head>") else {
+                let Some(tag) = document.windows(6).position(|w| return w == b"<head>") else {
                     continue;
                 };
                 let window_end = DOCUMENT_CHARSET_SCAN_LIMIT.min(document.len());
@@ -1251,21 +1243,7 @@ mod tests {
         }
     }
 
-    fn test_injector_with_strategy<T: AsRef<[u8]> + core::fmt::Debug>(
-        strategy: InjectionStrategy,
-        input_chunks: impl IntoIterator<Item = T>,
-        expected: &str,
-    ) {
-        return run_injector(
-            || return Injector::with_strategy(b"{{SNIPPET}}", strategy),
-            input_chunks,
-            expected,
-        );
-    }
-
-    /// Exercises [`Injector::new`], so the default strategy is pinned through the API that existing
-    /// consumers actually call.
-    fn test_injector_with_default_strategy<T: AsRef<[u8]> + core::fmt::Debug>(
+    fn test_injector<T: AsRef<[u8]> + core::fmt::Debug>(
         input_chunks: impl IntoIterator<Item = T>,
         expected: &str,
     ) {

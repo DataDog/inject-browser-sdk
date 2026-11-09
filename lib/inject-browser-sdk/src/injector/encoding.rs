@@ -4,9 +4,10 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-//! Whether a `<meta>` tag declares the character encoding of the document: the one thing the
-//! snippet has to stay behind, since injecting before a declaration could push it out of the
-//! window the browser prescans for it.
+//! Whether a `<meta>` tag is one the snippet has to stay behind: a declaration of the character
+//! encoding of the document, which injecting before could push out of the window the browser
+//! prescans for it, or an `X-UA-Compatible` one, which Internet Explorer only honours ahead of every
+//! element but `<title>` and other `<meta>` tags. See [`meta_kind`].
 
 use super::parser::compare_case_insensitive;
 
@@ -125,6 +126,50 @@ fn is_known_encoding_label(value: &[u8]) -> bool {
         .any(|label| return compare_case_insensitive(value, label));
 }
 
+/// What a `<meta>` tag is to the placement of the snippet.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(super) enum MetaKind {
+    /// It declares the character encoding of the document, see [`has_encoding_attributes`].
+    Encoding,
+    /// A `http-equiv="X-UA-Compatible"` one, which Internet Explorer honours only when no element
+    /// but `<title>` and other `<meta>` tags precedes it: the snippet must not be one.
+    Compatibility,
+    /// Any other: SEO, Open Graph, viewport, a content security policy, the tracer's
+    /// `dd-trace-id`… The snippet does not have to stay behind it.
+    Other,
+}
+
+/// Returns what the given `<meta>` open tag, from `<` to `>` included, is to the placement of the
+/// snippet. Attributes are read as [`has_encoding_attributes`] reads them: parsed rather than
+/// matched as substrings, the first one of each name being the one that counts.
+pub(super) fn meta_kind(tag: &[u8]) -> MetaKind {
+    if has_encoding_attributes(tag) {
+        return MetaKind::Encoding;
+    }
+    // The value has to spell it out, so a tag without it is not parsed.
+    if !contains_ignore_case(tag, b"x-ua") {
+        return MetaKind::Other;
+    }
+    let Some(mut index) = tag.iter().position(|&b| return b.is_ascii_whitespace()) else {
+        return MetaKind::Other;
+    };
+    loop {
+        index = skip_whitespace(tag, index);
+        if index >= tag.len() || tag[index] == b'>' {
+            return MetaKind::Other;
+        }
+        let (name, value, next_index) = parse_attribute(tag, index);
+        index = next_index;
+        // Only the first `http-equiv` counts, the parser drops the others.
+        if compare_case_insensitive(name, b"http-equiv") {
+            return match compare_case_insensitive(value.trim_ascii(), b"x-ua-compatible") {
+                true => MetaKind::Compatibility,
+                false => MetaKind::Other,
+            };
+        }
+    }
+}
+
 /// Returns whether the given open tag, from `<` to `>` included, declares the character encoding of
 /// the document, in other words whether it carries a `charset` attribute or is a
 /// `http-equiv="content-type"` declaration.
@@ -142,6 +187,11 @@ fn is_known_encoding_label(value: &[u8]) -> bool {
 /// The attributes are read in source order, as the prescan reads them, since which one provides the
 /// encoding depends on the order they are written in. See [`Charset`].
 pub(super) fn has_encoding_attributes(tag: &[u8]) -> bool {
+    // Both ways to declare one, a `charset` attribute and a `charset=` parameter in a `content`
+    // value, spell it out: a tag without it is not parsed.
+    if !contains_ignore_case(tag, b"charset") {
+        return false;
+    }
     // Attributes start after the tag name, at the first whitespace character.
     let Some(mut index) = tag.iter().position(|&b| return b.is_ascii_whitespace()) else {
         return false;
@@ -232,6 +282,22 @@ fn has_charset_parameter(content: &[u8]) -> bool {
         return is_known_encoding_label(value);
     }
 
+    return false;
+}
+
+/// Whether `tag` holds `needle_lower_case`, a lower case ASCII word, in any case.
+fn contains_ignore_case(tag: &[u8], needle_lower_case: &[u8]) -> bool {
+    let first = needle_lower_case[0];
+    let mut offset = 0;
+    while let Some(index) = memchr::memchr2(first, first.to_ascii_uppercase(), &tag[offset..]) {
+        offset += index;
+        if tag[offset..].len() >= needle_lower_case.len()
+            && tag[offset..offset + needle_lower_case.len()].eq_ignore_ascii_case(needle_lower_case)
+        {
+            return true;
+        }
+        offset += 1;
+    }
     return false;
 }
 

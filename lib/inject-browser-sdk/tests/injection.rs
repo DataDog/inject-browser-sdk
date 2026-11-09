@@ -24,6 +24,7 @@ use std::fs;
 
 use harness::input::{self, Run, SNIPPET};
 use harness::oracle::{self, Exception, WINDOW};
+use inject_browser_sdk::injector::InjectionStrategy;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
@@ -52,15 +53,39 @@ impl Stats {
     }
 }
 
-/// Runs every check on `document`. `exhaustive` adds every split into two chunks, for documents
-/// short enough for that to stay cheap.
+/// Runs every check on `document`, under every strategy, and returns the run of
+/// [`InjectionStrategy::HeadOpenTag`], the one the fixtures are written for. `exhaustive` adds every
+/// split into two chunks, for documents short enough for that to stay cheap.
 fn check(document: &[u8], rng: &mut StdRng, exhaustive: bool, stats: &mut Stats) -> Run {
-    let single = input::run(&[document]);
+    check_strategy(
+        InjectionStrategy::HeadCloseTag,
+        document,
+        rng,
+        exhaustive,
+        stats,
+    );
+    return check_strategy(
+        InjectionStrategy::HeadOpenTag,
+        document,
+        rng,
+        exhaustive,
+        stats,
+    );
+}
+
+fn check_strategy(
+    strategy: InjectionStrategy,
+    document: &[u8],
+    rng: &mut StdRng,
+    exhaustive: bool,
+    stats: &mut Stats,
+) -> Run {
+    let single = input::run(strategy, &[document]);
     stats.documents += 1;
-    if let Some(exception) = input::check_oracle(document, &single) {
+    if let Some(exception) = input::check_oracle(strategy, document, &single) {
         *stats
             .exceptions
-            .entry(format!("{exception:?}"))
+            .entry(format!("{strategy:?}/{exception:?}"))
             .or_default() += 1;
     }
 
@@ -68,7 +93,7 @@ fn check(document: &[u8], rng: &mut StdRng, exhaustive: bool, stats: &mut Stats)
     if let Ok(size) = std::env::var("CHUNK_SIZE") {
         let size: usize = size.parse().expect("CHUNK_SIZE is a number");
         let points: Vec<usize> = (size..length).step_by(size.max(1)).collect();
-        input::check_chunking(document, &single, &points);
+        input::check_chunking(strategy, document, &single, &points);
         return single;
     }
 
@@ -77,17 +102,17 @@ fn check(document: &[u8], rng: &mut StdRng, exhaustive: bool, stats: &mut Stats)
             .map(|_| return rng.random_range(0..=length))
             .collect();
         points.sort_unstable();
-        input::check_chunking(document, &single, &points);
+        input::check_chunking(strategy, document, &single, &points);
         input::check_oracle_chunking(document, &points);
     }
     // One byte at a time, the worst case for state carried across chunks.
     if length < 8 * WINDOW {
         let points: Vec<usize> = (1..length).collect();
-        input::check_chunking(document, &single, &points);
+        input::check_chunking(strategy, document, &single, &points);
     }
     if exhaustive && length < 2 * WINDOW {
         for point in 0..=length {
-            input::check_chunking(document, &single, &[point]);
+            input::check_chunking(strategy, document, &single, &[point]);
         }
     }
     return single;
@@ -309,16 +334,27 @@ fn random_meta_runs() {
 /// The exceptions are deliberate, and each one is exercised.
 #[test]
 fn oracle_exceptions() {
-    let check = |document: &str| {
-        let ours = input::run(&[document.as_bytes()]).injected_at;
+    let check_with = |strategy: InjectionStrategy, document: &str| {
+        let ours = input::run(strategy, &[document.as_bytes()]).injected_at;
         let observed = oracle::observe(&[document.as_bytes()]).expect("unambiguous");
-        let expected = oracle::injection_point(&observed);
+        let expected = oracle::injection_point(strategy, &observed);
         return (
             ours,
             expected,
-            oracle::exception(document.as_bytes(), &observed, ours, expected),
+            oracle::exception(strategy, document.as_bytes(), &observed, ours, expected),
         );
     };
+    let check = |document: &str| return check_with(InjectionStrategy::HeadOpenTag, document);
+    let close = |document: &str| return check_with(InjectionStrategy::HeadCloseTag, document);
+
+    // Before `</head>`: a head whose start tag is omitted, which lol_html does not see.
+    let (ours, expected, exception) = close("<html><meta charset=utf-8><title>t</title></head>");
+    assert_eq!((ours, expected), (Some(42), None));
+    assert_eq!(exception, Some(Exception::HeadStartOmitted));
+    // A CDATA section ends the search for the `</head>` tag.
+    let (ours, expected, exception) = close("<html><head><![CDATA[x]]></head>");
+    assert_eq!((ours, expected), (None, Some(25)));
+    assert_eq!(exception, Some(Exception::CdataSection));
 
     let (ours, expected, exception) =
         check("<head><meta charset=utf-8><![CDATA[x]]><meta charset=utf-8>");
@@ -349,7 +385,13 @@ fn oracle_exceptions() {
     // Anything else is a mismatch.
     let observed = oracle::observe(&[b"<head><meta name=a>"]).unwrap();
     assert_eq!(
-        oracle::exception(b"<head><meta name=a>", &observed, Some(6), Some(19)),
+        oracle::exception(
+            InjectionStrategy::HeadOpenTag,
+            b"<head><meta name=a>",
+            &observed,
+            Some(6),
+            Some(19)
+        ),
         None
     );
     assert_eq!(SNIPPET, b"{{SNIPPET}}");

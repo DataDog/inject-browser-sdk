@@ -15,7 +15,12 @@ mod oracle;
 
 use libfuzzer_sys::fuzz_target;
 
-fuzz_target!(|document: &[u8]| {
-    let single = input::run(&[document]);
-    input::check_oracle(document, &single);
+fuzz_target!(|data: &[u8]| {
+    // The first byte picks the strategy, the rest is the document.
+    let Some((&selector, document)) = data.split_first() else {
+        return;
+    };
+    let strategy = input::STRATEGIES[usize::from(selector) % input::STRATEGIES.len()];
+    let single = input::run(strategy, &[document]);
+    input::check_oracle(strategy, document, &single);
 });

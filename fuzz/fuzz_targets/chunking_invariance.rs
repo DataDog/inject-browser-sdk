@@ -18,10 +18,13 @@ mod oracle;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    // The first byte is how many split points follow, two bytes each, then the document.
-    let Some((&count, rest)) = data.split_first() else {
+    // The first byte picks the strategy and how many split points follow, two bytes each, then the
+    // document.
+    let Some((&selector, rest)) = data.split_first() else {
         return;
     };
+    let strategy = input::STRATEGIES[usize::from(selector) % input::STRATEGIES.len()];
+    let count = selector / 2;
     let count = usize::from(count % 16).min(rest.len() / 2);
     let (points, document) = rest.split_at(count * 2);
     let mut points: Vec<usize> = points
@@ -32,6 +35,6 @@ fuzz_target!(|data: &[u8]| {
         .collect();
     points.sort_unstable();
 
-    let single = input::run(&[document]);
-    input::check_chunking(document, &single, &points);
+    let single = input::run(strategy, &[document]);
+    input::check_chunking(strategy, document, &single, &points);
 });

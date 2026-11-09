@@ -12,7 +12,8 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
-use lol_html::html_content::{Element, TextChunk};
+use inject_browser_sdk::injector::InjectionStrategy;
+use lol_html::html_content::{Element, TextChunk, TextType};
 use lol_html::{doc_text, element, end_tag, HtmlRewriter, Settings};
 
 /// The head window of the injector, `DOCUMENT_CHARSET_SCAN_LIMIT`.
@@ -22,7 +23,9 @@ pub const WINDOW: usize = 1024;
 pub const WALK_LIMIT: usize = 10 * 1024;
 
 /// A text node, and whether it holds more than whitespace.
-type TextNode = (Range<usize>, bool);
+/// A text node, whether it holds more than whitespace, and whether it holds more than whitespace
+/// in the data state, a byte order mark starting the document aside.
+type TextNode = (Range<usize>, bool, bool);
 
 /// A start tag directly within a `<head>`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -46,10 +49,15 @@ pub struct Observed {
     pub heads: Vec<Range<usize>>,
     /// Where the end tag of the first `<head>` starts, if it has one.
     pub first_head_end: Option<usize>,
+    /// Where the end tag of every `<head>` starts, for those that have one.
+    pub head_ends: Vec<usize>,
     /// Every start tag directly within a `<head>`.
     pub head_children: Vec<HeadChild>,
     /// Every text node holding more than whitespace, wherever it is.
     pub text: Vec<Range<usize>>,
+    /// The ones of them in the data state, outside raw text, RCDATA and CDATA, a byte order mark
+    /// starting the document aside: the browser closes the head on one.
+    pub data_text: Vec<Range<usize>>,
     /// Start of the first `<html>` or `<meta>` start tag.
     pub html_evidence: Option<usize>,
     /// Every `<template>` element, from its start tag to the start of its end tag, if it has one.
@@ -83,14 +91,17 @@ pub fn observe<T: AsRef<[u8]>>(chunks: &[T]) -> Option<Observed> {
         .append_element_content_handler(element!("head", move |el: &mut Element| {
             let first = heads.borrow().heads.is_empty();
             heads.borrow_mut().heads.push(el.source_location().bytes());
-            if first {
-                let end = heads.clone();
-                // A `<head/>` is still a start tag, which can have content.
-                let _ = el.on_end_tag(end_tag!(move |tag| {
-                    end.borrow_mut().first_head_end = Some(tag.source_location().bytes().start);
-                    return Ok(());
-                }));
-            }
+            let end = heads.clone();
+            // A `<head/>` is still a start tag, which can have content.
+            let _ = el.on_end_tag(end_tag!(move |tag| {
+                let start = tag.source_location().bytes().start;
+                let mut observed = end.borrow_mut();
+                observed.head_ends.push(start);
+                if first {
+                    observed.first_head_end = Some(start);
+                }
+                return Ok(());
+            }));
             return Ok(());
         }))
         .append_element_content_handler(element!("head > *", move |el: &mut Element| {
@@ -153,7 +164,7 @@ pub fn observe<T: AsRef<[u8]>>(chunks: &[T]) -> Option<Observed> {
     rewriter.end().ok()?;
 
     let mut observed = observed.borrow().clone();
-    observed.text = text_nodes(chunks);
+    (observed.text, observed.data_text) = text_nodes(chunks);
     return Some(observed);
 }
 
@@ -161,7 +172,7 @@ pub fn observe<T: AsRef<[u8]>>(chunks: &[T]) -> Option<Observed> {
 /// with a text handler, lol_html tokenizes everything rather than scan for tags, and the two ways
 /// disagree on some malformed documents, so the text handler must not change what the element
 /// handlers see.
-fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> Vec<Range<usize>> {
+fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
     // Text nodes come in chunks, which the ones of the input decide: joined up, so that what is
     // observed does not depend on them, along with whether they hold more than whitespace.
     let nodes: Rc<RefCell<Vec<TextNode>>> = Rc::default();
@@ -169,35 +180,46 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> Vec<Range<usize>> {
     let settings =
         Settings::new().append_document_content_handler(doc_text!(move |chunk: &mut TextChunk| {
             let range = chunk.source_location().bytes();
-            let blank = chunk
-                .as_str()
-                .bytes()
-                .all(|b| return b.is_ascii_whitespace());
+            let content = chunk.as_str();
+            let blank = content.bytes().all(|b| return b.is_ascii_whitespace());
+            let data = chunk.text_type() == TextType::Data;
+            // A chunk split within the mark may move where its text starts by a byte or two.
+            let content = match range.start < 3 {
+                true => content.strip_prefix('\u{feff}').unwrap_or(content),
+                false => content,
+            };
+            let data_blank = !data || content.bytes().all(|b| return b.is_ascii_whitespace());
             let mut nodes = text.borrow_mut();
             match nodes.last_mut() {
-                Some((last, holds_text)) if last.end == range.start => {
+                Some((last, holds_text, holds_data_text)) if last.end == range.start => {
                     last.end = range.end;
                     *holds_text |= !blank;
+                    *holds_data_text |= !data_blank;
                 }
-                _ => nodes.push((range, !blank)),
+                _ => nodes.push((range, !blank, !data_blank)),
             }
             return Ok(());
         }));
     let mut rewriter = HtmlRewriter::new(settings, |_: &[u8]| {});
     for chunk in chunks {
         if rewriter.write(chunk.as_ref()).is_err() {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
     }
     if rewriter.end().is_err() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
-    return nodes
-        .borrow()
-        .iter()
-        .filter(|(range, holds_text)| return *holds_text && !range.is_empty())
-        .map(|(range, _)| return range.clone())
-        .collect();
+    let nodes = nodes.borrow();
+    let pick = |data: bool| {
+        return nodes
+            .iter()
+            .filter(|(range, holds_text, holds_data_text)| {
+                return !range.is_empty() && if data { *holds_data_text } else { *holds_text };
+            })
+            .map(|(range, _, _)| return range.clone())
+            .collect();
+    };
+    return (pick(false), pick(true));
 }
 
 /// Where the snippet must go in a document lol_html saw as `observed`, or `None` if it must not be
@@ -209,7 +231,52 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> Vec<Range<usize>> {
 ///   `<head>` tag. Children are looked at within the window, and past it while every one since the
 ///   `<head>` tag is a `<meta>` or a `<title>`, with no text but whitespace between them, up to
 ///   [`WALK_LIMIT`].
-pub fn injection_point(observed: &Observed) -> Option<usize> {
+pub fn injection_point(strategy: InjectionStrategy, observed: &Observed) -> Option<usize> {
+    return match strategy {
+        InjectionStrategy::HeadOpenTag => head_open_point(observed),
+        InjectionStrategy::HeadCloseTag => head_close_point(observed),
+    };
+}
+
+/// Where [`InjectionStrategy::HeadCloseTag`] must put the snippet in a document lol_html saw as
+/// `observed`: right before the end tag of the first head, if the document looks like HTML (an
+/// `<html>`, `<meta>` or `<head>` start tag starts within the window) and no body content comes
+/// before it. lol_html sees no head without a `<head>` start tag, see [`Exception::HeadStartOmitted`].
+fn head_close_point(observed: &Observed) -> Option<usize> {
+    let head = observed.heads.first()?;
+    // The browser ignores a `<head>` tag within the head, which lol_html pairs the first `</head>`
+    // with instead: the first one after the head starts closes it.
+    let end = observed
+        .head_ends
+        .iter()
+        .copied()
+        .filter(|&end| return end > head.start)
+        .min()?;
+    let evidence = observed
+        .html_evidence
+        .map_or(head.start, |start| return start.min(head.start));
+    if evidence >= WINDOW {
+        return None;
+    }
+    if observed
+        .body_content
+        .is_some_and(|start| return start < end)
+    {
+        return None;
+    }
+    // Text closes the head too.
+    if observed
+        .data_text
+        .iter()
+        .any(|text| return text.start < end)
+    {
+        return None;
+    }
+    return Some(end);
+}
+
+/// Where [`InjectionStrategy::HeadOpenTag`] must put the snippet, see [`injection_point`].
+fn head_open_point(observed: &Observed) -> Option<usize> {
     let head = observed.heads.first()?;
     if observed
         .body_content
@@ -338,6 +405,10 @@ pub enum Exception {
     /// insertion mode closes the head. lol_html only pops elements its stack holds, and keeps the
     /// head open when it holds none of those.
     EndTagClosingHead,
+    /// [`InjectionStrategy::HeadCloseTag`] injects before a `</head>` tag closing a head whose start
+    /// tag the document omits, which HTML allows: lol_html, without a tree builder, sees no head to
+    /// close before it.
+    HeadStartOmitted,
     /// The injector stops at a `<![CDATA[`, whose end it cannot tell without tracking foreign
     /// content: before the `<head>` tag it then never injects, within the head its point is earlier.
     /// lol_html reads one outside foreign content as the bogus comment it is there.
@@ -351,12 +422,16 @@ pub enum Exception {
 /// Returns the exception explaining why `ours` differs from `oracle` for `document`, which lol_html
 /// saw as `observed`, or `None` if nothing does.
 pub fn exception(
+    strategy: InjectionStrategy,
     document: &[u8],
     observed: &Observed,
     ours: Option<usize>,
     oracle: Option<usize>,
 ) -> Option<Exception> {
     let lower = document.to_ascii_lowercase();
+    if strategy == InjectionStrategy::HeadCloseTag {
+        return head_close_exception(&lower, observed, ours, oracle);
+    }
     let window = &lower[..lower.len().min(WINDOW)];
     if let Some(head) = observed.heads.first() {
         let in_template = |&(start, end): &(usize, Option<usize>)| {
@@ -400,6 +475,60 @@ pub fn exception(
             let head_end = observed.heads.first().map_or(0, |head| return head.end);
             if contains(&window[head_end.min(window.len())..], b"charset") {
                 return Some(Exception::EncodingDeclaration);
+            }
+        }
+        _ => {}
+    }
+    return None;
+}
+
+/// [`exception`] for [`InjectionStrategy::HeadCloseTag`], given the lower case document.
+fn head_close_exception(
+    lower: &[u8],
+    observed: &Observed,
+    ours: Option<usize>,
+    oracle: Option<usize>,
+) -> Option<Exception> {
+    if let Some(head) = observed.heads.first() {
+        let in_template = |&(start, end): &(usize, Option<usize>)| {
+            return start < head.start && end.is_none_or(|end| return end > head.start);
+        };
+        if observed.templates.iter().any(in_template) {
+            return Some(Exception::HeadInTemplate);
+        }
+    }
+    match (ours, oracle) {
+        // lol_html closed the head on another end tag, a `</template>` popping it along: the
+        // `in head` insertion mode, and the injector, ignore those.
+        (None, Some(end))
+            if !lower[end..].starts_with(b"</head")
+                && !lower[end..].starts_with(b"</html")
+                && !lower[end..].starts_with(b"</body")
+                && !lower[end..].starts_with(b"</br") =>
+        {
+            return Some(Exception::StrayEndTag);
+        }
+        (Some(ours), None)
+            if observed
+                .heads
+                .first()
+                .is_none_or(|head| return head.start > ours) =>
+        {
+            return Some(Exception::HeadStartOmitted);
+        }
+        (None, Some(end)) => {
+            let head_start = observed.heads.first().map_or(0, |head| return head.start);
+            // Up to and including the end tag lol_html closes the head at: the one at `end` is not
+            // a `</head>` one when one of those closed it.
+            let before = &lower[head_start.min(end)..(end + 6).min(lower.len())];
+            if contains(&lower[..end], b"<![cdata[") {
+                return Some(Exception::CdataSection);
+            }
+            if [b"</br".as_slice(), b"</body", b"</html"]
+                .iter()
+                .any(|end_tag| return contains(before, end_tag))
+            {
+                return Some(Exception::EndTagClosingHead);
             }
         }
         _ => {}

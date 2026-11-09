@@ -8,11 +8,17 @@
 //! chunk, then split into chunks, and checks every run against the single one and against the
 //! oracle.
 
-use inject_browser_sdk::injector::Injector;
+use inject_browser_sdk::injector::{InjectionStrategy, Injector};
 
 use super::oracle;
 
 pub const SNIPPET: &[u8] = b"{{SNIPPET}}";
+
+/// Every strategy, each document runs under all of them.
+pub const STRATEGIES: [InjectionStrategy; 2] = [
+    InjectionStrategy::HeadCloseTag,
+    InjectionStrategy::HeadOpenTag,
+];
 
 /// What a run of the injector produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,8 +44,8 @@ pub fn split<'a>(document: &'a [u8], points: &[usize]) -> Vec<&'a [u8]> {
 /// Writes `chunks` to an injector and checks the contract of every result along the way: slices
 /// flagged `from_incoming_chunk` point into the chunk just written and the others do not, every
 /// byte comes out exactly once, and what is held back is reported. Panics on a violation.
-pub fn run(chunks: &[&[u8]]) -> Run {
-    let mut injector = Injector::new(SNIPPET);
+pub fn run(strategy: InjectionStrategy, chunks: &[&[u8]]) -> Run {
+    let mut injector = Injector::with_strategy(SNIPPET, strategy);
     let mut output = Vec::new();
     let mut injected_at = None;
     let mut written = 0;
@@ -91,8 +97,8 @@ pub fn run(chunks: &[&[u8]]) -> Run {
 
 /// Replays how a server that queues the incoming chunks rebuilds them around the injection, as the
 /// IIS module does, see the `chunk_rebuild` unit tests: it must serve what `run` output.
-pub fn rebuild(chunks: &[&[u8]]) -> Vec<u8> {
-    let mut injector = Injector::new(SNIPPET);
+pub fn rebuild(strategy: InjectionStrategy, chunks: &[&[u8]]) -> Vec<u8> {
+    let mut injector = Injector::with_strategy(SNIPPET, strategy);
     for (index, chunk) in chunks.iter().enumerate() {
         let held = injector.held_back();
         let result = injector.write(chunk);
@@ -121,37 +127,46 @@ pub fn rebuild(chunks: &[&[u8]]) -> Vec<u8> {
 }
 
 /// Checks `document` split at `points` behaves exactly like `single`, the single chunk run.
-pub fn check_chunking(document: &[u8], single: &Run, points: &[usize]) {
+pub fn check_chunking(
+    strategy: InjectionStrategy,
+    document: &[u8],
+    single: &Run,
+    points: &[usize],
+) {
     let chunks = split(document, points);
-    let chunked = run(&chunks);
+    let chunked = run(strategy, &chunks);
     assert_eq!(
         &chunked, single,
-        "split at {points:?}: output differs from the single chunk one"
+        "{strategy:?} split at {points:?}: output differs from the single chunk one"
     );
     assert_eq!(
-        rebuild(&chunks),
+        rebuild(strategy, &chunks),
         single.output,
-        "split at {points:?}: the rebuilt chunks differ from the single chunk output"
+        "{strategy:?} split at {points:?}: the rebuilt chunks differ from the single chunk output"
     );
 }
 
 /// Checks the injector put the snippet where lol_html says it goes in `document`, short of a
 /// documented [`oracle::Exception`]. Returns the exception, if one applied.
-pub fn check_oracle(document: &[u8], single: &Run) -> Option<oracle::Exception> {
+pub fn check_oracle(
+    strategy: InjectionStrategy,
+    document: &[u8],
+    single: &Run,
+) -> Option<oracle::Exception> {
     if oracle::has_foreign_content(document) {
         return Some(oracle::Exception::ForeignContent);
     }
     let Some(observed) = oracle::observe(&[document]) else {
         return Some(oracle::Exception::Ambiguous);
     };
-    let expected = oracle::injection_point(&observed);
+    let expected = oracle::injection_point(strategy, &observed);
     if single.injected_at == expected {
         return None;
     }
-    let exception = oracle::exception(document, &observed, single.injected_at, expected);
+    let exception = oracle::exception(strategy, document, &observed, single.injected_at, expected);
     assert!(
         exception.is_some(),
-        "injected at {:?}, lol_html says {:?}, in:\n{}",
+        "{strategy:?} injected at {:?}, lol_html says {:?}, in:\n{}",
         single.injected_at,
         expected,
         String::from_utf8_lossy(document)
@@ -171,15 +186,20 @@ pub fn check_oracle_chunking(document: &[u8], points: &[usize]) {
     );
     // Where a text node starts may move by the bytes of a character the chunks split: only what the
     // oracle makes of the text has to be the same.
-    assert_eq!(
-        split.as_ref().map(oracle::injection_point),
-        single.as_ref().map(oracle::injection_point),
-        "lol_html split at {points:?}"
-    );
+    for strategy in STRATEGIES {
+        let point =
+            |observed: &oracle::Observed| return oracle::injection_point(strategy, observed);
+        assert_eq!(
+            split.as_ref().map(point),
+            single.as_ref().map(point),
+            "lol_html split at {points:?}, {strategy:?}"
+        );
+    }
     let without_text = |observed: Option<oracle::Observed>| {
         return observed.map(|observed| {
             return oracle::Observed {
                 text: Vec::new(),
+                data_text: Vec::new(),
                 ..observed
             };
         });

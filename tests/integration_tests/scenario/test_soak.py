@@ -100,7 +100,8 @@ def _payloads() -> list[Payload]:
     head_at = WINDOW - 3
     add(
         "head straddling the window end",
-        "a" * head_at + "<head><meta name='a'>",
+        # Padded with a comment: text would close the head before its end tag.
+        "<!--" + "c" * (head_at - len("<!---->")) + "--><head><meta name='a'>",
         "</head><body>hi</body>",
     )
     add(

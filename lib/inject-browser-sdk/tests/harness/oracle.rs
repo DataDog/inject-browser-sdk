@@ -204,8 +204,8 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> Vec<Range<usize>> {
 /// injected at all:
 /// * nowhere without a `<head>` tag, nor past body content (see [`Observed::body_content`]), nor
 ///   when it starts past the window and no `<html>` or `<meta>` start tag starts within it;
-/// * otherwise past the last `<meta>` child of the first head declaring the character encoding or
-///   `X-UA-Compatible`, and coming before any child the head cannot hold, or else right after the
+/// * otherwise past the last `<meta>` child of the first head declaring the character encoding,
+///   `X-UA-Compatible` or a `Content-Security-Policy`, and coming before any child the head cannot hold, or else right after the
 ///   `<head>` tag. Children are looked at within the window, and past it while every one since the
 ///   `<head>` tag is a `<meta>` or a `<title>`, with no text but whitespace between them, up to
 ///   [`WALK_LIMIT`].
@@ -269,11 +269,15 @@ pub fn injection_point(observed: &Observed) -> Option<usize> {
 }
 
 /// Whether the snippet has to stay behind `meta`: it declares the character encoding, per the HTML
-/// spec's prescan, or is `X-UA-Compatible`.
+/// spec's prescan, or is `X-UA-Compatible` or `Content-Security-Policy` (the enforcing one: a
+/// report-only policy is ignored in a meta).
 fn is_relevant(meta: &HeadChild) -> bool {
     let known = |label: &str| return encoding_rs::Encoding::for_label(label.as_bytes()).is_some();
     let http_equiv = meta.http_equiv.as_deref().map(str::trim);
-    if http_equiv.is_some_and(|value| return value.eq_ignore_ascii_case("x-ua-compatible")) {
+    if http_equiv.is_some_and(|value| {
+        return value.eq_ignore_ascii_case("x-ua-compatible")
+            || value.eq_ignore_ascii_case("content-security-policy");
+    }) {
         return true;
     }
     if let Some(charset) = &meta.charset {

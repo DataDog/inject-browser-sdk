@@ -174,6 +174,8 @@ fn random_documents() {
         "<meta charset=utf-8>",
         "<meta charset=bogus>",
         "<meta http-equiv=X-UA-Compatible content=IE=edge>",
+        "<meta http-equiv=Content-Security-Policy content=\"script-src 'self'\">",
+        "<meta http-equiv=content-security-policy-report-only content=x>",
         "<META HTTP-EQUIV='content-type' CONTENT='text/html; charset=latin1'>",
         "<meta name=a>",
         "<META NAME='b'>",
@@ -258,6 +260,7 @@ fn random_meta_runs() {
     const RELEVANT: &[&str] = &[
         "<meta charset=utf-8>",
         "<meta http-equiv=X-UA-Compatible content=IE=edge>",
+        "<meta http-equiv=Content-Security-Policy content=x>",
         "<meta http-equiv=content-type content='text/html; charset=utf-8'>",
         "<meta charset=bogus>",
     ];

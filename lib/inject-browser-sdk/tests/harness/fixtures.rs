@@ -115,13 +115,14 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
 </html>
 "#,
         ),
+        // A meta-delivered policy governs what follows it: the snippet goes after it, under it.
         Fixture::new(
             "csp-meta",
             r#"<!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">{{SNIPPET}}
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.datadoghq-browser-agent.com">
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.datadoghq-browser-agent.com">{{SNIPPET}}
 <title>Secure</title>
 <script src="/app.js"></script>
 </head>

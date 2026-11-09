@@ -13,6 +13,8 @@
 "charset=\x22windows-1252\x22"
 "http-equiv=\x22content-type\x22"
 "http-equiv=\x22X-UA-Compatible\x22"
+"http-equiv=\x22Content-Security-Policy\x22"
+"content-security-policy-report-only"
 "content=\x22IE=edge\x22"
 "<meta name=a>"
 "content=\x22text/html; charset=utf-8\x22"

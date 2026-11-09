@@ -10,6 +10,8 @@
 //! element but `<title>` and other `<meta>` tags, or a `Content-Security-Policy` one, which only
 //! governs what follows it. See [`meta_kind`].
 
+use alloc::vec::Vec;
+
 use super::parser::compare_case_insensitive;
 
 /// Every character encoding label the browser can resolve, in the order the WHATWG Encoding
@@ -152,12 +154,18 @@ pub(super) fn meta_kind(tag: &[u8]) -> MetaKind {
     if has_encoding_attributes(tag) {
         return MetaKind::Encoding;
     }
-    // The value has to spell it out, so a tag without it is not parsed.
-    if !contains_ignore_case(tag, b"x-ua") && !contains_ignore_case(tag, b"content-security-policy")
+    // The value has to spell it out, or hold a character reference that may: a tag with neither is
+    // not parsed.
+    if !contains_ignore_case(tag, b"x-ua")
+        && !contains_ignore_case(tag, b"content-security-policy")
+        && !tag.contains(&b'&')
     {
         return MetaKind::Other;
     }
-    let Some(mut index) = tag.iter().position(|&b| return b.is_ascii_whitespace()) else {
+    let Some(mut index) = tag
+        .iter()
+        .position(|&b| return b.is_ascii_whitespace() || b == b'/')
+    else {
         return MetaKind::Other;
     };
     loop {
@@ -169,7 +177,10 @@ pub(super) fn meta_kind(tag: &[u8]) -> MetaKind {
         index = next_index;
         // Only the first `http-equiv` counts, the parser drops the others.
         if compare_case_insensitive(name, b"http-equiv") {
-            let value = value.trim_ascii();
+            // The parser decodes character references in attribute values, unlike the encoding
+            // prescan: `Content-Security-Polic&#121;` is a policy.
+            let decoded = decode_character_references(value);
+            let value = decoded.trim_ascii();
             if compare_case_insensitive(value, b"x-ua-compatible") {
                 return MetaKind::Compatibility;
             }
@@ -203,8 +214,11 @@ pub(super) fn has_encoding_attributes(tag: &[u8]) -> bool {
     if !contains_ignore_case(tag, b"charset") {
         return false;
     }
-    // Attributes start after the tag name, at the first whitespace character.
-    let Some(mut index) = tag.iter().position(|&b| return b.is_ascii_whitespace()) else {
+    // Attributes start after the tag name, at the first whitespace character or `/`.
+    let Some(mut index) = tag
+        .iter()
+        .position(|&b| return b.is_ascii_whitespace() || b == b'/')
+    else {
         return false;
     };
 
@@ -335,12 +349,18 @@ fn position_case_insensitive(haystack: &[u8], needle_lower_case: &[u8]) -> Optio
 /// `tag[index]` must be neither a whitespace character nor `>`, which guarantees that the returned
 /// index is greater than `index`.
 fn parse_attribute(tag: &[u8], index: usize) -> (&[u8], &[u8], usize) {
-    let mut i = index;
-
-    while i < tag.len() && !tag[i].is_ascii_whitespace() && tag[i] != b'=' && tag[i] != b'>' {
+    // A `/` between attributes is skipped, as the tokenizer and the encoding prescan both do:
+    // `<meta /http-equiv=…>` holds a `http-equiv` attribute.
+    let mut start = index;
+    while start < tag.len() && (tag[start] == b'/' || tag[start].is_ascii_whitespace()) {
+        start += 1;
+    }
+    let mut i = start;
+    // A name ends at a `/` too.
+    while i < tag.len() && !tag[i].is_ascii_whitespace() && !matches!(tag[i], b'=' | b'>' | b'/') {
         i += 1;
     }
-    let name = &tag[index..i];
+    let name = &tag[start..i];
 
     // Whitespace is allowed around the '=' sign.
     i = skip_whitespace(tag, i);
@@ -364,6 +384,65 @@ fn parse_attribute(tag: &[u8], index: usize) -> (&[u8], &[u8], usize) {
         i += 1;
     }
     return (name, &tag[value_start..i], i);
+}
+
+/// `value` with the character references that can decode to ASCII decoded: numeric ones (`&#121;`,
+/// `&#x79;`, the `;` optional, as the parser has it) and `&Tab;` / `&NewLine;`. No named reference
+/// stands for an ASCII letter, digit or `-`, so these are all a `http-equiv` value can use to spell
+/// one. A reference to anything else decodes to `\0`, which matches no value; any other `&` is kept.
+fn decode_character_references(value: &[u8]) -> Vec<u8> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut i = 0;
+    while i < value.len() {
+        if value[i] != b'&' {
+            decoded.push(value[i]);
+            i += 1;
+            continue;
+        }
+        let rest = &value[i + 1..];
+        const NAMED: [(&[u8], u8); 2] = [(b"Tab;", b'\t'), (b"NewLine;", b'\n')];
+        let named = NAMED.iter().find(|(name, _)| return rest.starts_with(name));
+        if let Some((name, byte)) = named {
+            decoded.push(*byte);
+            i += 1 + name.len();
+            continue;
+        }
+        let (radix, digits_start) = match rest {
+            [b'#', b'x' | b'X', ..] => (16, 2),
+            [b'#', ..] => (10, 1),
+            _ => {
+                decoded.push(b'&');
+                i += 1;
+                continue;
+            }
+        };
+        let digits = rest[digits_start..]
+            .iter()
+            .take_while(|&&byte| return (byte as char).is_digit(radix))
+            .count();
+        if digits == 0 {
+            decoded.push(b'&');
+            i += 1;
+            continue;
+        }
+        let number =
+            rest[digits_start..digits_start + digits]
+                .iter()
+                .try_fold(0u32, |number, &byte| {
+                    return number
+                        .checked_mul(radix)?
+                        .checked_add((byte as char).to_digit(radix)?);
+                });
+        decoded.push(match number {
+            Some(code) if code > 0 && code < 0x80 => code as u8,
+            _ => 0,
+        });
+        i += 1 + digits_start + digits;
+        if value.get(i) == Some(&b';') {
+            i += 1;
+        }
+    }
+    return decoded;
 }
 
 fn skip_whitespace(input: &[u8], mut index: usize) -> usize {

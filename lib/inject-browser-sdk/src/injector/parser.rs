@@ -133,6 +133,13 @@ pub(super) fn find_injection_point(window: &[u8], head_end: usize, complete: boo
             continue;
         }
 
+        // The `in head` insertion mode ignores a `<head>` start tag, and merges an `<html>` one into
+        // the root element: neither ends the head.
+        if compare_case_insensitive(name, b"head") || compare_case_insensitive(name, b"html") {
+            offset = tag_end;
+            continue;
+        }
+
         let tag_name = parse_tag_name(name);
         if !matches!(tag_name, Some(TagName::Meta | TagName::RawText(b"title"))) {
             leading = false;
@@ -1177,6 +1184,19 @@ mod tests {
     }
 
     #[test]
+    fn past_head_and_html_start_tags_within_the_head() {
+        // The browser ignores the one, merges the other into the root: the head goes on.
+        test_injector(
+            "<html><head><head><meta charset=utf-8></head>",
+            "<html><head><head><meta charset=utf-8>{{SNIPPET}}</head>",
+        );
+        test_injector(
+            "<html><head><html lang=en><meta charset=utf-8><title>t</title></head>",
+            "<html><head><html lang=en><meta charset=utf-8>{{SNIPPET}}<title>t</title></head>",
+        );
+    }
+
+    #[test]
     fn after_a_content_security_policy_meta() {
         // The policy only governs what follows it: the snippet goes under it, not ahead of it.
         test_injector(
@@ -1197,6 +1217,24 @@ mod tests {
             "<html><head><title>t</title><link rel=icon><script>1</script><meta http-equiv=' CONTENT-security-POLICY ' content=x><style></style></head>",
             "<html><head><title>t</title><link rel=icon><script>1</script><meta http-equiv=' CONTENT-security-POLICY ' content=x>{{SNIPPET}}<style></style></head>",
         );
+        // Spelled with character references, which the parser decodes in attribute values.
+        test_injector(
+            "<html><head><meta http-equiv=\"Content-Security-Polic&#121;\" content=x><title>t</title></head>",
+            "<html><head><meta http-equiv=\"Content-Security-Polic&#121;\" content=x>{{SNIPPET}}<title>t</title></head>",
+        );
+        test_injector(
+            "<html><head><meta http-equiv='&#x43;ontent-Security-Policy&Tab;' content=x></head>",
+            "<html><head><meta http-equiv='&#x43;ontent-Security-Policy&Tab;' content=x>{{SNIPPET}}</head>",
+        );
+        test_injector(
+            "<html><head><meta http-equiv='Content-Security-Polic&#200;' content=x></head>",
+            "<html><head>{{SNIPPET}}<meta http-equiv='Content-Security-Polic&#200;' content=x></head>",
+        );
+        // After a `/`, which the tokenizer skips between attributes.
+        test_injector(
+            "<html><head><meta /http-equiv=\"Content-Security-Policy\" content=x><title>t</title></head>",
+            "<html><head><meta /http-equiv=\"Content-Security-Policy\" content=x>{{SNIPPET}}<title>t</title></head>",
+        );
         // Written in a comment or a raw text element, it is no tag.
         test_injector(
             "<html><head><!-- <meta http-equiv=content-security-policy> --><script>'<meta http-equiv=content-security-policy>'</script></head>",
@@ -1211,6 +1249,24 @@ mod tests {
         test_injector(
             &alloc::format!("<html><head><link rel=icon>{padding}<meta http-equiv=content-security-policy content=x></head>"),
             &alloc::format!("<html><head>{{{{SNIPPET}}}}<link rel=icon>{padding}<meta http-equiv=content-security-policy content=x></head>"),
+        );
+    }
+
+    #[test]
+    fn attributes_after_a_slash() {
+        // The tokenizer and the encoding prescan skip a `/` between attributes, and end a tag name
+        // or an attribute name at one.
+        test_injector(
+            "<html><head><meta/charset=utf-8><title>t</title></head>",
+            "<html><head><meta/charset=utf-8>{{SNIPPET}}<title>t</title></head>",
+        );
+        test_injector(
+            "<html><head><meta name=a /charset=utf-8><title>t</title></head>",
+            "<html><head><meta name=a /charset=utf-8>{{SNIPPET}}<title>t</title></head>",
+        );
+        test_injector(
+            "<html><head><meta / / http-equiv=x-ua-compatible content=IE=edge><title>t</title></head>",
+            "<html><head><meta / / http-equiv=x-ua-compatible content=IE=edge>{{SNIPPET}}<title>t</title></head>",
         );
     }
 
@@ -1279,8 +1335,6 @@ mod tests {
             "<body>",
             "<p>",
             "<svg>",
-            "<head>",
-            "<html>",
             "<textarea>",
             "<noembed>",
             "<iframe>",
@@ -1482,9 +1536,10 @@ mod tests {
             "<html><head></3 '><meta charset=utf-8>{{SNIPPET}}'></head></html>",
         );
         // A doctype ends at its first `>` as well, quoted or not, so the `<head>` after one is found.
+        // What follows it, `">`, is text then, which starts the body: no `<head>` counts past it.
         test_injector(
             "<!DOCTYPE html SYSTEM \"x>\"><html><head></head></html>",
-            "<!DOCTYPE html SYSTEM \"x>\"><html><head>{{SNIPPET}}</head></html>",
+            "<!DOCTYPE html SYSTEM \"x>\"><html><head></head></html>",
         );
         // A `>` written within a quoted identifier ends the doctype where it stands: the tokenizer
         // emits the token there, so what follows is markup rather than the rest of the identifier.
@@ -1697,10 +1752,12 @@ mod tests {
 
     #[test]
     fn spaces() {
-        test_injector("abc <head>def", "abc <head>{{SNIPPET}}def");
-        test_injector("abc<head >def", "abc<head >{{SNIPPET}}def");
-        test_injector("abc<head >def", "abc<head >{{SNIPPET}}def");
-        test_injector("abc<head> def", "abc<head>{{SNIPPET}} def");
+        test_injector(" \n<head>def", " \n<head>{{SNIPPET}}def");
+        test_injector("<head >def", "<head >{{SNIPPET}}def");
+        test_injector("\t<head\n>def", "\t<head\n>{{SNIPPET}}def");
+        test_injector("<head> def", "<head>{{SNIPPET}} def");
+        // Text before it closes the head the browser opens for it: the tag is ignored then.
+        test_injector("abc <head>def", "abc <head>def");
     }
 
     mod no_supported_cases {

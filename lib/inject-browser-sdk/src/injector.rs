@@ -115,8 +115,9 @@ enum HeadWindow<'a> {
 ///   served as `text/html`, and out of documents that have no `<head>` tag.
 ///
 /// Either way, a `<head>` tag only counts before any start tag but `<html>` and the ones the head
-/// may hold: past a `<body>`, a `<div>` or any other body content, the browser ignores one, and the
-/// search for it ends there rather than read the rest of the document.
+/// may hold, and before any text but whitespace: past a `<body>`, a `<div>`, any other body content
+/// or text, the browser ignores one, and the search for it ends there rather than read the rest of
+/// the document. Within a `<template>`, whose content is inert, none of these count.
 ///
 /// The first DOCUMENT_CHARSET_SCAN_LIMIT bytes are held back until they are complete, which delays
 /// the start of the response body by as much. When they end within a head that is still a run of
@@ -660,7 +661,7 @@ mod tests {
         struct Part {
             string: &'static str,
             has_head: bool,
-            /// A start tag the head cannot follow, which ends the search for one.
+            /// A start tag the head cannot follow, or text, which ends the search for one.
             ends_search: bool,
         }
 
@@ -685,7 +686,7 @@ mod tests {
         // None of these parts can combine into a tag across a boundary, so a `<head>` can only ever
         // come from a single `has_head` part, and no part can follow it within the head as a meta
         // the snippet has to stay behind.
-        let parts: [Part; 18] = [
+        let parts: [Part; 19] = [
             Part::new("<head>", true),
             Part::new("<head >", true),
             Part::new("<HeAd>", true),
@@ -693,15 +694,18 @@ mod tests {
             Part::body_content("<h ead>"),
             Part::body_content("<he ad>"),
             Part::body_content("<header>"),
-            Part::new("h>", false),
-            Part::new("/>", false),
-            Part::new(">", false),
+            // Text ends the search for the `<head>` tag, as body content does: the browser closes
+            // the head on it. Whitespace does not, nor does a reference to it.
+            Part::body_content("h>"),
+            Part::body_content("/>"),
+            Part::body_content(">"),
             Part::new(" ", false),
-            Part::new("foo", false),
-            Part::new("bar", false),
-            Part::new("&nbsp;", false),
-            Part::new("😊", false),
-            Part::new("网络", false),
+            Part::new("&#32;", false),
+            Part::body_content("foo"),
+            Part::body_content("bar"),
+            Part::body_content("&nbsp;"),
+            Part::body_content("😊"),
+            Part::body_content("网络"),
             // Metas the snippet need not stay behind: it still goes right after the `<head>` tag.
             Part::new("<meta name=description content=x>", false),
             Part::new("<meta name=dd-trace-id content=1>", false),
@@ -761,7 +765,7 @@ mod tests {
                 ["<head", ">abc</he", "ad>def"],
                 "<head>{{SNIPPET}}abc</head>def",
             );
-            test_injector(["abc<head>def"], "abc<head>{{SNIPPET}}def");
+            test_injector([" \n<head>def"], " \n<head>{{SNIPPET}}def");
             test_injector(["<HeAd lang=en>def"], "<HeAd lang=en>{{SNIPPET}}def");
         }
 
@@ -835,7 +839,7 @@ mod tests {
         /// The `<head>` tag starts within the window but ends past it: the snippet goes right after it.
         #[test]
         fn head_tag_straddling_the_window_end() {
-            let filler = "a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 3);
+            let filler = " ".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 3);
             test_injector(
                 [filler.clone() + "<head><meta name=a>"],
                 &(filler.clone() + "<head>{{SNIPPET}}<meta name=a>"),
@@ -1147,30 +1151,30 @@ mod tests {
         /// Evidence that starts within the window counts, wherever it ends.
         #[test]
         fn evidence_straddling_the_window_end() {
-            let filler = "a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 2);
+            let filler = " ".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 2);
             test_injector(
-                [filler.clone() + "<meta charset=utf-8>x<head>y"],
-                &(filler.clone() + "<meta charset=utf-8>x<head>{{SNIPPET}}y"),
+                [filler.clone() + "<meta charset=utf-8> <head>y"],
+                &(filler.clone() + "<meta charset=utf-8> <head>{{SNIPPET}}y"),
             );
             test_injector(
                 [
                     filler.clone(),
                     String::from("<m"),
-                    String::from("eta>x<head>y"),
+                    String::from("eta> <head>y"),
                 ],
-                &(filler.clone() + "<meta>x<head>{{SNIPPET}}y"),
+                &(filler.clone() + "<meta> <head>{{SNIPPET}}y"),
             );
             // A tag that starts there and turns out to be something else is no evidence.
             test_injector(
                 [
                     filler.clone(),
                     String::from("<m"),
-                    String::from("ark>x<head>y"),
+                    String::from("ark> <head>y"),
                 ],
-                &(filler.clone() + "<mark>x<head>y           "),
+                &(filler.clone() + "<mark> <head>y           "),
             );
             // Nor is one that only starts past the window.
-            let filler = "a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT);
+            let filler = " ".repeat(DOCUMENT_CHARSET_SCAN_LIMIT);
             test_injector(
                 [filler.clone() + "<html><head>y"],
                 &(filler + "<html><head>y           "),
@@ -1179,8 +1183,8 @@ mod tests {
 
         #[test]
         fn head_tag_split_one_byte_at_a_time() {
-            let input = String::from("<html>") + &filler() + "abc<head lang=en>def";
-            let expected = String::from("<html>") + &filler() + "abc<head lang=en>{{SNIPPET}}def";
+            let input = String::from("<html>") + &filler() + " \n\t<head lang=en>def";
+            let expected = String::from("<html>") + &filler() + " \n\t<head lang=en>{{SNIPPET}}def";
 
             // One chunk to get past the window, then a chunk per remaining byte.
             let mut chunks = alloc::vec![String::from(&input[..DOCUMENT_CHARSET_SCAN_LIMIT])];
@@ -1196,9 +1200,9 @@ mod tests {
         /// The `<head>` tag is in the rest of the chunk that completes the window.
         #[test]
         fn head_tag_in_the_rest_of_the_chunk_completing_the_window() {
-            let filler = String::from("<html>") + &"a".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 7);
-            let input = [filler.clone(), String::from("Bcd<head>efg")];
-            let expected = filler + "Bcd<head>{{SNIPPET}}efg";
+            let filler = String::from("<html>") + &" ".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 7);
+            let input = [filler.clone(), String::from("   <head>efg")];
+            let expected = filler + "   <head>{{SNIPPET}}efg";
 
             test_injector(input, &expected);
         }
@@ -1217,7 +1221,7 @@ mod tests {
                 Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadOpenTag);
 
             injector.write(b"<html>");
-            let big_chunk = alloc::vec![b'b'; 8 * DOCUMENT_CHARSET_SCAN_LIMIT];
+            let big_chunk = alloc::vec![b' '; 8 * DOCUMENT_CHARSET_SCAN_LIMIT];
             let emitted: usize = injector
                 .write(&big_chunk)
                 .iter()
@@ -1682,6 +1686,35 @@ mod tests {
             );
             check("<html>text<head></head>", "<html>text<head></head>");
             check("<html><head>&nbsp;</head>", "<html><head>&nbsp;</head>");
+            // A character reference to whitespace is whitespace, the `;` optional for a numeric one;
+            // a reference to anything else is text.
+            for whitespace in [
+                "&#32;",
+                "&#x20;",
+                "&#X9;",
+                "&Tab;",
+                "&NewLine;",
+                "&#10 ",
+                "&#0013;",
+            ] {
+                check(
+                    &format!("<html><head>{whitespace}</head>"),
+                    &format!("<html><head>{whitespace}{{{{SNIPPET}}}}</head>"),
+                );
+            }
+            for text in [
+                "&#65;",
+                "&nbsp;",
+                "&Tab",
+                "&#;",
+                "&amp;",
+                "&#x0000000000020;",
+            ] {
+                check(
+                    &format!("<html><head>{text}</head>"),
+                    &format!("<html><head>{text}</head>"),
+                );
+            }
             // A stray `<` is text.
             check(
                 "<html><head><<meta name=a></head>",
@@ -1716,6 +1749,21 @@ mod tests {
         }
 
         #[test]
+        fn not_within_a_template() {
+            // Template content is inert: a `</head>` tag in one closes nothing, and neither text nor
+            // body content in one ends the search.
+            check(
+                "<html><head><template></head><div>x</div></template><title>t</title></head>",
+                "<html><head><template></head><div>x</div></template><title>t</title>{{SNIPPET}}</head>",
+            );
+            // Nor is a `<head>` tag in one the head.
+            check(
+                "<html><template><head></template><head></head>",
+                "<html><template><head></template><head>{{SNIPPET}}</head>",
+            );
+        }
+
+        #[test]
         fn holds_back_only_an_end_tag_cut_short() {
             let mut injector = Injector::new(b"{{SNIPPET}}");
             let result = injector.write(b"<html><head><title>t</title></he");
@@ -1729,6 +1777,20 @@ mod tests {
             injector.write(b"<html><head></he");
             assert_eq!(injector.held_back(), "</he".len());
             injector.write(b"ader>");
+            assert_eq!(injector.held_back(), 0);
+        }
+
+        #[test]
+        fn releases_another_end_tag_as_soon_as_its_name_differs() {
+            // However long it goes on, it is never held back past where its name differs from
+            // `head`, so the cap never applies to it, whatever the chunking.
+            let name = "x".repeat(2 * MAX_PENDING_END_TAG);
+            check(
+                &format!("<html><head></{name}></head>"),
+                &format!("<html><head></{name}>{{{{SNIPPET}}}}</head>"),
+            );
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            injector.write(b"<html><head></hx");
             assert_eq!(injector.held_back(), 0);
         }
 

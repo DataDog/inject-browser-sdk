@@ -41,6 +41,10 @@ const MAX_RECENT: usize = 11;
 /// Elements whose content is text rather than markup, so a `<head>` written within one is not a tag.
 ///
 /// `noscript` is among them as browsers run with scripting enabled, and so does lol_html.
+/// Longest character reference read after its `&`, to tell a whitespace one: `#x0000000020` and the
+/// like are text then, rather than held without bound.
+const MAX_REFERENCE: usize = 12;
+
 /// What follows the `<!` of a CDATA section opener.
 const CDATA_SECTION_OPEN: &[u8] = b"[CDATA[";
 
@@ -132,6 +136,12 @@ enum State {
     },
     /// Past a `<plaintext>` tag, which nothing ends.
     Plaintext,
+    /// A character reference in text, past its `&`: one that decodes to whitespace keeps the head
+    /// open, any other is text.
+    CharacterReference {
+        name: [u8; MAX_REFERENCE],
+        length: usize,
+    },
     /// Past a `<![CDATA[`, whose end cannot be told without tracking foreign content: it runs to
     /// `]]>` within `svg` or `math` and to the first `>` anywhere else. Guessing wrong would find a
     /// `<head>` written in CDATA text, so nothing is looked for past it, as the window walk does.
@@ -139,9 +149,9 @@ enum State {
     /// The tag looked for was found; nothing is left to look for.
     Found,
     /// Past a start tag the head cannot follow, `<body>`, `<div>` or any other but the few
-    /// [`MAY_PRECEDE_HEAD`] lists: the browser has started the body by then and ignores a `<head>`
-    /// tag written later, so nothing is looked for past it. A document without a `<head>` tag,
-    /// which HTML allows, is not read to its end for nothing.
+    /// [`MAY_PRECEDE_HEAD`] lists, or past text other than whitespace: the browser has started the
+    /// body by then and ignores a `<head>` tag written later, so nothing is looked for past it. A
+    /// document without a `<head>` tag, which HTML allows, is not read to its end for nothing.
     PastHead,
 }
 
@@ -180,6 +190,10 @@ pub(super) struct HeadOpenTagLocator {
 
     /// Offset of the `<` of the first `<head>` start tag, looking for the `</head>` one.
     head_start: Option<usize>,
+
+    /// How many `<template>` elements are open. Their content is inert: a `<head>` or `</head>`
+    /// tag, body content or text within one changes nothing outside it.
+    template_depth: usize,
 }
 
 impl HeadOpenTagLocator {
@@ -201,6 +215,7 @@ impl HeadOpenTagLocator {
             recent_length: 0,
             html_evidence: None,
             head_start: None,
+            template_depth: 0,
         };
     }
 
@@ -231,12 +246,15 @@ impl HeadOpenTagLocator {
             return None;
         }
         return match self.state {
-            State::TagOpen
-            | State::EndTagOpen
-            | State::Tag {
+            State::TagOpen | State::EndTagOpen => Some(self.markup_start),
+            // Only while the name read so far may still be `head`: any other end tag is released
+            // as soon as it cannot be, however long it goes on.
+            State::Tag {
                 closing: true,
                 position: TagPosition::TagName,
-            } => Some(self.markup_start),
+            } if !self.name_overflow && b"head".starts_with(&self.name[..self.name_length]) => {
+                Some(self.markup_start)
+            }
             // The name is complete: only a `head` end tag is still pending, on its `>`.
             State::Tag { closing: true, .. } if self.name_is(b"head") => Some(self.markup_start),
             _ => None,
@@ -298,9 +316,11 @@ impl HeadOpenTagLocator {
         let found = |index: Option<usize>| return index.unwrap_or(rest.len());
         return match self.state {
             State::Found | State::PastHead | State::Plaintext | State::CdataSection => rest.len(),
+            // Text within a template does not count.
+            State::Data if self.template_depth > 0 => found(memchr(b'<', rest)),
             State::Data => {
-                let skipped = found(memchr(b'<', rest));
-                if self.target == Target::HeadEnd && holds_text(&rest[..skipped], position) {
+                let skipped = found(memchr2(b'<', b'&', rest));
+                if holds_text(&rest[..skipped], position) {
                     self.state = State::PastHead;
                     return rest.len();
                 }
@@ -353,12 +373,40 @@ impl HeadOpenTagLocator {
 
             State::Data => match byte {
                 b'<' => self.open_markup(offset),
+                b'&' if self.template_depth == 0 => State::CharacterReference {
+                    name: [0; MAX_REFERENCE],
+                    length: 0,
+                },
                 _ => State::Data,
             },
 
-            // Any other byte makes the `<` text, which closes the head, looking for its end tag.
+            State::CharacterReference { mut name, length } => {
+                let continues = byte.is_ascii_alphanumeric() || (length == 0 && byte == b'#');
+                if continues && length < MAX_REFERENCE {
+                    name[length] = byte;
+                    return {
+                        self.state = State::CharacterReference {
+                            name,
+                            length: length + 1,
+                        };
+                        false
+                    };
+                }
+                if !is_whitespace_reference(&name[..length], byte == b';') {
+                    State::PastHead
+                } else if byte == b';' {
+                    State::Data
+                } else {
+                    // The reference ends before this byte, which is read as the data it is.
+                    self.state = State::Data;
+                    return self.step(byte, offset);
+                }
+            }
+
+            // Any other byte makes the `<` text, which closes the head, or starts the body before
+            // one.
             State::TagOpen
-                if self.target == Target::HeadEnd
+                if self.template_depth == 0
                     && !matches!(byte, b'!' | b'/' | b'?')
                     && !byte.is_ascii_alphabetic() =>
             {
@@ -402,7 +450,7 @@ impl HeadOpenTagLocator {
                         let name_done = position == TagPosition::TagName && next != position;
                         if !closing && name_done {
                             self.complete_name();
-                            if !self.may_precede_head() {
+                            if self.template_depth == 0 && !self.may_precede_head() {
                                 self.state = State::PastHead;
                                 return false;
                             }
@@ -413,6 +461,12 @@ impl HeadOpenTagLocator {
                         }
                     }
                     // The tag ends at this `>`.
+                    None if closing && self.name_is(b"template") => {
+                        self.template_depth = self.template_depth.saturating_sub(1);
+                        State::Data
+                    }
+                    // Within a template, no end tag closes the head.
+                    None if closing && self.template_depth > 0 => State::Data,
                     None if closing => match self.target {
                         Target::HeadStart => State::Data,
                         Target::HeadEnd if self.name_is(b"head") => {
@@ -432,6 +486,20 @@ impl HeadOpenTagLocator {
                     },
                     None => {
                         self.complete_name();
+                        if self.name_is(b"template") {
+                            self.template_depth += 1;
+                            return {
+                                self.state = State::Data;
+                                false
+                            };
+                        }
+                        // Within a template, a start tag neither is the head nor ends it.
+                        if self.template_depth > 0 {
+                            return {
+                                self.state = self.state_after_start_tag();
+                                false
+                            };
+                        }
                         if self.name_is(b"head") {
                             if self.target == Target::HeadEnd {
                                 // Its own content is markup: carry on to its end tag.
@@ -696,6 +764,25 @@ impl HeadOpenTagLocator {
     }
 }
 
+/// Whether the character reference whose name follows the `&`, ended by a `;` when `terminated`,
+/// decodes to whitespace: a numeric one to a tab, a line feed, a form feed, a carriage return or a
+/// space (its `;` optional, as the parser has it), or `&Tab;` or `&NewLine;`.
+fn is_whitespace_reference(name: &[u8], terminated: bool) -> bool {
+    let number = match name {
+        [b'#', b'x' | b'X', digits @ ..] if !digits.is_empty() => {
+            digits.iter().try_fold(0u32, |n, &b| {
+                return n.checked_mul(16)?.checked_add((b as char).to_digit(16)?);
+            })
+        }
+        [b'#', digits @ ..] if !digits.is_empty() => digits.iter().try_fold(0u32, |n, &b| {
+            return n.checked_mul(10)?.checked_add((b as char).to_digit(10)?);
+        }),
+        b"Tab" | b"NewLine" => return terminated,
+        _ => return false,
+    };
+    return matches!(number, Some(0x09 | 0x0A | 0x0C | 0x0D | 0x20));
+}
+
 /// Whether `text`, read in the data state from `position` on, holds anything but whitespace or the
 /// byte order mark starting a UTF-8 document.
 fn holds_text(text: &[u8], position: usize) -> bool {
@@ -748,7 +835,7 @@ mod tests {
     #[test]
     fn basic() {
         assert_eq!(find("<head>"), Some((0, 6)));
-        assert_eq!(find("abc<head>def"), Some((3, 9)));
+        assert_eq!(find(" \n<head>def"), Some((2, 8)));
         assert_eq!(find("<html><HeAd lang=en>"), Some((6, 20)));
         assert_eq!(find("<head/>"), Some((0, 7)));
         assert_eq!(find("<head\n>"), Some((0, 7)));
@@ -758,8 +845,9 @@ mod tests {
     fn other_tags() {
         assert_eq!(find("<header><heads><hea><h ead>"), None);
         assert_eq!(find("</head><head>"), Some((7, 13)));
-        assert_eq!(find("< head><head>"), Some((7, 13)));
-        assert_eq!(find("<<head>"), Some((1, 7)));
+        // A stray `<` is text, which starts the body.
+        assert_eq!(find("< head><head>"), None);
+        assert_eq!(find("<<head>"), None);
     }
 
     #[test]
@@ -829,8 +917,17 @@ mod tests {
         assert_eq!(find("<textarea><head></textarea><head>"), None);
         assert_eq!(find("<script><head>"), None);
         assert_eq!(find("<plaintext></plaintext><head>"), None);
-        // Template content is markup.
-        assert_eq!(find("<template><head>"), Some((10, 16)));
+        // Template content is inert: a `<head>` tag in one is not the head, nor does text or body
+        // content in one end the search.
+        assert_eq!(find("<template><head>"), None);
+        assert_eq!(
+            find("<template><head><div>x</div></template><head>"),
+            Some((39, 45))
+        );
+        assert_eq!(
+            find("<template><template></template><head></template><head>"),
+            Some((48, 54))
+        );
     }
 
     #[test]
@@ -871,7 +968,7 @@ mod tests {
     #[test]
     fn pending_head_tag() {
         let mut locator = HeadOpenTagLocator::new();
-        locator.scan(b"ab<head");
+        locator.scan(b"\n\n<head");
         assert_eq!(locator.pending_tag_start(), Some(2));
         locator.scan(b" a='>");
         assert_eq!(locator.pending_tag_start(), Some(2));

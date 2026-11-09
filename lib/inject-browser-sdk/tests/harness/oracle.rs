@@ -8,7 +8,7 @@
 //! an independent oracle: its tokenizer and element stack decide what is really a tag, and what is
 //! really a child of `<head>`. Nothing is rewritten; only source locations are recorded.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -23,9 +23,8 @@ pub const WINDOW: usize = 1024;
 pub const WALK_LIMIT: usize = 10 * 1024;
 
 /// A text node, and whether it holds more than whitespace.
-/// A text node, whether it holds more than whitespace, and whether it holds more than whitespace
-/// in the data state, a byte order mark starting the document aside.
-type TextNode = (Range<usize>, bool, bool);
+/// A text node: where it is, its content, and whether it is in the data state.
+type TextNode = (Range<usize>, String, bool);
 
 /// A start tag directly within a `<head>`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -87,6 +86,10 @@ pub fn observe<T: AsRef<[u8]>>(chunks: &[T]) -> Option<Observed> {
     let (heads, children, evidence) = (observed.clone(), observed.clone(), observed.clone());
     let templates = observed.clone();
     let body = observed.clone();
+    // How many templates are open where an element starts: body content within one does not
+    // count, its content being inert.
+    let depth: Rc<Cell<usize>> = Rc::default();
+    let (template_depth, body_depth) = (depth.clone(), depth);
     let settings = Settings::new()
         .append_element_content_handler(element!("head", move |el: &mut Element| {
             let first = heads.borrow().heads.is_empty();
@@ -134,15 +137,19 @@ pub fn observe<T: AsRef<[u8]>>(chunks: &[T]) -> Option<Observed> {
                 observed.templates.len() - 1
             };
             let end = templates.clone();
+            template_depth.set(template_depth.get() + 1);
+            let end_depth = template_depth.clone();
             let _ = el.on_end_tag(end_tag!(move |tag| {
                 end.borrow_mut().templates[index].1 = Some(tag.source_location().bytes().start);
+                end_depth.set(end_depth.get().saturating_sub(1));
                 return Ok(());
             }));
             return Ok(());
         }))
         .append_element_content_handler(element!("*", move |el: &mut Element| {
             let mut observed = body.borrow_mut();
-            if observed.body_content.is_none()
+            if body_depth.get() == 0
+                && observed.body_content.is_none()
                 && !MAY_PRECEDE_HEAD.contains(&el.tag_name().to_ascii_lowercase().as_str())
             {
                 observed.body_content = Some(el.source_location().bytes().start);
@@ -174,29 +181,20 @@ pub fn observe<T: AsRef<[u8]>>(chunks: &[T]) -> Option<Observed> {
 /// handlers see.
 fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
     // Text nodes come in chunks, which the ones of the input decide: joined up, so that what is
-    // observed does not depend on them, along with whether they hold more than whitespace.
+    // observed does not depend on them.
     let nodes: Rc<RefCell<Vec<TextNode>>> = Rc::default();
     let text = nodes.clone();
     let settings =
         Settings::new().append_document_content_handler(doc_text!(move |chunk: &mut TextChunk| {
             let range = chunk.source_location().bytes();
-            let content = chunk.as_str();
-            let blank = content.bytes().all(|b| return b.is_ascii_whitespace());
             let data = chunk.text_type() == TextType::Data;
-            // A chunk split within the mark may move where its text starts by a byte or two.
-            let content = match range.start < 3 {
-                true => content.strip_prefix('\u{feff}').unwrap_or(content),
-                false => content,
-            };
-            let data_blank = !data || content.bytes().all(|b| return b.is_ascii_whitespace());
             let mut nodes = text.borrow_mut();
             match nodes.last_mut() {
-                Some((last, holds_text, holds_data_text)) if last.end == range.start => {
+                Some((last, content, _)) if last.end == range.start => {
                     last.end = range.end;
-                    *holds_text |= !blank;
-                    *holds_data_text |= !data_blank;
+                    content.push_str(chunk.as_str());
                 }
-                _ => nodes.push((range, !blank, !data_blank)),
+                _ => nodes.push((range, String::from(chunk.as_str()), data)),
             }
             return Ok(());
         }));
@@ -209,17 +207,77 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> (Vec<Range<usize>>, Vec<Range<usi
     if rewriter.end().is_err() {
         return (Vec::new(), Vec::new());
     }
+    let blank = |content: &str| return content.bytes().all(|b| return b.is_ascii_whitespace());
     let nodes = nodes.borrow();
-    let pick = |data: bool| {
-        return nodes
-            .iter()
-            .filter(|(range, holds_text, holds_data_text)| {
-                return !range.is_empty() && if data { *holds_data_text } else { *holds_text };
-            })
-            .map(|(range, _, _)| return range.clone())
-            .collect();
-    };
-    return (pick(false), pick(true));
+    let text = nodes
+        .iter()
+        .filter(|(range, content, _)| return !range.is_empty() && !blank(content))
+        .map(|(range, _, _)| return range.clone())
+        .collect();
+    let data_text = nodes
+        .iter()
+        .filter(|(range, content, data)| {
+            // A chunk split within the byte order mark may move where its text starts by a byte or
+            // two. Character references are decoded, as whitespace ones keep the head open.
+            let content = match range.start < 3 {
+                true => content.strip_prefix('\u{feff}').unwrap_or(content),
+                false => content.as_str(),
+            };
+            return *data && !range.is_empty() && !blank(&decode_references(content));
+        })
+        .map(|(range, _, _)| return range.clone())
+        .collect();
+    return (text, data_text);
+}
+
+/// `text` with its numeric character references (the `;` optional) and `&Tab;` / `&NewLine;`
+/// decoded, the ones that can stand for ASCII; any other `&` is left as it is.
+fn decode_references(text: &str) -> String {
+    let mut decoded = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        decoded.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let after = &rest[1..];
+        if let Some(tail) = after.strip_prefix("Tab;") {
+            decoded.push('\t');
+            rest = tail;
+            continue;
+        }
+        if let Some(tail) = after.strip_prefix("NewLine;") {
+            decoded.push('\n');
+            rest = tail;
+            continue;
+        }
+        let (radix, digits) = match after.as_bytes() {
+            [b'#', b'x' | b'X', ..] => (16, &after[2..]),
+            [b'#', ..] => (10, &after[1..]),
+            _ => {
+                decoded.push('&');
+                rest = after;
+                continue;
+            }
+        };
+        let length = digits
+            .bytes()
+            .take_while(|b| return (*b as char).is_digit(radix))
+            .count();
+        if length == 0 {
+            decoded.push('&');
+            rest = after;
+            continue;
+        }
+        let code = u32::from_str_radix(&digits[..length], radix).unwrap_or(u32::MAX);
+        decoded.push(
+            char::from_u32(code)
+                .filter(|c| return *c != '\0')
+                .unwrap_or('\u{fffd}'),
+        );
+        rest = &digits[length..];
+        rest = rest.strip_prefix(';').unwrap_or(rest);
+    }
+    decoded.push_str(rest);
+    return decoded;
 }
 
 /// Where the snippet must go in a document lol_html saw as `observed`, or `None` if it must not be
@@ -238,20 +296,48 @@ pub fn injection_point(strategy: InjectionStrategy, observed: &Observed) -> Opti
     };
 }
 
+/// Whether `position` is within the content of a `<template>`, which is inert.
+fn in_template(observed: &Observed, position: usize) -> bool {
+    return observed.templates.iter().any(|&(start, end)| {
+        return start < position && end.is_none_or(|end| return end > position);
+    });
+}
+
+/// The first `<head>` start tag outside templates, the one the browser opens the head with.
+fn first_head(observed: &Observed) -> Option<&Range<usize>> {
+    return observed
+        .heads
+        .iter()
+        .find(|head| return !in_template(observed, head.start));
+}
+
+/// Where the end tag closing the head starting at `head` starts: the first one past it, outside
+/// templates. The browser ignores a `<head>` tag within the head, which lol_html pairs that
+/// `</head>` with instead.
+fn head_end(observed: &Observed, head: &Range<usize>) -> Option<usize> {
+    return observed
+        .head_ends
+        .iter()
+        .copied()
+        .filter(|&end| return end > head.start && !in_template(observed, end))
+        .min();
+}
+
+/// Whether data text outside templates starts before `position`: the browser closes the head on it,
+/// and opens the body.
+fn text_before(observed: &Observed, position: usize) -> bool {
+    return observed.data_text.iter().any(|text| {
+        return text.start < position && !in_template(observed, text.start);
+    });
+}
+
 /// Where [`InjectionStrategy::HeadCloseTag`] must put the snippet in a document lol_html saw as
 /// `observed`: right before the end tag of the first head, if the document looks like HTML (an
 /// `<html>`, `<meta>` or `<head>` start tag starts within the window) and no body content comes
 /// before it. lol_html sees no head without a `<head>` start tag, see [`Exception::HeadStartOmitted`].
 fn head_close_point(observed: &Observed) -> Option<usize> {
-    let head = observed.heads.first()?;
-    // The browser ignores a `<head>` tag within the head, which lol_html pairs the first `</head>`
-    // with instead: the first one after the head starts closes it.
-    let end = observed
-        .head_ends
-        .iter()
-        .copied()
-        .filter(|&end| return end > head.start)
-        .min()?;
+    let head = first_head(observed)?;
+    let end = head_end(observed, head)?;
     let evidence = observed
         .html_evidence
         .map_or(head.start, |start| return start.min(head.start));
@@ -265,11 +351,7 @@ fn head_close_point(observed: &Observed) -> Option<usize> {
         return None;
     }
     // Text closes the head too.
-    if observed
-        .data_text
-        .iter()
-        .any(|text| return text.start < end)
-    {
+    if text_before(observed, end) {
         return None;
     }
     return Some(end);
@@ -277,10 +359,11 @@ fn head_close_point(observed: &Observed) -> Option<usize> {
 
 /// Where [`InjectionStrategy::HeadOpenTag`] must put the snippet, see [`injection_point`].
 fn head_open_point(observed: &Observed) -> Option<usize> {
-    let head = observed.heads.first()?;
+    let head = first_head(observed)?;
     if observed
         .body_content
         .is_some_and(|start| return start < head.start)
+        || text_before(observed, head.start)
     {
         return None;
     }
@@ -292,13 +375,7 @@ fn head_open_point(observed: &Observed) -> Option<usize> {
         return None;
     }
 
-    // A later `<head>` is nested in the first one or follows it, and the tags after it are its own.
-    let head_end = observed.first_head_end.unwrap_or(usize::MAX).min(
-        observed
-            .heads
-            .get(1)
-            .map_or(usize::MAX, |head| return head.start),
-    );
+    let head_end = head_end(observed, head).unwrap_or(usize::MAX);
     // Found past the window, the `<head>` tag is not walked from: the snippet goes right after it.
     if head.end > WINDOW {
         return Some(head.end);
@@ -312,6 +389,11 @@ fn head_open_point(observed: &Observed) -> Option<usize> {
             continue;
         }
         let name = child.name.as_str();
+        // The browser ignores a `<head>` start tag within the head, and merges an `<html>` one into
+        // the root element: neither ends it.
+        if name == "head" || name == "html" {
+            continue;
+        }
         if !ALLOWED_IN_HEAD.contains(&name) {
             break;
         }
@@ -340,7 +422,9 @@ fn head_open_point(observed: &Observed) -> Option<usize> {
 /// report-only policy is ignored in a meta).
 fn is_relevant(meta: &HeadChild) -> bool {
     let known = |label: &str| return encoding_rs::Encoding::for_label(label.as_bytes()).is_some();
-    let http_equiv = meta.http_equiv.as_deref().map(str::trim);
+    // The parser decodes character references in attribute values.
+    let http_equiv = meta.http_equiv.as_deref().map(decode_references);
+    let http_equiv = http_equiv.as_deref().map(str::trim);
     if http_equiv.is_some_and(|value| {
         return value.eq_ignore_ascii_case("x-ua-compatible")
             || value.eq_ignore_ascii_case("content-security-policy");
@@ -499,6 +583,16 @@ fn head_close_exception(
         }
     }
     match (ours, oracle) {
+        // lol_html closed a template still open at this `</head>`, along with the head: the
+        // browser, and the injector, ignore an end tag within a template.
+        (None, Some(end))
+            if observed
+                .templates
+                .iter()
+                .any(|&(_, template_end)| return template_end == Some(end)) =>
+        {
+            return Some(Exception::StrayEndTag);
+        }
         // lol_html closed the head on another end tag, a `</template>` popping it along: the
         // `in head` insertion mode, and the injector, ignore those.
         (None, Some(end))

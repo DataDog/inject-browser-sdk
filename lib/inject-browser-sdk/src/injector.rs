@@ -43,8 +43,9 @@ pub enum InjectionStrategy {
     /// first real one counts (not one written in a comment, an attribute value or a raw text
     /// element), and only in a document that looks like HTML: an `<html>`, `<meta>` or `<head>`
     /// start tag starts within the first DOCUMENT_CHARSET_SCAN_LIMIT bytes, before it. Body content
-    /// (`<body>`, `<div>`…), a `</body>`, `</html>` or `</br>` end tag, which close the head first,
-    /// and a CDATA section end the search; without HTML evidence in those bytes, the rest of the
+    /// (`<body>`, `<div>`…), text outside tags (whitespace and a leading byte order mark aside), a
+    /// `</body>`, `</html>` or `</br>` end tag, all of which close the head first, and a CDATA
+    /// section end the search; without HTML evidence in those bytes, the rest of the
     /// document is not scanned. The `</head>` tag may come anywhere past them.
     ///
     /// Holds back nothing but a `</head` tag that a chunk cuts short.
@@ -1674,6 +1675,29 @@ mod tests {
                     &format!("<html><head><title>t</title>{end}</head>"),
                 );
             }
+            // Text closes the head too: the snippet would not go in it.
+            check(
+                "<html><head><title>t</title>stray text</head>",
+                "<html><head><title>t</title>stray text</head>",
+            );
+            check("<html>text<head></head>", "<html>text<head></head>");
+            check("<html><head>&nbsp;</head>", "<html><head>&nbsp;</head>");
+            // A stray `<` is text.
+            check(
+                "<html><head><<meta name=a></head>",
+                "<html><head><<meta name=a></head>",
+            );
+            check("<html><head><'</head>", "<html><head><'</head>");
+            // Not whitespace, nor text within a raw text or RCDATA element, nor a byte order mark
+            // starting the document.
+            check(
+                "<html>\n <head>\t<title> t </title>\r\n</head>",
+                "<html>\n <head>\t<title> t </title>\r\n{{SNIPPET}}</head>",
+            );
+            check(
+                "\u{feff}<!DOCTYPE html><html><head></head>",
+                "\u{feff}<!DOCTYPE html><html><head>{{SNIPPET}}</head>",
+            );
             // Other end tags are ignored, as the browser does in the head.
             check(
                 "<html><head></p></div></head>",

@@ -17,7 +17,8 @@ pub(super) enum Target {
     /// The first `</head>` end tag, to inject right before it: one closing the head of a document
     /// that looked like HTML before it (see [`HeadOpenTagLocator::evidence`]), and coming before any
     /// body content. A `</body>`, `</html>` or `</br>` end tag closes the head first, and ends the
-    /// search, as body content does.
+    /// search, as body content does, and so does text other than whitespace (a byte order mark
+    /// starting the document aside): the browser closes the head on it.
     HeadEnd,
 }
 
@@ -271,7 +272,7 @@ impl HeadOpenTagLocator {
     pub(super) fn scan(&mut self, chunk: &[u8]) -> Option<HeadOpenTag> {
         let mut index = 0;
         loop {
-            index += self.skip(&chunk[index..]);
+            index += self.skip(&chunk[index..], self.offset + index);
             let Some(&byte) = chunk.get(index) else {
                 break;
             };
@@ -293,11 +294,18 @@ impl HeadOpenTagLocator {
     /// comment up to its `>`, comment content up to the next byte that may end it, a quoted
     /// attribute value up to its quote, raw text up to the next byte that may start its closing tag
     /// or, in a script, change its state. Most of a document is skipped this way.
-    fn skip(&mut self, rest: &[u8]) -> usize {
+    fn skip(&mut self, rest: &[u8], position: usize) -> usize {
         let found = |index: Option<usize>| return index.unwrap_or(rest.len());
         return match self.state {
             State::Found | State::PastHead | State::Plaintext | State::CdataSection => rest.len(),
-            State::Data => found(memchr(b'<', rest)),
+            State::Data => {
+                let skipped = found(memchr(b'<', rest));
+                if self.target == Target::HeadEnd && holds_text(&rest[..skipped], position) {
+                    self.state = State::PastHead;
+                    return rest.len();
+                }
+                skipped
+            }
             State::BogusComment => found(memchr(b'>', rest)),
             State::Tag {
                 position: TagPosition::QuotedAttributeValue(quote),
@@ -347,6 +355,15 @@ impl HeadOpenTagLocator {
                 b'<' => self.open_markup(offset),
                 _ => State::Data,
             },
+
+            // Any other byte makes the `<` text, which closes the head, looking for its end tag.
+            State::TagOpen
+                if self.target == Target::HeadEnd
+                    && !matches!(byte, b'!' | b'/' | b'?')
+                    && !byte.is_ascii_alphabetic() =>
+            {
+                State::PastHead
+            }
 
             State::TagOpen => match byte {
                 b'!' => State::MarkupDeclarationOpen { dashes: 0 },
@@ -677,6 +694,23 @@ impl HeadOpenTagLocator {
         }
         return true;
     }
+}
+
+/// Whether `text`, read in the data state from `position` on, holds anything but whitespace or the
+/// byte order mark starting a UTF-8 document.
+fn holds_text(text: &[u8], position: usize) -> bool {
+    const BOM: &[u8] = b"\xEF\xBB\xBF";
+    let mut text = text;
+    if let Some(mark) = BOM.get(position..) {
+        // The part of the mark this text may hold, from where the document is.
+        let common = text.len().min(mark.len());
+        if text[..common] == mark[..common] {
+            text = &text[common..];
+        }
+    }
+    return text
+        .iter()
+        .any(|&byte| return !matches!(byte, b'\t' | b'\n' | b'\x0C' | b'\r' | b' '));
 }
 
 #[cfg(test)]

@@ -32,8 +32,9 @@ pub enum InjectionStrategy {
     ///
     /// Only the first real one counts (not one written in a comment, an attribute value, a script or
     /// a style), and only in a document that looks like HTML: an `<html>`, `<meta>` or `<head>`
-    /// start tag within its first 1024 bytes, before it. Body content (`<body>`, `<div>`…), a
-    /// `</body>`, `</html>` or `</br>` end tag and a CDATA section end the search. The `</head>` tag
+    /// start tag within its first 1024 bytes, before it. Body content (`<body>`, `<div>`…), text
+    /// outside tags (whitespace and a leading byte order mark aside), a `</body>`, `</html>` or
+    /// `</br>` end tag and a CDATA section end the search. The `</head>` tag
     /// may come anywhere past those bytes. Holds back nothing but a `</head` tag a write cuts short.
     HeadCloseTag = 0,
 

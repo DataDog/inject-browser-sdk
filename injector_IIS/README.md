@@ -15,8 +15,8 @@ the `datadogRum` section:
 
 * `headCloseTag` (the default): right before the first `</head>` end tag, wherever it is in the
   body, if the first 1 KiB looks like an HTML document (it holds an `<html>`, `<meta>` or `<head>`
-  tag). Only a `</head>` before body content (`<body>`, `<div>`…) counts, and none written in a
-  comment, a script, a style or an attribute value. Nothing is held back but a `</head>` tag split
+  tag). Only a `</head>` before body content (`<body>`, `<div>`…) and text counts, and none
+  written in a comment, a script, a style or an attribute value. Nothing is held back but a `</head>` tag split
   across writes: the response streams through.
 * `headOpenTag`: as early as possible. If the `<head>` tag is within the first 1 KiB, right after
   it, unless the head holds `<meta>` tags declaring the character encoding, `X-UA-Compatible` or a

@@ -81,9 +81,12 @@ jobs:
       - name: Run End-to-End Tests
         # --isolation=hyperv allows running Windows images built on a different Windows Server
         # version than the runner (e.g. ltsc2019 image on windows-2022 host).
-        run: >-
-          docker run --isolation=hyperv --entrypoint powershell
-          -e WEBSERVER-FLAVOR=iis -v ${pwd}:C:\inject-browser-sdk
-          datadog/docker-library:rum-auto-instrumentation-windows-iis-latest
-          -NoProfile -ExecutionPolicy Bypass -File
+        run: |
+          docker run --isolation=hyperv --entrypoint powershell `
+          -e WEBSERVER-FLAVOR=iis -v ${pwd}:C:\inject-browser-sdk `
+          datadog/docker-library:rum-auto-instrumentation-windows-iis-latest `
+          -NoProfile -ExecutionPolicy Bypass -File `
           C:\inject-browser-sdk\injector_IIS\scripts\ci\run-container-integration-tests.ps1
+          $containerExitCode = $LASTEXITCODE
+          Write-Host "IIS integration-test container exited with code $containerExitCode"
+          exit $containerExitCode

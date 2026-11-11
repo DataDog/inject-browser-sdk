@@ -1152,7 +1152,8 @@ TEST(InjectionPipeline, ResponseSentAtOnceIsFlushed) {
 // injected, so the queued chunks are served as they are, without the padding `injector_end` would
 // add to keep the length constant.
 TEST(InjectionPipeline, UninjectedBufferedResponseLeavesTheResponseUntouched) {
-  const std::vector<std::string> bodies = {"<body><pre>hel", "lo"};
+  // A fragment: a `<body>` tag would be evidence of a document, the snippet going before it.
+  const std::vector<std::string> bodies = {"<div><pre>hel", "lo"};
 
   MockRumConfigElement rumConfig;
   MockAdminManager adminManager(&rumConfig);
@@ -1180,7 +1181,7 @@ TEST(InjectionPipeline, UninjectedBufferedResponseLeavesTheResponseUntouched) {
 
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
   EXPECT_TRUE(httpCtx.AllocationGuardIntact()) << "wrote past the end of the injection buffer";
-  EXPECT_EQ(assembleResponseBody(pr), "<body><pre>hello");
+  EXPECT_EQ(assembleResponseBody(pr), "<div><pre>hello");
 
   mod.factory->Terminate();
   mod.global->Terminate();

@@ -1239,8 +1239,7 @@ TEST(InjectionPipeline, HeadCloseTagCarriedOverToALaterPart) {
   EXPECT_EQ(response.extended_to, std::to_string(100000 + response.snippet_length()));
 
   const std::string body = response.send(second);
-  EXPECT_EQ(body.size(), std::string("</head><body>hi").size() + response.snippet_length())
-      << body;
+  EXPECT_EQ(body.size(), std::string("</head><body>hi").size() + response.snippet_length()) << body;
   EXPECT_NE(body.substr(0, response.snippet_length()).find("DD_RUM"), std::string::npos) << body;
   EXPECT_EQ(body.substr(response.snippet_length()), "</head><body>hi");
 

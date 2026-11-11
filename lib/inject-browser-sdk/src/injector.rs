@@ -731,13 +731,14 @@ impl<'snippet> Injector<'snippet> {
         if !may_find {
             self.injector_state = InjectorState::PassingThrough;
         }
-        // Hold back from where the snippet may go, unless that outgrows any valid end tag.
+        // Hold back from where the snippet may go, unless that outgrows any valid end tag, or
+        // starts in what a flush handed back already: the snippet cannot go before it anymore.
         let pending = self
             .head_locator
             .pending_point_start()
             .filter(|_| return may_find);
         if let Some(start) = pending.filter(|&start| {
-            return chunk_start + chunk.len() - start <= MAX_PENDING_END_TAG;
+            return start >= held_start && chunk_start + chunk.len() - start <= MAX_PENDING_END_TAG;
         }) {
             return self.hold_from(start, held_start, chunk_start, chunk);
         }
@@ -2685,6 +2686,21 @@ mod tests {
             assert_eq!(injector.held_back(), 0);
             assert!(!injector.write(b"ad>").injected);
             assert!(!injector.is_pending());
+
+            // Nor is the rest of it held back once the head of it went out.
+            let mut injector = Injector::new(b"{{SNIPPET}}");
+            injector.write(b"<html><head></he");
+            injector.flush();
+            let result = injector.write(b"a");
+            assert_eq!(
+                result
+                    .iter()
+                    .map(|slice| return slice.bytes.len())
+                    .sum::<usize>(),
+                1
+            );
+            assert_eq!(injector.held_back(), 0);
+            assert!(!injector.write(b"d>").injected);
 
             // Should it turn out to be another tag, the search goes on.
             let mut injector = Injector::new(b"{{SNIPPET}}");

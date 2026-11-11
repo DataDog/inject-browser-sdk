@@ -16,7 +16,7 @@ for variant in "$@"; do
     load=$!
     sleep 2
     perf trace -s -p "$(server_pids "$server")" -o "$WORK/trace.txt" -- sleep 4 2>/dev/null || true
-    wait $load
+    wait "$load"
     stop "$server"
     # wrk's rate over 8 s, times the 4 s traced.
     rps=$(sed -n 's/^Requests\/sec: *//p' "$WORK/wrk.txt")

@@ -87,6 +87,9 @@ pub(crate) struct ScanCtx {
     /// The held buffers, in a chain of our own, and its next link pointer.
     held: *mut ngx_chain_t,
     held_ll: *mut *mut ngx_chain_t,
+    /// Where the held buffers start in the body, holding again past the commit: the scanner holds
+    /// a `</head` tag a buffer ends in, and may then inject within it.
+    held_from: u64,
     /// Body offset of the first byte of the next buffer to come.
     offset: u64,
     /// How much of the last held buffer the scanner was fed, when it is a file buffer.
@@ -215,6 +218,7 @@ pub(crate) unsafe fn create(r: *mut ngx_http_request_t, mode: ngx_uint_t, length
             injected: false,
             held: ptr::null_mut(),
             held_ll: ptr::null_mut(),
+            held_from: 0,
             offset: 0,
             file_fed: 0,
             scratch: ptr::null_mut(),
@@ -389,6 +393,49 @@ unsafe fn own_held(pool: *mut ngx_pool_t, ctx: &mut ScanCtx) -> bool {
     }
 }
 
+/// Sends the held buffers, starting at `start` in the body, the snippet spliced in at its offset if
+/// `decision` puts it within them, and empties the held chain.
+unsafe fn release_held(
+    pool: *mut ngx_pool_t,
+    ctx: &mut ScanCtx,
+    ll: &mut *mut *mut ngx_chain_t,
+    decision: Decision,
+    mut start: u64,
+) -> bool {
+    unsafe {
+        let mut cl = ctx.held;
+        ctx.held = ptr::null_mut();
+        ctx.held_ll = &raw mut ctx.held;
+        while !cl.is_null() {
+            let b = (*cl).buf;
+            cl = (*cl).next;
+            let size = buf_size(b);
+            match decision {
+                Decision::InjectAt(point) if !ctx.injected && point <= start + size => {
+                    ctx.injected = true;
+                    if b == ctx.read_for {
+                        if !link_read_file(pool, ctx, ll, b, point - start) {
+                            return false;
+                        }
+                    } else {
+                        let snippet = snippet_buf(pool);
+                        if snippet.is_null() || !link_split(pool, ll, b, point - start, snippet) {
+                            return false;
+                        }
+                    }
+                }
+                _ => {
+                    if !link_data(pool, ll, b) {
+                        return false;
+                    }
+                }
+            }
+            start += size;
+        }
+        true
+    }
+}
+
 /// Sends the headers for `decision`, then the held buffers, the snippet spliced in at its offset.
 unsafe fn commit(
     r: *mut ngx_http_request_t,
@@ -414,35 +461,8 @@ unsafe fn commit(
             return if rc > NGX_OK { NGX_ERROR } else { rc };
         }
 
-        let mut start = 0u64;
-        let mut cl = ctx.held;
-        ctx.held = ptr::null_mut();
-        ctx.held_ll = &raw mut ctx.held;
-        while !cl.is_null() {
-            let b = (*cl).buf;
-            cl = (*cl).next;
-            let size = buf_size(b);
-            match decision {
-                Decision::InjectAt(point) if !ctx.injected && point <= start + size => {
-                    ctx.injected = true;
-                    if b == ctx.read_for {
-                        if !link_read_file(pool, ctx, ll, b, point - start) {
-                            return NGX_ERROR;
-                        }
-                    } else {
-                        let snippet = snippet_buf(pool);
-                        if snippet.is_null() || !link_split(pool, ll, b, point - start, snippet) {
-                            return NGX_ERROR;
-                        }
-                    }
-                }
-                _ => {
-                    if !link_data(pool, ll, b) {
-                        return NGX_ERROR;
-                    }
-                }
-            }
-            start += size;
+        if !release_held(pool, ctx, ll, decision, 0) {
+            return NGX_ERROR;
         }
         ctx.state = match decision {
             Decision::InjectAt(_) | Decision::Never => State::Done,
@@ -479,10 +499,36 @@ unsafe fn stream(
             let Some(mut decision) = decision else {
                 return false;
             };
-            if (*b).last_buf() != 0 && decision == Decision::Searching {
+            if (*b).last_buf() != 0 && matches!(decision, Decision::Searching | Decision::Hold { .. }) {
                 decision = ctx.scanner.finish();
             }
             match decision {
+                // A `</head` tag the buffer ends in: it is kept, after any held before it, until the
+                // scanner tells whether the snippet goes before it.
+                Decision::Hold { .. } => {
+                    if ctx.held.is_null() {
+                        ctx.held_from = ctx.offset;
+                    }
+                    let mut held_ll = ctx.held_ll;
+                    if !link(pool, &mut held_ll, b) {
+                        return false;
+                    }
+                    ctx.held_ll = held_ll;
+                    ctx.offset += size;
+                    return own_held(pool, ctx);
+                }
+                Decision::InjectAt(_) if !ctx.held.is_null() => {
+                    // Within the held buffers or this one: all go out, the snippet spliced in.
+                    ctx.state = State::Done;
+                    let mut held_ll = ctx.held_ll;
+                    if !link(pool, &mut held_ll, b) {
+                        return false;
+                    }
+                    ctx.held_ll = held_ll;
+                    ctx.offset += size;
+                    let from = ctx.held_from;
+                    return release_held(pool, ctx, ll, decision, from);
+                }
                 Decision::InjectAt(point) => {
                     ctx.state = State::Done;
                     ctx.injected = true;
@@ -491,8 +537,16 @@ unsafe fn stream(
                     return !snippet.is_null()
                         && link_split(pool, ll, b, point - (ctx.offset - size), snippet);
                 }
-                Decision::Never => ctx.state = State::Done,
-                _ => {}
+                _ => {
+                    if decision == Decision::Never {
+                        ctx.state = State::Done;
+                    }
+                    // What was held goes out first.
+                    let from = ctx.held_from;
+                    if !ctx.held.is_null() && !release_held(pool, ctx, ll, decision, from) {
+                        return false;
+                    }
+                }
             }
         } else if ctx.state == State::Streaming {
             // An ablation, on the first buffer with data.
@@ -645,6 +699,12 @@ pub(crate) unsafe extern "C" fn body_filter(
             }
             (*(*r).connection).set_buffered((*(*r).connection).buffered() | BUFFERED);
             return NGX_OK;
+        }
+        // Holding past the commit keeps the request open as the held buffers wait.
+        let connection = (*r).connection;
+        match ctx.held.is_null() {
+            true => (*connection).set_buffered((*connection).buffered() & !BUFFERED),
+            false => (*connection).set_buffered((*connection).buffered() | BUFFERED),
         }
         if out.is_null() && ctx.busy.is_null() {
             return NGX_OK;

@@ -57,6 +57,10 @@ struct ScanCtx {
     injected: bool,
     /// The held buckets.
     held: *mut apr_bucket_brigade,
+    /// Whether the held buckets are held past the commit, the scanner holding a `</head` tag a
+    /// bucket ends in, and where they start in the body then.
+    stream_held: bool,
+    held_from: u64,
     /// Body offset of the first byte of the next bucket to come.
     offset: u64,
 }
@@ -64,6 +68,41 @@ struct ScanCtx {
 unsafe extern "C" fn drop_ctx(data: *mut c_void) -> apr_status_t {
     unsafe { drop(Box::from_raw(data as *mut ScanCtx)) };
     SUCCESS
+}
+
+/// Moves the held buckets, in order, right before `e`.
+unsafe fn unhold_before(ctx: &mut ScanCtx, e: *mut apr_bucket) {
+    unsafe {
+        while first(ctx.held) != sentinel(ctx.held) {
+            let held = first(ctx.held);
+            remove(held);
+            insert_before(e, held);
+        }
+        ctx.stream_held = false;
+    }
+}
+
+/// Splices `insert` in at body offset `point`, within the buckets from `begin`, which starts at body
+/// offset `start`, up to `end`, excluded.
+unsafe fn splice_within(
+    begin: *mut apr_bucket,
+    end: *mut apr_bucket,
+    mut start: u64,
+    point: u64,
+    insert: *mut apr_bucket,
+) -> apr_status_t {
+    unsafe {
+        let mut e = begin;
+        while e != end {
+            let length = (*e).length as u64;
+            if point <= start + length {
+                return splice(e, (point - start) as apr_size_t, insert);
+            }
+            start += length;
+            e = next(e);
+        }
+        SUCCESS
+    }
 }
 
 /// APR_BUCKET_REMOVE(e)
@@ -346,6 +385,8 @@ unsafe fn start(f: *mut ap_filter_t, mode: u8) -> Option<*mut ScanCtx> {
             padded: false,
             injected: false,
             held: apr_brigade_create((*r).pool, (*(*f).c).bucket_alloc),
+            stream_held: false,
+            held_from: 0,
             offset: 0,
         }));
         apr_pool_cleanup_register((*r).pool, ctx as *const c_void, Some(drop_ctx), Some(apr_pool_cleanup_null));
@@ -477,7 +518,7 @@ pub(crate) unsafe extern "C" fn filter<const MODE: u8>(
             }
             return SUCCESS;
         }
-        if first(ctx.held) != sentinel(ctx.held) {
+        if !ctx.stream_held && first(ctx.held) != sentinel(ctx.held) {
             let rv = ap_pass_brigade((*f).next, ctx.held);
             if rv != SUCCESS {
                 return rv;
@@ -488,6 +529,21 @@ pub(crate) unsafe extern "C" fn filter<const MODE: u8>(
         while e != sentinel(bb) && ctx.state != State::Done {
             let following = next(e);
             if is_eos(e) {
+                if ctx.stream_held {
+                    // The end of the body decides on what is held.
+                    let begin = first(ctx.held);
+                    let from = ctx.held_from;
+                    let decision = ctx.scanner.finish();
+                    unhold_before(ctx, e);
+                    if let Decision::InjectAt(point) = decision {
+                        ctx.injected = true;
+                        let rv = splice_within(begin, e, from, point, snippet_bucket(list));
+                        if rv != SUCCESS {
+                            return rv;
+                        }
+                    }
+                    ctx.state = State::Done;
+                }
                 break;
             }
             if is_metadata(e) {
@@ -510,20 +566,49 @@ pub(crate) unsafe extern "C" fn filter<const MODE: u8>(
             };
             ctx.offset += (*e).length as u64;
             match decision {
+                // A `</head` tag the bucket ends in: it is kept, after any held before it, until the
+                // scanner tells whether the snippet goes before it.
+                Decision::Hold { .. } => {
+                    if !ctx.stream_held {
+                        ctx.stream_held = true;
+                        ctx.held_from = start;
+                    }
+                    remove(e);
+                    insert_before(sentinel(ctx.held), e);
+                }
                 Decision::InjectAt(point) => {
                     ctx.state = State::Done;
                     ctx.injected = true;
-                    let rv = splice(e, (point - start) as apr_size_t, snippet_bucket(list));
+                    let (begin, from) = match ctx.stream_held {
+                        true => (first(ctx.held), ctx.held_from),
+                        false => (e, start),
+                    };
+                    unhold_before(ctx, e);
+                    let rv = splice_within(begin, following, from, point, snippet_bucket(list));
                     if rv != SUCCESS {
                         return rv;
                     }
                 }
-                Decision::Never => ctx.state = State::Done,
-                _ => {}
+                Decision::Never => {
+                    ctx.state = State::Done;
+                    unhold_before(ctx, e);
+                }
+                Decision::Searching => unhold_before(ctx, e),
             }
             e = following;
         }
 
+        if ctx.stream_held {
+            // Kept past this call: whatever lives in the caller's memory is copied now.
+            let mut e = first(ctx.held);
+            while e != sentinel(ctx.held) {
+                let rv = ((*(*e).type_).setaside.unwrap())(e, (*(*f).r).pool);
+                if rv != SUCCESS {
+                    return rv;
+                }
+                e = next(e);
+            }
+        }
         if ctx.padded && !ctx.injected {
             // Owed at the end of stream, before the EOS.
             let mut e = first(bb);

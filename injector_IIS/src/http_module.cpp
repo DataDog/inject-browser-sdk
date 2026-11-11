@@ -6,6 +6,7 @@
 
 #include "http_module.h"
 #include "config_reader.h"
+#include "defer.h"
 #include "module_context.h"
 #include "telemetry.h"
 #include <algorithm>
@@ -187,6 +188,88 @@ struct Injection {
   InjectorResult result;
 };
 
+// How much of a file the first read takes: most static pages whole. Each later one reads as much
+// again as was read so far, up to k_file_read_limit bytes of files in all, while the injector has
+// not decided.
+constexpr uint64_t k_file_first_read = 16 * 1024;
+constexpr uint64_t k_file_read_limit = 1024 * 1024;
+
+// Reads `length` bytes at `offset` of `file` into `into`. IIS may have opened the file for
+// overlapped I/O and bound it to its completion port: the read gives its own offset, so it leaves
+// the file as IIS uses it, and an event whose low bit is set, so that its completion is not queued
+// to that port.
+bool read_file_at(HANDLE file, uint64_t offset, DWORD length, void* into) {
+  HANDLE const event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (event == nullptr) {
+    return false;
+  }
+  const auto close_event = defer([&] { CloseHandle(event); });
+  OVERLAPPED overlapped{};
+  overlapped.Offset = static_cast<DWORD>(offset);
+  overlapped.OffsetHigh = static_cast<DWORD>(offset >> 32);
+  overlapped.hEvent = reinterpret_cast<HANDLE>(reinterpret_cast<uintptr_t>(event) | 1);
+  DWORD read = 0;
+  if (ReadFile(file, into, length, &read, &overlapped) == FALSE) {
+    if (GetLastError() != ERROR_IO_PENDING ||
+        WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0 ||
+        GetOverlappedResult(file, &overlapped, &read, FALSE) == FALSE) {
+      return false;
+    }
+  }
+  return read == length;
+}
+
+// Has the response hold the start of the file chunk at `index` in memory, where the injector can
+// read it: the chunk becomes one in memory with those bytes, followed by a file chunk with the rest
+// of the range, if any is left. `read_so_far` is how much of files was read already, and grows by
+// what this read takes. Returns false, the response left as it was, for a file that cannot be read,
+// or once k_file_read_limit bytes were.
+bool read_file_chunk(IHttpContext& http_context, IHttpResponse& http_response,
+                     HTTP_RESPONSE& response, int index, uint64_t& read_so_far) {
+  const HTTP_DATA_CHUNK file = response.pEntityChunks[index];
+  const HANDLE handle = file.FromFileHandle.FileHandle;
+  const uint64_t offset = file.FromFileHandle.ByteRange.StartingOffset.QuadPart;
+  uint64_t range = file.FromFileHandle.ByteRange.Length.QuadPart;
+  if (range == HTTP_BYTE_RANGE_TO_EOF) {
+    LARGE_INTEGER size{};
+    if (GetFileSizeEx(handle, &size) == FALSE || static_cast<uint64_t>(size.QuadPart) < offset) {
+      return false;
+    }
+    range = static_cast<uint64_t>(size.QuadPart) - offset;
+  }
+  const uint64_t length =
+      (std::min)({range, (std::max)(k_file_first_read, read_so_far),
+                  k_file_read_limit - (std::min)(read_so_far, k_file_read_limit)});
+  if (length == 0) {
+    return false;
+  }
+  void* bytes = http_context.AllocateRequestMemory(static_cast<DWORD>(length));
+  if (bytes == nullptr || !read_file_at(handle, offset, static_cast<DWORD>(length), bytes)) {
+    return false;
+  }
+
+  std::vector<HTTP_DATA_CHUNK> rebuilt(response.pEntityChunks,
+                                       response.pEntityChunks + response.EntityChunkCount);
+  HTTP_DATA_CHUNK& read = rebuilt[index];
+  read = {};
+  read.DataChunkType = HttpDataChunkFromMemory;
+  read.FromMemory.pBuffer = bytes;
+  read.FromMemory.BufferLength = static_cast<ULONG>(length);
+  if (length < range) {
+    HTTP_DATA_CHUNK rest = file;
+    rest.FromFileHandle.ByteRange.StartingOffset.QuadPart = offset + length;
+    rest.FromFileHandle.ByteRange.Length.QuadPart = range - length;
+    rebuilt.insert(rebuilt.begin() + index + 1, rest);
+  }
+  // IIS takes at most 65535 chunks.
+  if (rebuilt.size() > (std::numeric_limits<USHORT>::max)() ||
+      !rewrite_body(http_response, response, std::move(rebuilt))) {
+    return false;
+  }
+  read_so_far += length;
+  return true;
+}
+
 // Writes the response's entity chunks to `injector` until the snippet comes out, which happens at
 // `injector_end` for a response shorter than the head window. The queued chunks are left as they
 // are: they already carry every byte in order, which is how they serve a response the snippet never
@@ -199,14 +282,24 @@ struct Injection {
 // (`injector_held_back_length`), read before each call: that is what the result that injects brings
 // back out, and what is trimmed off the queued chunks in its place.
 //
-// Only chunks in memory can be scanned: one that is not, a file handle for instance, ends the scan,
-// and is served as it is past an injection point found before it. And when more of the response
+// A file chunk, a static file served by IIS, is read into memory as the scan reaches it, a part at
+// a time, up to k_file_read_limit bytes: what the scan does not reach goes out from the file as it
+// would have. A chunk that cannot be read, one IIS streams for instance, ends the scan, and is
+// served as it is past an injection point found before it. And when more of the response
 // follows in later sends (`more_data`), the end of these chunks is not the end of the document:
 // the injector is not ended, so it never injects on the strength of a document cut short.
-std::optional<Injection> write_response(Injector& injector, const HTTP_RESPONSE& response,
+std::optional<Injection> write_response(IHttpContext& http_context, IHttpResponse& http_response,
+                                        Injector& injector, HTTP_RESPONSE& response,
                                         bool more_data) {
-  const int count = response.EntityChunkCount;
-  for (int i = 0; i < count; i++) {
+  uint64_t file_read = 0;
+  // Reading a file chunk rewrites the chunk list: the count is read on every turn.
+  for (int i = 0; i < response.EntityChunkCount; i++) {
+    // Read only while the snippet may still go in.
+    if (response.pEntityChunks[i].DataChunkType == HttpDataChunkFromFileHandle &&
+        (!injector_is_pending(&injector) ||
+         !read_file_chunk(http_context, http_response, response, i, file_read))) {
+      return std::nullopt;
+    }
     const HTTP_DATA_CHUNK& chunk = response.pEntityChunks[i];
     if (chunk.DataChunkType != HttpDataChunkFromMemory) {
       return std::nullopt;
@@ -226,7 +319,7 @@ std::optional<Injection> write_response(Injector& injector, const HTTP_RESPONSE&
   // Without padding: the queued chunks keep the original length when nothing is injected.
   const InjectorResult result = injector_end_without_padding(&injector);
   if (result.injected) {
-    return Injection{{count, withheld}, result};
+    return Injection{{response.EntityChunkCount, withheld}, result};
   }
   return std::nullopt;
 }
@@ -668,8 +761,9 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
   USHORT statusCode = 0;
   pHttpResponse.GetStatus(&statusCode);
 
-  // 3xx redirects have no body to inject into; <200 are informational.
-  if (statusCode < 200 || (statusCode >= 300 && statusCode < 400)) {
+  // 3xx redirects have no body to inject into; <200 are informational; a 206 carries a range of
+  // the document, which the snippet would corrupt.
+  if (statusCode < 200 || statusCode == 206 || (statusCode >= 300 && statusCode < 400)) {
     ctx.logger->debug(std::format("Skipping RUM injection: return code {}", statusCode));
     return false;
   }
@@ -738,7 +832,8 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
   }
 
   bool injected = false;
-  if (const auto injection = write_response(*injector, *pResponseStruct, send.more_data)) {
+  if (const auto injection = write_response(pHttpContext, pHttpResponse, *injector,
+                                            *pResponseStruct, send.more_data)) {
     if (const char* error = apply_injection(pHttpContext, pHttpResponse, *pResponseStruct,
                                             *injection, *injector, send.headers_gone, logger)) {
       logger.error(error);

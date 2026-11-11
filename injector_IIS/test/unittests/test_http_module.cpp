@@ -77,6 +77,7 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsFalseFor2xxAnd3xx) {
 
   constexpr TestCase test_cases[] = {
       {.min = 100, .max = 199},
+      {.min = 206, .max = 206},
       {.min = 300, .max = 399},
   };
 
@@ -118,7 +119,8 @@ TEST(HttpModuleTest, ShouldAttemptInjection_ReturnsTrueForValidStatusCode) {
   };
 
   constexpr TestCase test_cases[] = {
-      {.min = 200, .max = 299},
+      {.min = 200, .max = 205},
+      {.min = 207, .max = 299},
       {.min = 400, .max = 499},
       {.min = 500, .max = 599},
   };

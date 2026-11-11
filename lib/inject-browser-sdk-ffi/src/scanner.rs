@@ -258,7 +258,7 @@ mod tests {
         unsafe {
             // By default, right before `</head>`, holding nothing but a tag cut short.
             let scanner = scanner_create();
-            let head = b"<html><head><title>t</title>";
+            let head = b"<html><head><meta charset=utf-8><title>t</title>";
             assert_eq!(
                 scanner_feed(scanner, head.as_ptr(), head.len()),
                 decision(ScannerDecisionKind::Searching, 0)

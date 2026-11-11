@@ -36,8 +36,9 @@ static MARK: [u8; 1] = [0];
 /// documents for the [`InjectionStrategy`] given, and reports it as an offset.
 ///
 /// It decides with an [`Injector`], so it copies no more than one holds back: the head window with
-/// [`InjectionStrategy::HeadOpenTag`], a `</head` tag a slice cuts short with
-/// [`InjectionStrategy::HeadCloseTag`]. The server still holds the bytes it was fed, and sends them
+/// [`InjectionStrategy::HeadOpenTag`], a tag a slice cuts short with
+/// [`InjectionStrategy::HeadCloseTag`], and, for a point within the first kilobyte with no encoding
+/// declaration before it, the bytes from the point until that kilobyte is complete. The server still holds the bytes it was fed, and sends them
 /// itself. Past the decision, nothing is looked at.
 pub struct Scanner {
     injector: Injector<'static>,
@@ -213,15 +214,25 @@ mod tests {
         // Before `</head>`: nothing but a tag cut short.
         let mut scanner = Scanner::new();
         assert_eq!(
-            scanner.feed(b"<html><head><title>t</title>"),
+            scanner.feed(b"<html><head><meta charset=utf-8><title>t</title>"),
             Decision::Searching
         );
-        assert_eq!(scanner.feed(b"</he"), Decision::Hold { from: 28 });
-        assert_eq!(scanner.feed(b"ad>"), Decision::InjectAt(28));
+        assert_eq!(scanner.feed(b"</he"), Decision::Hold { from: 48 });
+        assert_eq!(scanner.feed(b"ad>"), Decision::InjectAt(48));
         // Final: what follows is not looked at.
-        assert_eq!(scanner.feed(b"<head></head>"), Decision::InjectAt(28));
+        assert_eq!(scanner.feed(b"<head></head>"), Decision::InjectAt(48));
+        assert_eq!(scanner.finish(), Decision::InjectAt(48));
+        assert_eq!(scanner.fed(), 68);
+
+        // Within the first kilobyte without an encoding declaration before it, from the point
+        // until that kilobyte is complete, or the body is: one may follow.
+        let mut scanner = Scanner::new();
+        assert_eq!(
+            scanner.feed(b"<html><head><title>t</title></head>"),
+            Decision::Hold { from: 28 }
+        );
+        assert_eq!(scanner.feed(b"<body>"), Decision::Hold { from: 28 });
         assert_eq!(scanner.finish(), Decision::InjectAt(28));
-        assert_eq!(scanner.fed(), 48);
 
         // As early as possible: the head window, from the first byte.
         let mut scanner = Scanner::with_strategy(InjectionStrategy::HeadOpenTag);

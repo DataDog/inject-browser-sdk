@@ -6,13 +6,9 @@ use inject_browser_sdk::{
     Configuration, RumConfiguration,
 };
 
-const STRATEGIES: [(&str, InjectionStrategy); 3] = [
+const STRATEGIES: [(&str, InjectionStrategy); 2] = [
     ("head-close-tag", InjectionStrategy::HeadCloseTag),
     ("head-open-tag", InjectionStrategy::HeadOpenTag),
-    (
-        "head-open-tag-with-close-tag-fallback",
-        InjectionStrategy::HeadOpenTagWithCloseTagFallback,
-    ),
 ];
 
 fn names<T>(options: &[(&'static str, T)]) -> String {

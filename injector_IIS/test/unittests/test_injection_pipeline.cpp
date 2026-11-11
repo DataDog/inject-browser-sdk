@@ -566,7 +566,7 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   ASSERT_NE(mod.global, nullptr);
   ASSERT_NE(mod.factory, nullptr);
 
@@ -613,7 +613,7 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
 }
 
 // The `injectionStrategy` attribute reaches the injector, and without it the module injects right
-// before `</head>`. The title separates the strategies: the head-open ones inject before it,
+// before `</head>`. The title separates the strategies: the head-open one injects before it,
 // `</head>` after it.
 TEST(InjectionPipeline, InjectionStrategyFromConfig) {
   struct TestCase {
@@ -632,8 +632,8 @@ TEST(InjectionPipeline, InjectionStrategyFromConfig) {
        "<html><head><meta charset='utf-8'><title>t</title>"},
       // Right after the encoding declaration instead. A response this short is held back in full
       // by the head window and only resolves at `injector_end`.
-      {"head open tag", InjectionStrategy::HeadOpenTagWithCloseTagFallback,
-       InjectionStrategy::HeadOpenTagWithCloseTagFallback, "<html><head><meta charset='utf-8'>"},
+      {"head open tag", InjectionStrategy::HeadOpenTag, InjectionStrategy::HeadOpenTag,
+       "<html><head><meta charset='utf-8'>"},
       {"head close tag", InjectionStrategy::HeadCloseTag, InjectionStrategy::HeadCloseTag,
        "<html><head><meta charset='utf-8'><title>t</title>"},
   };
@@ -649,7 +649,7 @@ TEST(InjectionPipeline, InjectionStrategyFromConfig) {
     MockServer mockServer;
     EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-    auto mod = registerModule(mockServer);
+    const auto mod = registerModule(mockServer);
     ASSERT_NE(mod.global, nullptr);
 
     MockAppWithContext app;
@@ -689,86 +689,68 @@ TEST(InjectionPipeline, InjectionStrategyFromConfig) {
   }
 }
 
-// A `</head>` straddling entity chunks. The locator holds the partial tag back and re-emits it with
-// the chunk that completes it, so the rewritten chunk has to be sized for those held-back bytes,
-// and the chunk that carried them has to give them up: sizing the allocation from this chunk plus
-// the snippet writes past its end, and leaving the earlier chunk alone serves the partial tag
-// twice.
-TEST(InjectionPipeline, HeadCloseTagSplitAcrossEntityChunks) {
+// With `headOpenTag`, the snippet goes right after the character encoding declaration, ahead of the
+// rest of the head, other `<meta>` tags included. A response this short is held back in full by the
+// head window and only resolves at `injector_end`.
+TEST(InjectionPipeline, InjectsAfterTheEncodingDeclaration) {
   const std::string html =
-      "<!DOCTYPE html><html><head><title>t</title></head><body>hi</body></html>";
-  const std::string close_tag = "</head>";
-  const size_t tag_start = html.find(close_tag);
-  ASSERT_NE(tag_start, std::string::npos);
-
-  // Every split point within the tag, plus the ones just before and just after it.
-  for (size_t split = tag_start; split <= tag_start + close_tag.size(); split++) {
-    SCOPED_TRACE("chunk boundary at byte " + std::to_string(split));
-
-    MockRumConfigElement rumConfig;
-    rumConfig.SetInjectionStrategy(InjectionStrategy::HeadCloseTag);
-    MockAdminManager adminManager(&rumConfig);
-    MockServer mockServer;
-    EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
-
-    auto mod = registerModule(mockServer);
-    ASSERT_NE(mod.global, nullptr);
-
-    MockAppWithContext app;
-    MockAppStartProvider appStart(app);
-    ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
-
-    auto* ctx =
-        static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
-    ASSERT_NE(ctx, nullptr);
-    ASSERT_NE(ctx->snippet, nullptr);
-    ASSERT_EQ(ctx->injection_strategy, InjectionStrategy::HeadCloseTag);
-
-    CHttpModule* httpMod = nullptr;
-    ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
-
-    MockHttpContext httpCtx;
-    MockHttpResponse httpResp;
-    MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
-    PreparedChunkedResponse pr;
-    setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr,
-                             {html.substr(0, split), html.substr(split)});
-
-    EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
-        .WillOnce(Return(S_OK));
-    EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
-
-    EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
-    EXPECT_TRUE(httpCtx.AllocationGuardIntact()) << "wrote past the end of the injection buffer";
-
-    // The snippet goes right before `</head>` and nothing else moves: no byte of the response is
-    // dropped, duplicated or reordered around it.
-    const std::string body = assembleResponseBody(pr);
-    ASSERT_EQ(body.size(), html.size() + ctx->snippet->length) << "body:\n" << body;
-    EXPECT_EQ(body.substr(0, tag_start), html.substr(0, tag_start)) << "body:\n" << body;
-    EXPECT_EQ(body.substr(body.size() - (html.size() - tag_start)), html.substr(tag_start))
-        << "body:\n"
-        << body;
-    EXPECT_NE(body.find("DD_RUM"), std::string::npos) << "no snippet in body:\n" << body;
-
-    mod.factory->Terminate();
-    mod.global->Terminate();
-  }
-}
-
-// A partial `</head>` at the very end of the response never resolves into a tag. Nothing is
-// injected and nothing is rewritten, so the held-back bytes have to reach the client as part of the
-// chunk that already carries them.
-TEST(InjectionPipeline, UnresolvedHeadCloseTagLeavesTheResponseUntouched) {
-  const std::vector<std::string> bodies = {"<html><body>hi</body>", "</he"};
+      "<html><head><meta charset='utf-8'><meta name='viewport' content='x'><title>t</title></head>"
+      "<body>hi</body></html>";
 
   MockRumConfigElement rumConfig;
-  rumConfig.SetInjectionStrategy(InjectionStrategy::HeadCloseTag);
+  rumConfig.SetInjectionStrategy(InjectionStrategy::HeadOpenTag);
   MockAdminManager adminManager(&rumConfig);
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
+  ASSERT_NE(mod.global, nullptr);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+
+  CHttpModule* httpMod = nullptr;
+  ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  PreparedResponse pr;
+  setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, html.c_str());
+
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .WillOnce(Return(S_OK));
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+
+  const std::string output = responseBody(pr.raw);
+  // The snippet starts on its own line.
+  const size_t snippet_at = output.find("\n<script");
+  ASSERT_NE(output.find("DD_RUM"), std::string::npos) << "no snippet in output:\n" << output;
+  EXPECT_EQ(output.substr(0, snippet_at), "<html><head><meta charset='utf-8'>") << output;
+  EXPECT_NE(output.find("<meta name='viewport' content='x'><title>t</title></head><body>hi</body>"
+                        "</html>"),
+            std::string::npos)
+      << output;
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// A response that does not look like an HTML document within its first kilobyte, whatever its
+// content type says: the `<head>` tag that follows is left alone, and so is the response.
+TEST(InjectionPipeline, NonHtmlResponseLeavesTheResponseUntouched) {
+  const std::vector<std::string> bodies = {"{\"data\": \"" + std::string(1100, 'x'),
+                                           "\", \"html\": \"<head></head>\"}"};
+
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  const auto mod = registerModule(mockServer);
   ASSERT_NE(mod.global, nullptr);
 
   MockAppWithContext app;
@@ -788,7 +770,7 @@ TEST(InjectionPipeline, UnresolvedHeadCloseTagLeavesTheResponseUntouched) {
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
-  EXPECT_EQ(assembleResponseBody(pr), "<html><body>hi</body></he");
+  EXPECT_EQ(assembleResponseBody(pr), bodies[0] + bodies[1]);
 
   mod.factory->Terminate();
   mod.global->Terminate();
@@ -811,7 +793,8 @@ TEST(InjectionPipeline, ResponseSentInSeveralParts) {
     std::optional<std::string> content_length;  // nullopt: the response announces none
     LengthUpdate length_update;
   };
-  const std::string head = "<html><head><title>t</title></head><body>";
+  // Long enough to fill the head window, which a part more data follows has to.
+  const std::string head = "<html><head><title>t</title></head><body>" + std::string(2000, 'x');
   const std::vector<TestCase> cases = {
       {"first part", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA, head, true, "2621440",
        LengthUpdate::Extended},
@@ -820,7 +803,7 @@ TEST(InjectionPipeline, ResponseSentInSeveralParts) {
       {"first part with an unreadable length", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA, head, true,
        "12x", LengthUpdate::Removed},
       {"first part without an injection point", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
-       "<html><body><p>no head here</p>", false, "2621440", LengthUpdate::Unchanged},
+       "<div><p>no head here</p></div>", false, "2621440", LengthUpdate::Unchanged},
       {"later part", FALSE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
        "<p>more</p><head><title>t</title></head>", false, "2621440", LengthUpdate::Unchanged},
       {"last part", FALSE, 0, "<p>more</p><head><title>t</title></head></html>", false, "2621440",
@@ -831,11 +814,12 @@ TEST(InjectionPipeline, ResponseSentInSeveralParts) {
     SCOPED_TRACE(test_case.name);
 
     MockRumConfigElement rumConfig;
+    rumConfig.SetInjectionStrategy(InjectionStrategy::HeadOpenTag);
     MockAdminManager adminManager(&rumConfig);
     MockServer mockServer;
     EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-    auto mod = registerModule(mockServer);
+    const auto mod = registerModule(mockServer);
     ASSERT_NE(mod.global, nullptr);
 
     MockAppWithContext app;
@@ -879,7 +863,11 @@ TEST(InjectionPipeline, ResponseSentInSeveralParts) {
     const std::string body = assembleResponseBody(pr);
     if (test_case.injects) {
       EXPECT_NE(body.find("DD_RUM"), std::string::npos) << body;
-      EXPECT_EQ(body.substr(body.size() - std::string("</head><body>").size()), "</head><body>");
+      // Right after `<head>`, and nothing else moves.
+      const size_t after_head = std::string("<html><head>").size();
+      EXPECT_EQ(body.substr(0, after_head), test_case.body.substr(0, after_head));
+      EXPECT_EQ(body.substr(body.size() - (test_case.body.size() - after_head)),
+                test_case.body.substr(after_head));
       if (test_case.length_update == LengthUpdate::Extended) {
         // The snippet is exactly what the injection added to this part.
         const auto snippet_length = body.size() - test_case.body.size();
@@ -906,7 +894,7 @@ TEST(InjectionPipeline, HeadersFlushedBeforeTheBody) {
     MockAdminManager adminManager(&rumConfig);
     MockServer mockServer;
     EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
-    auto mod = registerModule(mockServer);
+    const auto mod = registerModule(mockServer);
     MockAppWithContext app;
     MockAppStartProvider appStart(app);
     ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
@@ -926,10 +914,11 @@ TEST(InjectionPipeline, HeadersFlushedBeforeTheBody) {
     const auto send = [&](const std::vector<std::string>& bodies, BOOL headers, DWORD flags) {
       PreparedChunkedResponse pr;
       setupChunkedHtmlResponse(httpCtx, httpResp, &app, &metadata, pr, bodies);
-      const std::string length = "100000";
+      // A plain size rather than the string, whose copy into the lambda could throw.
+      const auto length = static_cast<USHORT>(std::string_view("100000").size());
       EXPECT_CALL(httpResp, GetHeader(Matcher<PCSTR>(StrEq("Content-Length")), _))
           .WillRepeatedly(DoAll(Invoke([announced, length](_In_ PCSTR, _Out_ USHORT* len) {
-                                  *len = announced ? static_cast<USHORT>(length.size()) : 0;
+                                  *len = announced ? length : 0;
                                 }),
                                 Return(announced ? "100000" : static_cast<PCSTR>(nullptr))));
       MockSendResponseProvider provider(headers, flags);
@@ -964,7 +953,7 @@ TEST(InjectionPipeline, DisabledRumDoesNothing) {
   MockAdminManager adminManager(&rumConfig);
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   MockAppWithContext app;
   MockAppStartProvider appStart(app);
   ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
@@ -998,8 +987,7 @@ TEST(InjectionPipeline, DisabledRumDoesNothing) {
   mod.global->Terminate();
 }
 
-// A module set up for one test of how it rebuilds a response: default configuration, unless
-// `strategy` is given.
+// A module set up, with the default configuration, for one test of how it rebuilds a response.
 class ModuleUnderTest {
  public:
   MockRumConfigElement rumConfig;
@@ -1012,10 +1000,7 @@ class ModuleUnderTest {
   MockHttpResponse httpResp;
   MockMetadataInfo metadata{L"MACHINE/WEBROOT/APPHOST/Default Web Site"};
 
-  explicit ModuleUnderTest(std::optional<InjectionStrategy> strategy = std::nullopt) {
-    if (strategy) {
-      rumConfig.SetInjectionStrategy(*strategy);
-    }
+  ModuleUnderTest() {
     EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
     mod = registerModule(mockServer);
     MockAppStartProvider appStart(app);
@@ -1038,7 +1023,9 @@ TEST(InjectionPipeline, ChunksNotInMemory) {
   for (const bool before : {false, true}) {
     SCOPED_TRACE(before ? "before the injection point" : "after the injection point");
     ModuleUnderTest module;
-    const std::vector<std::string> bodies = {"<html><head><title>t</title></head>", "file"};
+    // Long enough for the head window to be decided within the chunk in memory.
+    const std::string head = "<html><head><title>t</title></head>" + std::string(2000, 'x');
+    const std::vector<std::string> bodies = {head, "file"};
     PreparedChunkedResponse pr;
     setupChunkedHtmlResponse(module.httpCtx, module.httpResp, &module.app, &module.metadata, pr,
                              before ? std::vector<std::string>{"file", bodies[0]} : bodies);
@@ -1062,14 +1049,14 @@ TEST(InjectionPipeline, ChunksNotInMemory) {
       EXPECT_EQ(pr.raw.EntityChunkCount, 2);
     } else {
       // Every chunk before the file one is in memory: the head, with the snippet in.
-      std::string head;
+      std::string served;
       for (int i = 0; i < file_at; i++) {
         const auto& chunk = pr.raw.pEntityChunks[i];
-        head.append(static_cast<const char*>(chunk.FromMemory.pBuffer),
-                    chunk.FromMemory.BufferLength);
+        served.append(static_cast<const char*>(chunk.FromMemory.pBuffer),
+                      chunk.FromMemory.BufferLength);
       }
-      EXPECT_NE(head.find("DD_RUM"), std::string::npos);
-      EXPECT_TRUE(head.ends_with("</head>")) << head;
+      EXPECT_NE(served.find("DD_RUM"), std::string::npos);
+      EXPECT_TRUE(served.ends_with(head.substr(head.size() - 100))) << served;
     }
   }
 }
@@ -1096,7 +1083,7 @@ TEST(InjectionPipeline, RefusedChunkWriteLeavesTheResponseUntouched) {
 // document: the injector is not ended on it, so the snippet cannot go in ahead of a declaration the
 // next part may hold.
 TEST(InjectionPipeline, FirstPartShorterThanTheHeadWindowIsNotInjected) {
-  ModuleUnderTest module(InjectionStrategy::HeadOpenTagWithCloseTagFallback);
+  ModuleUnderTest module;
   PreparedChunkedResponse pr;
   setupChunkedHtmlResponse(module.httpCtx, module.httpResp, &module.app, &module.metadata, pr,
                            {"<html><head><title>t</title>"});
@@ -1117,7 +1104,7 @@ TEST(InjectionPipeline, ResponseSentAtOnceIsFlushed) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   ASSERT_NE(mod.global, nullptr);
 
   MockAppWithContext app;
@@ -1165,15 +1152,15 @@ TEST(InjectionPipeline, ResponseSentAtOnceIsFlushed) {
 // injected, so the queued chunks are served as they are, without the padding `injector_end` would
 // add to keep the length constant.
 TEST(InjectionPipeline, UninjectedBufferedResponseLeavesTheResponseUntouched) {
-  const std::vector<std::string> bodies = {"<body><pre>hel", "lo"};
+  // A fragment: a `<body>` tag would be evidence of a document, the snippet going before it.
+  const std::vector<std::string> bodies = {"<div><pre>hel", "lo"};
 
   MockRumConfigElement rumConfig;
-  rumConfig.SetInjectionStrategy(InjectionStrategy::HeadOpenTagWithCloseTagFallback);
   MockAdminManager adminManager(&rumConfig);
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   ASSERT_NE(mod.global, nullptr);
 
   MockAppWithContext app;
@@ -1194,23 +1181,23 @@ TEST(InjectionPipeline, UninjectedBufferedResponseLeavesTheResponseUntouched) {
 
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
   EXPECT_TRUE(httpCtx.AllocationGuardIntact()) << "wrote past the end of the injection buffer";
-  EXPECT_EQ(assembleResponseBody(pr), "<body><pre>hello");
+  EXPECT_EQ(assembleResponseBody(pr), "<div><pre>hello");
 
   mod.factory->Terminate();
   mod.global->Terminate();
 }
 
-// The head-open strategies hold back no more than the head window: past the injection point the
-// response streams, so a large one is injected without being copied. Only the rebuilt chunk list
+// The injector holds back no more than the head window: past the injection point the response
+// streams, so a large one is injected without being copied. Only the rebuilt chunk list
 // and the bytes the injector held (the window and the snippet) are allocated.
 TEST(InjectionPipeline, LargeResponseStreamsAfterHeadWindow) {
   MockRumConfigElement rumConfig;
-  rumConfig.SetInjectionStrategy(InjectionStrategy::HeadOpenTagWithCloseTagFallback);
+  rumConfig.SetInjectionStrategy(InjectionStrategy::HeadOpenTag);
   MockAdminManager adminManager(&rumConfig);
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   ASSERT_NE(mod.global, nullptr);
 
   MockAppWithContext app;
@@ -1268,12 +1255,12 @@ TEST(InjectionPipeline, HeadOpenTagAcrossEntityChunks) {
                    std::to_string(second));
 
       MockRumConfigElement rumConfig;
-      rumConfig.SetInjectionStrategy(InjectionStrategy::HeadOpenTagWithCloseTagFallback);
+      rumConfig.SetInjectionStrategy(InjectionStrategy::HeadOpenTag);
       MockAdminManager adminManager(&rumConfig);
       MockServer mockServer;
       EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-      auto mod = registerModule(mockServer);
+      const auto mod = registerModule(mockServer);
       ASSERT_NE(mod.global, nullptr);
 
       MockAppWithContext app;
@@ -1282,7 +1269,6 @@ TEST(InjectionPipeline, HeadOpenTagAcrossEntityChunks) {
       auto* ctx =
           static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
       ASSERT_NE(ctx, nullptr);
-      ASSERT_EQ(ctx->injection_strategy, InjectionStrategy::HeadOpenTagWithCloseTagFallback);
 
       CHttpModule* httpMod = nullptr;
       ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
@@ -1315,13 +1301,13 @@ TEST(InjectionPipeline, HeadOpenTagAcrossEntityChunks) {
   }
 }
 
-// Runs `html`, split into entity chunks at `boundaries`, through the module with `strategy`, and
-// checks the snippet went in at byte `at` of the original document with every other byte served
-// once, in order. With `max_allocation`, also checks no more than that much request memory was
-// allocated.
-static void expectInjectedAt(InjectionStrategy strategy, const std::string& html,
-                             const std::vector<size_t>& boundaries, size_t at,
-                             std::optional<size_t> max_allocation = std::nullopt) {
+// Runs `html`, split into entity chunks at `boundaries`, through the module configured with
+// `strategy`, and checks the snippet went in at byte `at` of the original document with every other
+// byte served once, in order. With `max_allocation`, also checks no more than that much request
+// memory was allocated.
+static void expectInjectedAt(const std::string& html, const std::vector<size_t>& boundaries,
+                             size_t at, std::optional<size_t> max_allocation = std::nullopt,
+                             InjectionStrategy strategy = InjectionStrategy::HeadOpenTag) {
   std::string trace = "chunk boundaries at bytes";
   std::vector<std::string> bodies;
   size_t start = 0;
@@ -1339,7 +1325,7 @@ static void expectInjectedAt(InjectionStrategy strategy, const std::string& html
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   ASSERT_NE(mod.global, nullptr);
 
   MockAppWithContext app;
@@ -1380,6 +1366,22 @@ static void expectInjectedAt(InjectionStrategy strategy, const std::string& html
   mod.global->Terminate();
 }
 
+// By default, right before `</head>`, including an end tag split across entity chunks, with a large
+// head ahead of it: only the part of the tag an earlier chunk holds and the snippet are copied.
+TEST(InjectionPipeline, HeadCloseTagAcrossEntityChunks) {
+  const std::string before = "<!DOCTYPE html><html><head><meta charset='utf-8'><script>" +
+                             std::string(20000, 'x') + "</script><title>t</title>";
+  const std::string html = before + "</head><body>hi</body></html>";
+  const size_t tag_start = before.size();
+  for (size_t first = tag_start - 3; first <= tag_start + 7; first++) {
+    for (size_t second = first + 1; second <= tag_start + 8; second += 3) {
+      expectInjectedAt(html, {first, second}, tag_start, size_t{16} * 1024,
+                       InjectionStrategy::HeadCloseTag);
+    }
+  }
+  expectInjectedAt(html, {}, tag_start, size_t{16} * 1024, InjectionStrategy::HeadCloseTag);
+}
+
 // The head window filled by a later chunk: the injection is found while writing, with what the
 // earlier chunks contributed to the window held back and copied, the rest of the writing chunk
 // referenced in place, and the chunks after it left alone. Only the window and the snippet are
@@ -1390,35 +1392,37 @@ TEST(InjectionPipeline, HeadOpenTagInjectedWhenLaterChunkFillsTheWindow) {
       before + "<title>" + std::string(1500, 'x') + "</title></head><body>hi</body></html>";
   for (size_t first = 1; first < 1100; first += 97) {
     for (size_t second = first + 1; second < html.size(); second += 233) {
-      expectInjectedAt(InjectionStrategy::HeadOpenTagWithCloseTagFallback, html, {first, second},
-                       before.size(), size_t{16} * 1024);
+      expectInjectedAt(html, {first, second}, before.size(), size_t{16} * 1024);
     }
   }
 }
 
-// No `<head>` within the head window: after giving up on it, the strategy streams for `</head>`,
-// including a tag split across the chunk that ends the window and the next.
-TEST(InjectionPipeline, HeadOpenTagFallsBackToHeadCloseTag) {
-  const std::string html = "<!-- " + std::string(1100, 'c') +
-                           " --><html><head><title>t</title></head><body>hi</body></html>";
-  const size_t tag_start = html.find("</head>");
+// No `<head>` within the head window, which looks like an HTML document all the same: the injector
+// streams for the `<head>` tag and injects right after it, including a tag split across the chunk
+// that ends the window and the next. Nothing is held back past the window.
+TEST(InjectionPipeline, HeadTagPastTheWindow) {
+  const std::string html = "<html><!-- " + std::string(1100, 'c') +
+                           " --><head><title>t</title></head><body>hi</body></html>";
+  const size_t tag_start = html.find("<head>");
+  const size_t tag_end = tag_start + std::string("<head>").size();
   for (size_t first = 1000; first < 1100; first += 13) {
-    for (size_t second = tag_start - 2; second <= tag_start + 8; second++) {
-      expectInjectedAt(InjectionStrategy::HeadOpenTagWithCloseTagFallback, html, {first, second},
-                       tag_start);
+    for (size_t second = tag_start - 2; second <= tag_end + 2; second++) {
+      expectInjectedAt(html, {first, second}, tag_end, size_t{16} * 1024);
     }
   }
 }
 
-// A partial `</head>` held across three chunks, with more chunks after the one that completes it.
-TEST(InjectionPipeline, HeadCloseTagAcrossThreeChunksWithFollowingChunks) {
-  const std::string html =
-      "<!DOCTYPE html><html><head><title>t</title></head><body>hi</body><p>more</p></html>";
-  const size_t tag_start = html.find("</head>");
-  for (size_t first = tag_start; first < tag_start + 5; first++) {
-    for (size_t second = first + 1; second <= tag_start + 7; second++) {
-      expectInjectedAt(InjectionStrategy::HeadCloseTag, html, {first, second, html.size() - 4},
-                       tag_start);
+// A `<head>` tag past the window split across three chunks, with more chunks after the one that
+// completes it.
+TEST(InjectionPipeline, HeadTagAcrossThreeChunksWithFollowingChunks) {
+  const std::string html = "<!DOCTYPE html><html lang='en'><!-- " + std::string(1100, 'c') +
+                           " --><head lang='en'><title>t</title></head><body>hi</body><p>more</p>"
+                           "</html>";
+  const size_t tag_start = html.find("<head");
+  const size_t tag_end = html.find('>', tag_start) + 1;
+  for (size_t first = tag_start; first < tag_end; first += 2) {
+    for (size_t second = first + 1; second <= tag_end; second++) {
+      expectInjectedAt(html, {first, second, html.size() - 4}, tag_end);
     }
   }
 }
@@ -1433,7 +1437,7 @@ TEST(InjectionPipeline, AllocationFailureLeavesTheResponseUntouched) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   ASSERT_NE(mod.global, nullptr);
 
   MockAppWithContext app;
@@ -1469,7 +1473,7 @@ TEST(InjectionPipeline, DisabledConfig) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
 
   MockAppWithContext app;
   MockAppStartProvider appStart(app);
@@ -1524,7 +1528,7 @@ TEST(InjectionPipeline, PerLocationConfig) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
 
   // Single application — both paths are within the same app.
   MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
@@ -1587,7 +1591,7 @@ TEST(InjectionPipeline, MetadataCacheHit) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   MockAppWithContext app;
   MockAppStartProvider appStart(app);
   mod.global->OnGlobalApplicationStart(&appStart);
@@ -1636,7 +1640,7 @@ TEST(InjectionPipeline, SetModuleContextRace) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   MockAppWithContext app;
   MockAppStartProvider appStart(app);
   mod.global->OnGlobalApplicationStart(&appStart);
@@ -1651,8 +1655,8 @@ TEST(InjectionPipeline, SetModuleContextRace) {
   // GetModuleContext then returns winner_ctx.
   MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
   auto* winner_ctx = new ModuleContext;
-  auto* app_ctx =
-      static_cast<ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
+  const auto* app_ctx =
+      static_cast<const ModuleContext*>(app.GetModuleContextContainer()->GetModuleContext(nullptr));
   winner_ctx->logger = app_ctx->logger;
   winner_ctx->snippet = snippet_create_from_json(
       R"({"majorVersion":5,"rum":{"applicationId":"test-app-id","clientToken":"test-client-token","service":"test-service","sessionSampleRate":100}})");
@@ -1684,7 +1688,7 @@ TEST(InjectionPipeline, SetModuleContextFailure) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   MockAppWithContext app;
   MockAppStartProvider appStart(app);
   mod.global->OnGlobalApplicationStart(&appStart);
@@ -1717,7 +1721,7 @@ TEST(InjectionPipeline, NullMetadataFallback) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   MockAppWithContext app;
   MockAppStartProvider appStart(app);
   mod.global->OnGlobalApplicationStart(&appStart);
@@ -1748,7 +1752,7 @@ TEST(InjectionPipeline, NullMetadataContainerFallback) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   MockAppWithContext app;
   MockAppStartProvider appStart(app);
   mod.global->OnGlobalApplicationStart(&appStart);
@@ -1809,7 +1813,7 @@ TEST(InjectionPipeline, TwoEnabledLocationsDistinctConfig) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
   MockAppStartProvider appStart(app);
   mod.global->OnGlobalApplicationStart(&appStart);
@@ -1877,7 +1881,7 @@ TEST(InjectionPipeline, OnBeginRequestRespectsLocationOverride) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
   MockAppStartProvider appStart(app);
   mod.global->OnGlobalApplicationStart(&appStart);
@@ -1952,7 +1956,7 @@ TEST(InjectionPipeline, MissingConfig) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
 
   MockAppWithContext app;
   MockAppStartProvider appStart(app);
@@ -1995,7 +1999,7 @@ TEST(InjectionPipeline, GetCollectionFailureOnFirstLoad) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
 
   MockAppWithContext app;
   MockAppStartProvider appStart(app);
@@ -2024,7 +2028,7 @@ TEST(InjectionPipeline, GetCollectionFailurePreservesExistingConfig) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
 
   MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
   MockAppStartProvider appStart(app);
@@ -2059,7 +2063,7 @@ TEST(InjectionPipeline, MissingEnabledAttributeOnFirstLoad) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
 
   MockAppWithContext app;
   MockAppStartProvider appStart(app);
@@ -2084,7 +2088,7 @@ TEST(InjectionPipeline, InvalidConfigOnReloadPreservesExistingSnippet) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
 
   MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
   MockAppStartProvider appStart(app);
@@ -2121,7 +2125,7 @@ TEST(InjectionPipeline, MissingEnabledAttributePreservesExistingConfig) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
 
   MockAppWithContext app(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
   MockAppStartProvider appStart(app);

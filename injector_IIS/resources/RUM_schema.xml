@@ -17,9 +17,8 @@
 
     <!-- Where the snippet is injected. Values mirror the InjectionStrategy enumerators. -->
     <attribute name="injectionStrategy" type="enum" defaultValue="headCloseTag">
-      <enum name="headCloseTag"                    value="0" />
-      <enum name="headOpenTag"                     value="1" />
-      <enum name="headOpenTagWithCloseTagFallback" value="2" />
+      <enum name="headCloseTag" value="0" />
+      <enum name="headOpenTag"  value="1" />
     </attribute>
 
     <collection addElement="option" removeElement="remove" clearElement="clear" allowDuplicates="false">

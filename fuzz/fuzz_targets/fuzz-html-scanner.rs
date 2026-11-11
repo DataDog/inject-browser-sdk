@@ -26,16 +26,15 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Spend the first byte on the strategy and on how the document ends, so every combination gets
-    // fuzzed. Strategies differ in how much data they hold back, so they exercise quite different
+    // fuzzed. The strategies hold back different amounts of data, so they exercise quite different
     // buffering paths.
     let (strategy, padded, data) = match data.split_first() {
         Some((selector, rest)) => {
-            let strategy = match selector % 3 {
+            let strategy = match selector % 2 {
                 0 => InjectionStrategy::HeadCloseTag,
-                1 => InjectionStrategy::HeadOpenTag,
-                _ => InjectionStrategy::HeadOpenTagWithCloseTagFallback,
+                _ => InjectionStrategy::HeadOpenTag,
             };
-            (strategy, (selector / 3) % 2 == 0, rest)
+            (strategy, (selector / 2) % 2 == 0, rest)
         }
         None => (InjectionStrategy::default(), true, data),
     };
@@ -47,7 +46,7 @@ fuzz_target!(|data: &[u8]| {
     let result = injector.write(data);
     emitted += result.slices[..result.length]
         .iter()
-        .map(|slice| slice.bytes.len())
+        .map(|slice| return slice.bytes.len())
         .sum::<usize>();
     let result = match padded {
         true => injector.end(),
@@ -55,7 +54,7 @@ fuzz_target!(|data: &[u8]| {
     };
     emitted += result.slices[..result.length]
         .iter()
-        .map(|slice| slice.bytes.len())
+        .map(|slice| return slice.bytes.len())
         .sum::<usize>();
 
     // Whatever happens, the injector emits every input byte exactly once, plus either the snippet

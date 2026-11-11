@@ -25,7 +25,7 @@ struct ModuleContext final : public IHttpStoredContext {
   std::string application_id_tag;
   std::string remote_config_tag;
   // Where the snippet is injected, resolved from the `datadogRum` section and applied when the
-  // injector is created. The default matches the historical behaviour of `injector_create`.
+  // injector is created. The default matches `injector_create`'s.
   InjectionStrategy injection_strategy = InjectionStrategy::HeadCloseTag;
 
   ~ModuleContext() {

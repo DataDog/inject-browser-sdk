@@ -4,9 +4,13 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-//! Whether a `<meta>` tag declares the character encoding of the document: the one thing the
-//! snippet has to stay behind, since injecting before a declaration could push it out of the
-//! window the browser prescans for it.
+//! Whether a `<meta>` tag is one the snippet has to stay behind: a declaration of the character
+//! encoding of the document, which injecting before could push out of the window the browser
+//! prescans for it, an `X-UA-Compatible` one, which Internet Explorer only honours ahead of every
+//! element but `<title>` and other `<meta>` tags, or a `Content-Security-Policy` one, which only
+//! governs what follows it. See [`meta_kind`].
+
+use alloc::vec::Vec;
 
 use super::parser::compare_case_insensitive;
 
@@ -125,6 +129,69 @@ fn is_known_encoding_label(value: &[u8]) -> bool {
         .any(|label| return compare_case_insensitive(value, label));
 }
 
+/// What a `<meta>` tag is to the placement of the snippet.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(super) enum MetaKind {
+    /// It declares the character encoding of the document, see [`has_encoding_attributes`].
+    Encoding,
+    /// A `http-equiv="X-UA-Compatible"` one, which Internet Explorer honours only when no element
+    /// but `<title>` and other `<meta>` tags precedes it: the snippet must not be one.
+    Compatibility,
+    /// A `http-equiv="Content-Security-Policy"` one. A meta-delivered policy only governs what the
+    /// parser sees after it, so the snippet goes after it, under the site's own policy rather than
+    /// ahead of it. Opportunistic: only one the walk reaches counts, nothing more is held back to
+    /// find one. `Content-Security-Policy-Report-Only` is ignored in a `<meta>`, so it is not one.
+    SecurityPolicy,
+    /// Any other: SEO, Open Graph, viewport, the tracer's `dd-trace-id`… The snippet does not have
+    /// to stay behind it.
+    Other,
+}
+
+/// Returns what the given `<meta>` open tag, from `<` to `>` included, is to the placement of the
+/// snippet. Attributes are read as [`has_encoding_attributes`] reads them: parsed rather than
+/// matched as substrings, the first one of each name being the one that counts.
+pub(super) fn meta_kind(tag: &[u8]) -> MetaKind {
+    if has_encoding_attributes(tag) {
+        return MetaKind::Encoding;
+    }
+    // The value has to spell it out, or hold a character reference that may: a tag with neither is
+    // not parsed.
+    if !contains_ignore_case(tag, b"x-ua")
+        && !contains_ignore_case(tag, b"content-security-policy")
+        && !tag.contains(&b'&')
+    {
+        return MetaKind::Other;
+    }
+    let Some(mut index) = tag
+        .iter()
+        .position(|&b| return b.is_ascii_whitespace() || b == b'/')
+    else {
+        return MetaKind::Other;
+    };
+    loop {
+        index = skip_whitespace(tag, index);
+        if index >= tag.len() || tag[index] == b'>' {
+            return MetaKind::Other;
+        }
+        let (name, value, next_index) = parse_attribute(tag, index);
+        index = next_index;
+        // Only the first `http-equiv` counts, the parser drops the others.
+        if compare_case_insensitive(name, b"http-equiv") {
+            // The parser decodes character references in attribute values, unlike the encoding
+            // prescan: `Content-Security-Polic&#121;` is a policy.
+            let decoded = decode_character_references(value);
+            let value = decoded.trim_ascii();
+            if compare_case_insensitive(value, b"x-ua-compatible") {
+                return MetaKind::Compatibility;
+            }
+            if compare_case_insensitive(value, b"content-security-policy") {
+                return MetaKind::SecurityPolicy;
+            }
+            return MetaKind::Other;
+        }
+    }
+}
+
 /// Returns whether the given open tag, from `<` to `>` included, declares the character encoding of
 /// the document, in other words whether it carries a `charset` attribute or is a
 /// `http-equiv="content-type"` declaration.
@@ -142,8 +209,16 @@ fn is_known_encoding_label(value: &[u8]) -> bool {
 /// The attributes are read in source order, as the prescan reads them, since which one provides the
 /// encoding depends on the order they are written in. See [`Charset`].
 pub(super) fn has_encoding_attributes(tag: &[u8]) -> bool {
-    // Attributes start after the tag name, at the first whitespace character.
-    let Some(mut index) = tag.iter().position(|&b| return b.is_ascii_whitespace()) else {
+    // Both ways to declare one, a `charset` attribute and a `charset=` parameter in a `content`
+    // value, spell it out: a tag without it is not parsed.
+    if !contains_ignore_case(tag, b"charset") {
+        return false;
+    }
+    // Attributes start after the tag name, at the first whitespace character or `/`.
+    let Some(mut index) = tag
+        .iter()
+        .position(|&b| return b.is_ascii_whitespace() || b == b'/')
+    else {
         return false;
     };
 
@@ -235,6 +310,22 @@ fn has_charset_parameter(content: &[u8]) -> bool {
     return false;
 }
 
+/// Whether `tag` holds `needle_lower_case`, a lower case ASCII word, in any case.
+fn contains_ignore_case(tag: &[u8], needle_lower_case: &[u8]) -> bool {
+    let first = needle_lower_case[0];
+    let mut offset = 0;
+    while let Some(index) = memchr::memchr2(first, first.to_ascii_uppercase(), &tag[offset..]) {
+        offset += index;
+        if tag[offset..].len() >= needle_lower_case.len()
+            && tag[offset..offset + needle_lower_case.len()].eq_ignore_ascii_case(needle_lower_case)
+        {
+            return true;
+        }
+        offset += 1;
+    }
+    return false;
+}
+
 fn take_while(input: &[u8], predicate: impl Fn(u8) -> bool) -> &[u8] {
     let end = input
         .iter()
@@ -258,12 +349,18 @@ fn position_case_insensitive(haystack: &[u8], needle_lower_case: &[u8]) -> Optio
 /// `tag[index]` must be neither a whitespace character nor `>`, which guarantees that the returned
 /// index is greater than `index`.
 fn parse_attribute(tag: &[u8], index: usize) -> (&[u8], &[u8], usize) {
-    let mut i = index;
-
-    while i < tag.len() && !tag[i].is_ascii_whitespace() && tag[i] != b'=' && tag[i] != b'>' {
+    // A `/` between attributes is skipped, as the tokenizer and the encoding prescan both do:
+    // `<meta /http-equiv=…>` holds a `http-equiv` attribute.
+    let mut start = index;
+    while start < tag.len() && (tag[start] == b'/' || tag[start].is_ascii_whitespace()) {
+        start += 1;
+    }
+    let mut i = start;
+    // A name ends at a `/` too.
+    while i < tag.len() && !tag[i].is_ascii_whitespace() && !matches!(tag[i], b'=' | b'>' | b'/') {
         i += 1;
     }
-    let name = &tag[index..i];
+    let name = &tag[start..i];
 
     // Whitespace is allowed around the '=' sign.
     i = skip_whitespace(tag, i);
@@ -287,6 +384,65 @@ fn parse_attribute(tag: &[u8], index: usize) -> (&[u8], &[u8], usize) {
         i += 1;
     }
     return (name, &tag[value_start..i], i);
+}
+
+/// `value` with the character references that can decode to ASCII decoded: numeric ones (`&#121;`,
+/// `&#x79;`, the `;` optional, as the parser has it) and `&Tab;` / `&NewLine;`. No named reference
+/// stands for an ASCII letter, digit or `-`, so these are all a `http-equiv` value can use to spell
+/// one. A reference to anything else decodes to `\0`, which matches no value; any other `&` is kept.
+fn decode_character_references(value: &[u8]) -> Vec<u8> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut i = 0;
+    while i < value.len() {
+        if value[i] != b'&' {
+            decoded.push(value[i]);
+            i += 1;
+            continue;
+        }
+        let rest = &value[i + 1..];
+        const NAMED: [(&[u8], u8); 2] = [(b"Tab;", b'\t'), (b"NewLine;", b'\n')];
+        let named = NAMED.iter().find(|(name, _)| return rest.starts_with(name));
+        if let Some((name, byte)) = named {
+            decoded.push(*byte);
+            i += 1 + name.len();
+            continue;
+        }
+        let (radix, digits_start) = match rest {
+            [b'#', b'x' | b'X', ..] => (16, 2),
+            [b'#', ..] => (10, 1),
+            _ => {
+                decoded.push(b'&');
+                i += 1;
+                continue;
+            }
+        };
+        let digits = rest[digits_start..]
+            .iter()
+            .take_while(|&&byte| return (byte as char).is_digit(radix))
+            .count();
+        if digits == 0 {
+            decoded.push(b'&');
+            i += 1;
+            continue;
+        }
+        let number =
+            rest[digits_start..digits_start + digits]
+                .iter()
+                .try_fold(0u32, |number, &byte| {
+                    return number
+                        .checked_mul(radix)?
+                        .checked_add((byte as char).to_digit(radix)?);
+                });
+        decoded.push(match number {
+            Some(code) if code > 0 && code < 0x80 => code as u8,
+            _ => 0,
+        });
+        i += 1 + digits_start + digits;
+        if value.get(i) == Some(&b';') {
+            i += 1;
+        }
+    }
+    return decoded;
 }
 
 fn skip_whitespace(input: &[u8], mut index: usize) -> usize {

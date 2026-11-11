@@ -144,6 +144,30 @@ def test_proxy_injection(upstream_server):
     __assert_injected_once(page, body, at=page.index(b"</head>") if IIS else None)
 
 
+@pytest.mark.skipif(
+    os.environ.get("WEBSERVER-FLAVOR", "") != "iis",
+    reason="HTML detection depends on the bundled library version",
+)
+def test_no_injection_without_html_in_first_kilobyte(upstream_server):
+    """
+    Verify a text/html response that does not look like an HTML document
+    in its first kilobyte (no <html>, <meta> or <head> tag) is served
+    untouched, even if a </head> tag follows.
+    """
+    body = '{"data": "' + "x" * 2048 + '", "html": "<head></head>"}'
+
+    async def upstream_handler(request):
+        return web.Response(body=body, content_type="text/html")
+
+    upstream_server.add_route("/not-html", upstream_handler)
+
+    status, headers, served = __fetch("/not-html")
+
+    assert status == 200
+    assert "x-datadog-rum-injected" not in headers
+    assert served == body.encode()
+
+
 LARGE_HTML = (
     "<html><head><title>Large</title></head><body>"
     + "<p>lorem ipsum dolor sit amet</p>\n" * 80_000

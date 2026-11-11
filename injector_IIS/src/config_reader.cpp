@@ -106,7 +106,7 @@ VARIANT get_property_value(IAppHostProperty& property) {
 
 // Reads an `enum`-typed attribute, which IIS hands back as an integer. Returns `fallback` when the
 // attribute is missing, of an unexpected type, or out of range: an unreadable knob must not take
-// injection down, and the fallback is always the historical behaviour.
+// injection down, and the fallback is always the default behaviour.
 template <typename Enum>
 Enum read_enum_property(IAppHostElement& element, std::wstring_view name, Enum fallback,
                         int max_value, Logger& logger) {
@@ -251,9 +251,9 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     }
   }
 
-  auto const injection_strategy = read_enum_property(
-      *cfg_root_elem, L"injectionStrategy", InjectionStrategy::HeadCloseTag,
-      static_cast<int>(InjectionStrategy::HeadOpenTagWithCloseTagFallback), logger);
+  auto const injection_strategy =
+      read_enum_property(*cfg_root_elem, L"injectionStrategy", InjectionStrategy::HeadCloseTag,
+                         static_cast<int>(InjectionStrategy::HeadOpenTag), logger);
 
   // Iterate on the SDK configuration
   std::unordered_map<std::string, std::string> rum_sdk_opts;

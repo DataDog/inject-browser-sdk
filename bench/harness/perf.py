@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 
 TICK = os.sysconf("SC_CLK_TCK")
 
@@ -24,7 +25,8 @@ def cpu_seconds(pids):
                 fields = f.read().rsplit(")", 1)[1].split()
             total += int(fields[11]) + int(fields[12])  # utime, stime
         except FileNotFoundError:
-            pass
+            # A worker that exited since: its time is gone with it, and the others still count.
+            print(f"perf: process {pid} exited while sampled", file=sys.stderr)
     return total / TICK
 
 

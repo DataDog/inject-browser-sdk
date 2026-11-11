@@ -139,12 +139,9 @@ def main():
     args = parser.parse_args()
 
     modes = args.modes.split(",") + (["clb", "chunkedb"] if args.buffered else [])
-    jobs = []
-    for sub in ("perf", "corpus"):
-        for page in sorted(os.listdir(os.path.join(args.pages, sub))):
-            for mode in modes:
-                for seed in ([0] if mode == "static" else range(1, args.seeds + 1)):
-                    jobs.append((sub, page, mode, seed))
+    pages = [(sub, page) for sub in ("perf", "corpus") for page in sorted(os.listdir(os.path.join(args.pages, sub)))]
+    seeds = {mode: [0] if mode == "static" else list(range(1, args.seeds + 1)) for mode in modes}
+    jobs = [(sub, page, mode, seed) for sub, page in pages for mode in modes for seed in seeds[mode]]
 
     totals, failures = {m: 0 for m in modes}, {m: [] for m in modes}
     with concurrent.futures.ThreadPoolExecutor(16) as pool:

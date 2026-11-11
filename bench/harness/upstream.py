@@ -64,8 +64,9 @@ async def handle(reader, writer, root):
         if mode != "cl":
             writer.write(b"0\r\n\r\n")
         await writer.drain()
-    except (asyncio.IncompleteReadError, ConnectionError, ValueError):
-        pass
+    except (asyncio.IncompleteReadError, ConnectionError, ValueError) as error:
+        # The client went away or sent a request this upstream does not serve: nothing to answer.
+        print(f"upstream: connection dropped: {error!r}", file=sys.stderr)
     finally:
         writer.close()
 

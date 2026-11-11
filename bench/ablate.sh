@@ -40,7 +40,10 @@ done
 
 image=$(docker images -q rum-inject-bench:base)
 [ -n "$image" ] || { echo "build the base image first: docker build -f bench/Dockerfile --target base -t rum-inject-bench:base ." >&2; exit 1; }
-docker run --rm ${DEV_DOCKER_ARGS:-} \
+# `docker run` arguments, DEV_DOCKER_ARGS split on whitespace as intended. Never empty, so that
+# the expansion is safe under `set -u` with any bash.
+read -r -a docker_args <<< "--rm ${DEV_DOCKER_ARGS:-}"
+docker run "${docker_args[@]}" \
     -v "$work":/ablate -v "$out":/out \
     -v rum-bench-cargo:/usr/local/cargo/registry -v rum-bench-ablate-target:/target \
     -e SEEDS="$SEEDS" -e ROUNDS="$ROUNDS" -e FILTER="${FILTER:-}" -e SCALE="${SCALE:-0.5}" \

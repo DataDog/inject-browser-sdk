@@ -23,17 +23,19 @@ mkdir -p "$RESULTS" && : > "$RESULTS/perf.jsonl"
 sysroot=$(rustc --print sysroot)
 triple=$(rustc -vV | sed -n "s/^host: //p")
 cargo build -q --release -p bench-tools --bin oracle
-for seed in $LAYOUTS; do
+read -r -a layouts <<< "$LAYOUTS"
+read -r -a header_sizes <<< "$HEADER_SIZES"
+for seed in "${layouts[@]}"; do
     mods=/tmp/rum-mods-$seed
     mkdir -p "$mods"
     for package in ngx-http-rum-inject mod-rum-inject; do
-        cargo rustc -q --release -p $package -- \
-            -C link-arg=-fuse-ld=lld -C link-arg=-B$sysroot/lib/rustlib/$triple/bin/gcc-ld \
-            -C link-arg=-Wl,--randomize-section-padding=$seed
+        cargo rustc -q --release -p "$package" -- \
+            -C link-arg=-fuse-ld=lld -C link-arg=-B"$sysroot/lib/rustlib/$triple/bin/gcc-ld" \
+            -C link-arg=-Wl,--randomize-section-padding="$seed"
     done
     cp target/release/libngx_http_rum_inject_module.so target/release/libmod_rum_inject.so \
         target/release/oracle "$mods/"
-    for kb in $HEADER_SIZES; do
+    for kb in "${header_sizes[@]}"; do
         LAYOUT_SEED=$seed RESP_HEADERS_KB=$kb MODULES_DIR=$mods RESULTS=$RESULTS/run \
             VARIANTS="off loaded on" "$here/run.sh" perf >/dev/null
         cat "$RESULTS/run/perf.jsonl" >> "$RESULTS/perf.jsonl"

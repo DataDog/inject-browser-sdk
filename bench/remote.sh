@@ -8,7 +8,10 @@
 # physical cores of the free L3 domain, their SMT siblings left idle; WRK_CPUS [20-23]: another one.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
-exec docker run --rm ${DEV_DOCKER_ARGS:-} --cpuset-cpus "${BENCH_CPUSET:-4-7,20-23}" \
+# `docker run` arguments, DEV_DOCKER_ARGS split on whitespace as intended. Never empty, so that
+# the expansion is safe under `set -u` with any bash.
+read -r -a docker_args <<< "--rm ${DEV_DOCKER_ARGS:-}"
+exec docker run "${docker_args[@]}" --cpuset-cpus "${BENCH_CPUSET:-4-7,20-23}" \
     -v "$repo":/src -w /src/bench \
     -v rum-bench-cargo:/usr/local/cargo/registry -v rum-bench-target:/src/bench/target \
     -e SERVER_CPUS="${SERVER_CPUS:-4,5}" -e WRK_CPUS="${WRK_CPUS:-20-23}" -e BENCH_CPUS="${BENCH_CPUS:-4}" \

@@ -104,7 +104,7 @@ start() { # server variant
         nginx) taskset -c "$SERVER_CPUS" nginx -c "$WORK/run/nginx.conf" & ;;
         httpd) taskset -c "$SERVER_CPUS" apache2 -f "$WORK/run/httpd.conf" -DFOREGROUND & ;;
     esac
-    wait_port $PORT
+    wait_port "$PORT"
 }
 
 stop() {
@@ -120,36 +120,41 @@ stop() {
 }
 
 start_upstream() {
-    python3 "$here/harness/upstream.py" $UPSTREAM "$PAGES" &
+    python3 "$here/harness/upstream.py" "$UPSTREAM" "$PAGES" &
     UPSTREAM_PID=$!
     trap 'kill $UPSTREAM_PID 2>/dev/null || true' EXIT
-    wait_port $UPSTREAM || true
+    wait_port "$UPSTREAM" || true
 }
 
 accuracy() {
-    local status=0
-    for server in $SERVERS; do
-        for variant in $VARIANTS; do
+    local status=0 servers variants
+    read -r -a servers <<< "$SERVERS"
+    read -r -a variants <<< "$VARIANTS"
+    for server in "${servers[@]}"; do
+        for variant in "${variants[@]}"; do
             case $variant in off|loaded) continue ;; esac
             start "$server" "$variant"
-            python3 "$here/harness/accuracy.py" --server "$server/$variant" --port $PORT --pages "$PAGES" \
+            python3 "$here/harness/accuracy.py" --server "$server/$variant" --port "$PORT" --pages "$PAGES" \
                 --expected "$EXPECTED" --seeds "$SEEDS" --buffered --out "$RESULTS/accuracy-$server-$variant.json" || status=1
             stop "$server"
             grep -v "^\s*$" "$WORK/run/$server-error.log" 2>/dev/null | grep -iv "notice\|AH10159" | tail -5 || true
         done
     done
-    return $status
+    return "$status"
 }
 
 perf() {
     local pages=${PERF_PAGES:-$(ls "$PAGES/perf" | tr '\n' ',' | sed 's/,$//')}
     local out="$RESULTS/perf.jsonl"
     : > "$out"
-    for server in $SERVERS; do
-        for variant in $VARIANTS; do
+    local servers variants
+    read -r -a servers <<< "$SERVERS"
+    read -r -a variants <<< "$VARIANTS"
+    for server in "${servers[@]}"; do
+        for variant in "${variants[@]}"; do
             start "$server" "$variant"
-            python3 "$here/harness/perf.py" --server "$server" --variant "$variant" --port $PORT \
-                --pids "$(server_pids "$server")" --pages "$pages" --conns "$(echo $CONNS | tr ' ' ,)" \
+            python3 "$here/harness/perf.py" --server "$server" --variant "$variant" --port "$PORT" \
+                --pids "$(server_pids "$server")" --pages "$pages" --conns "${CONNS// /,}" \
                 --duration "$DURATION" --wrk-cpus "$WRK_CPUS" --out "$out"
             stop "$server"
         done

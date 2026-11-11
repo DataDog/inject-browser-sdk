@@ -16,7 +16,7 @@ load=$!
 sleep 2
 out="$RESULTS/profile-$server-$variant-$page"
 perf record -q -F 999 -g -o "$out.data" -p "$(server_pids "$server")" -- sleep "$seconds" 2>/dev/null
-wait $load
+wait "$load"
 stop "$server"
 {
     echo "## $server $variant $page c=$conns: by DSO"

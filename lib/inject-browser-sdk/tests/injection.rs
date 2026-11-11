@@ -351,10 +351,32 @@ fn oracle_exceptions() {
     let (ours, expected, exception) = close("<html><meta charset=utf-8><title>t</title></head>");
     assert_eq!((ours, expected), (Some(42), None));
     assert_eq!(exception, Some(Exception::HeadStartOmitted));
-    // A CDATA section ends the search for the `</head>` tag.
-    let (ours, expected, exception) = close("<html><head><![CDATA[x]]></head>");
-    assert_eq!((ours, expected), (None, Some(25)));
-    assert_eq!(exception, Some(Exception::CdataSection));
+    // Out of foreign content, a CDATA section is a bogus comment, for both.
+    let (ours, expected, _) = close("<html><head><![CDATA[x]]></head>");
+    assert_eq!((ours, expected), (Some(25), Some(25)));
+    // Where the head closes without one: body content, text, for both.
+    let (ours, expected, _) = close("<!DOCTYPE html><head><title>t</title><img src=a></head>");
+    assert_eq!((ours, expected), (Some(37), Some(37)));
+    let (ours, expected, _) = close("<html><head><title>t</title>\n Warning</head>");
+    assert_eq!((ours, expected), (Some(30), Some(30)));
+    // Past an error printed ahead of the document, before its `<html>` tag.
+    let (ours, expected, _) = close("<br><b>Notice</b><br><!DOCTYPE html><html><head></head>");
+    assert_eq!((ours, expected), (Some(36), Some(36)));
+    // A `</body>` tag closes the head, which lol_html keeps open.
+    let (ours, expected, exception) = close("<html><head><title>t</title></body></head>");
+    assert_eq!((ours, expected), (Some(28), Some(35)));
+    assert_eq!(exception, Some(Exception::EndTagClosingHead));
+    // The end of the document closes it too.
+    let (ours, expected, exception) = close("<!DOCTYPE html><title>t</title>");
+    assert_eq!((ours, expected), (Some(31), None));
+    assert_eq!(exception, Some(Exception::EndOfDocument));
+    // Never in an AMP document.
+    let (ours, expected, _) = close("<html amp><head><img></head>");
+    assert_eq!((ours, expected), (None, None));
+    // A head whose start tag is omitted, walked from past the `<html>` tag.
+    let (ours, expected, exception) = check("<html><meta charset=utf-8><title>t</title><p>x");
+    assert_eq!((ours, expected), (Some(26), None));
+    assert_eq!(exception, Some(Exception::HeadStartOmitted));
 
     let (ours, expected, exception) =
         check("<head><meta charset=utf-8><![CDATA[x]]><meta charset=utf-8>");
@@ -369,8 +391,13 @@ fn oracle_exceptions() {
     assert!(ours < expected);
     assert_eq!(exception, Some(Exception::EndTagClosingHead));
 
-    // A body content tag before the `<head>` tag, which the browser ignores then: neither injects.
-    let (ours, expected, _) = check("<html><div></div><head><meta name=a>");
+    // A body content tag before the `<head>` tag, which the browser ignores then: the snippet goes
+    // where the head it opened closes, which lol_html does not see.
+    let (ours, expected, exception) = check("<html><div></div><head><meta name=a>");
+    assert_eq!((ours, expected), (Some(6), None));
+    assert_eq!(exception, Some(Exception::HeadStartOmitted));
+    // Without HTML evidence first, neither injects.
+    let (ours, expected, _) = check("<div></div><head><meta name=a>");
     assert_eq!((ours, expected), (None, None));
 
     let (ours, expected, exception) = check("<head></head><body><meta charset=utf-8>");

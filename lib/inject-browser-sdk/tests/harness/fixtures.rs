@@ -195,7 +195,8 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
         ),
         Fixture::new(
             "no-head",
-            "<!DOCTYPE html>\n<html>\n<body>\n<p>No head element at all.</p>\n</body>\n</html>\n",
+            // The browser opens a head anyway, closed by the `<body>` tag.
+            "<!DOCTYPE html>\n<html>{{SNIPPET}}\n<body>\n<p>No head element at all.</p>\n</body>\n</html>\n",
         ),
         Fixture::new(
             "head-self-closing",

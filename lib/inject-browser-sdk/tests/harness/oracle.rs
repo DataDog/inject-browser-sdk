@@ -70,6 +70,14 @@ pub struct Observed {
     pub doctype_html: Option<usize>,
     /// Start of the first `<html>` or `<meta>` start tag.
     pub html_evidence: Option<usize>,
+    /// Starts of every `<html>` start tag outside templates.
+    pub html_starts: Vec<usize>,
+    /// Starts of every `<body>` start tag outside templates.
+    pub body_starts: Vec<usize>,
+    /// Whether an `<html>` tag makes the document an AMP one, which the snippet stays out of.
+    pub amp: bool,
+    /// Start of every start tag, wherever it is.
+    pub start_tags: Vec<usize>,
     /// Every `<template>` element, from its start tag to the start of its end tag, if it has one.
     pub templates: Vec<(usize, Option<usize>)>,
     /// Start of the first start tag a `<head>` tag cannot follow: past it, the browser has started
@@ -81,6 +89,16 @@ pub struct Observed {
 const MAY_PRECEDE_HEAD: &[&str] = &[
     "html", "head", "base", "basefont", "bgsound", "link", "meta", "noframes", "noscript",
     "script", "style", "template", "title",
+];
+
+/// The attributes of an `<html>` tag that make the document an AMP one.
+const AMP_ATTRIBUTES: &[&str] = &[
+    "amp",
+    "\u{26a1}",
+    "amp4email",
+    "\u{26a1}4email",
+    "amp4ads",
+    "\u{26a1}4ads",
 ];
 
 /// Elements the head can hold; any other start tag closes it.
@@ -97,10 +115,12 @@ pub fn observe<T: AsRef<[u8]>>(chunks: &[T]) -> Option<Observed> {
     let (heads, children, evidence) = (observed.clone(), observed.clone(), observed.clone());
     let templates = observed.clone();
     let body = observed.clone();
+    let roots = observed.clone();
     // How many templates are open where an element starts: body content within one does not
     // count, its content being inert.
     let depth: Rc<Cell<usize>> = Rc::default();
-    let (template_depth, body_depth) = (depth.clone(), depth);
+    let (template_depth, body_depth) = (depth.clone(), depth.clone());
+    let root_depth = depth;
     let settings = Settings::new()
         .append_element_content_handler(element!("head", move |el: &mut Element| {
             let first = heads.borrow().heads.is_empty();
@@ -159,11 +179,29 @@ pub fn observe<T: AsRef<[u8]>>(chunks: &[T]) -> Option<Observed> {
         }))
         .append_element_content_handler(element!("*", move |el: &mut Element| {
             let mut observed = body.borrow_mut();
+            observed.start_tags.push(el.source_location().bytes().start);
             if body_depth.get() == 0
                 && observed.body_content.is_none()
                 && !MAY_PRECEDE_HEAD.contains(&el.tag_name().to_ascii_lowercase().as_str())
             {
                 observed.body_content = Some(el.source_location().bytes().start);
+            }
+            return Ok(());
+        }))
+        .append_element_content_handler(element!("html, body", move |el: &mut Element| {
+            if root_depth.get() > 0 {
+                return Ok(());
+            }
+            let mut observed = roots.borrow_mut();
+            let start = el.source_location().bytes().start;
+            match el.tag_name().eq_ignore_ascii_case("html") {
+                true => {
+                    observed.html_starts.push(start);
+                    observed.amp |= AMP_ATTRIBUTES
+                        .iter()
+                        .any(|name| return el.has_attribute(name));
+                }
+                false => observed.body_starts.push(start),
             }
             return Ok(());
         }))
@@ -263,6 +301,22 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> TextNodes {
         };
     };
     let mut gathered = std::mem::take(&mut *markup.borrow_mut());
+    // A chunk split within a character makes the text after it start at the split: back to the
+    // start of the character, which is where the browser reads it.
+    let document: Vec<u8> = chunks
+        .iter()
+        .flat_map(|chunk| return chunk.as_ref().to_vec())
+        .collect();
+    let char_start = |mut position: usize| {
+        while position > 0
+            && document
+                .get(position)
+                .is_some_and(|&b| return b & 0xC0 == 0x80)
+        {
+            position -= 1;
+        }
+        return position;
+    };
     for (range, content, data) in nodes.borrow().iter() {
         if range.is_empty() {
             continue;
@@ -272,13 +326,48 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> TextNodes {
         }
         if *data {
             // Character references are decoded, as whitespace ones keep the head open.
-            match blank(&decode_references(&without_mark(range, content))) {
+            let unmarked = without_mark(range, content);
+            match blank(&decode_references(&unmarked)) {
                 true => gathered.blank_data.push(range.clone()),
-                false => gathered.data_text.push(range.clone()),
+                // The head closes on the first byte that is not blank: where the snippet goes.
+                false => {
+                    let start =
+                        range.start + (content.len() - unmarked.len()) + leading_blank(&unmarked);
+                    gathered.data_text.push(char_start(start)..range.end);
+                }
             }
         }
     }
     return gathered;
+}
+
+/// How many bytes at the start of `text` are whitespace, or character references to it.
+fn leading_blank(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if bytes[index] != b'&' {
+            break;
+        }
+        let length = bytes[index + 1..]
+            .iter()
+            .position(|&b| return !(b.is_ascii_alphanumeric() || b == b'#'))
+            .map_or(bytes.len() - index, |end| return end + 1);
+        let end = match bytes.get(index + length) {
+            Some(b';') => index + length + 1,
+            _ => index + length,
+        };
+        let decoded = decode_references(&text[index..end]);
+        if decoded.is_empty() || !decoded.bytes().all(|b| return b.is_ascii_whitespace()) {
+            break;
+        }
+        index = end;
+    }
+    return index;
 }
 
 /// `text` with its numeric character references (the `;` optional) and `&Tab;` / `&NewLine;`
@@ -406,43 +495,87 @@ fn text_before(observed: &Observed, position: usize) -> bool {
 }
 
 /// Where [`InjectionStrategy::HeadCloseTag`] must put the snippet in a document lol_html saw as
-/// `observed`: right before the end tag of the first head, if the document looks like HTML (an
-/// `<html>`, `<meta>` or `<head>` start tag starts within the window) and no body content comes
-/// before it. lol_html sees no head without a `<head>` start tag, see [`Exception::HeadStartOmitted`].
+/// `observed`: right before the end tag of the first head, or right before where the browser
+/// closes the head without one, body content or text, whichever comes first.
+///
+/// Before a `</head>` tag, the document has to look like HTML (an `<html>`, `<meta>` or `<head>`
+/// start tag, a doctype, or the end tag itself, within the evidence limit). Before where the head
+/// closes, a doctype, an `<html>` or a `<head>` start tag has to precede it, or it has to be a
+/// `<body>` tag; without, past body content, the snippet goes right before the first `<html>` or
+/// `<body>` tag that follows. Never in an AMP document. lol_html sees no head without a `<head>`
+/// start tag, see [`Exception::HeadStartOmitted`], nor the end tags that close one, see
+/// [`Exception::EndTagClosingHead`], nor the end of the document, see [`Exception::EndOfDocument`].
 fn head_close_point(observed: &Observed) -> Option<usize> {
-    let head = first_head(observed)?;
-    let end = head_end(observed, head)?;
-    // The first `<head>` start tag counts as evidence wherever it is, as the injector reads it.
-    let any_head = observed
-        .heads
-        .first()
-        .map_or(head.start, |first| return first.start);
-    let evidence = [
-        observed.html_evidence,
+    if observed.amp {
+        return None;
+    }
+    let end = first_head(observed).and_then(|head| return head_end(observed, head));
+    let text = observed
+        .data_text
+        .iter()
+        .map(|text| return text.start)
+        .filter(|&start| return !in_template(observed, start))
+        .min();
+    let closes = [observed.body_content, text].into_iter().flatten().min();
+    if let Some(end) = end.filter(|&end| return closes.is_none_or(|closes| return closes > end)) {
+        // The first `<head>` start tag counts as evidence wherever it is, as the injector reads it.
+        let any_head = observed
+            .heads
+            .first()
+            .map_or(end, |first| return first.start);
+        let evidence = [
+            observed.html_evidence,
+            observed.doctype_html,
+            Some(any_head),
+            Some(end),
+        ]
+        .into_iter()
+        .flatten()
+        .min()?;
+        return within_evidence_limit(observed, evidence).then_some(end);
+    }
+    let point = closes?;
+    let heads = observed.heads.first().map(|head| return head.start);
+    let strong = [
+        observed.html_starts.first().copied(),
         observed.doctype_html,
-        Some(any_head),
+        heads,
     ]
     .into_iter()
     .flatten()
-    .min()?;
-    if !within_evidence_limit(observed, evidence) {
+    .any(|start| return start < point)
+        || observed.body_starts.contains(&point);
+    if strong {
+        let evidence = [
+            observed.html_evidence,
+            observed.doctype_html,
+            heads,
+            observed.body_starts.first().copied(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()?;
+        return within_evidence_limit(observed, evidence).then_some(point);
+    }
+    // Text ends the search, body content goes on to the evidence the body holds.
+    if observed.body_content != Some(point) {
         return None;
     }
-    if observed
-        .body_content
-        .is_some_and(|start| return start < end)
-    {
-        return None;
-    }
-    // Text closes the head too.
-    if text_before(observed, end) {
-        return None;
-    }
-    return Some(end);
+    let found = observed
+        .html_starts
+        .iter()
+        .chain(&observed.body_starts)
+        .copied()
+        .filter(|&start| return start > point)
+        .min()?;
+    return within_evidence_limit(observed, found).then_some(found);
 }
 
 /// Where [`InjectionStrategy::HeadOpenTag`] must put the snippet, see [`injection_point`].
 fn head_open_point(observed: &Observed) -> Option<usize> {
+    if observed.amp {
+        return None;
+    }
     let head = first_head(observed)?;
     if observed
         .body_content
@@ -594,15 +727,23 @@ pub enum Exception {
     /// root element, the injector walking on: lol_html takes what follows for the content of that
     /// element, out of the head.
     IgnoredStartTag,
-    /// [`InjectionStrategy::HeadCloseTag`] injects before a `</head>` tag closing a head whose start
-    /// tag the document omits, which HTML allows, or stops at it when no HTML evidence precedes it:
-    /// lol_html, without a tree builder, sees no head to close before it, and pairs a later
-    /// `</head>` with a later `<head>` the browser ignores.
+    /// The injector places the snippet within a head whose start tag the document omits, which HTML
+    /// allows, or the browser ignores, past where it closed a head it opened: before a `</head>`
+    /// tag closing it, or, with [`InjectionStrategy::HeadOpenTag`], walking it from past the
+    /// doctype and `<html>` tag. lol_html, without a tree builder, sees no head there, and pairs a
+    /// later `</head>` with a later `<head>` the browser ignores.
     HeadStartOmitted,
     /// The injector stops at a `<![CDATA[`, whose end it cannot tell without tracking foreign
     /// content: before the `<head>` tag it then never injects, within the head its point is earlier.
     /// lol_html reads one outside foreign content as the bogus comment it is there.
     CdataSection,
+    /// The document ends within a head the browser opened, which closes with it: the injector
+    /// injects at its end, where lol_html sees no head end.
+    EndOfDocument,
+    /// The injector tells body content by the name of its start tag, and injects before one the
+    /// document ends within, a quote left open for instance: the browser drops it, closing the head
+    /// with the document, while lol_html sees no element at all.
+    UnfinishedTag,
     /// The injector keeps the snippet behind a character encoding declaration the browser's
     /// prescan honours, which lol_html knows nothing about: within a raw text or inert element
     /// (later point), or past where the head ends or within a tag the window ends in (no point).
@@ -624,8 +765,60 @@ pub fn exception(
             return Some(Exception::InvalidUtf8);
         }
     }
+    if ours == Some(document.len()) && oracle.is_none() {
+        return Some(Exception::EndOfDocument);
+    }
+    if let Some(ours) = ours {
+        let tag = lower.get(ours..ours + 2).unwrap_or_default();
+        if tag.first() == Some(&b'<')
+            && tag.get(1).is_some_and(u8::is_ascii_alphabetic)
+            && !observed.start_tags.contains(&ours)
+            && oracle.is_none_or(|oracle| return oracle > ours)
+        {
+            return Some(Exception::UnfinishedTag);
+        }
+    }
+    // The injector stops at, or injects before, an end tag the head closes on, which lol_html
+    // knows nothing of without a tree builder.
+    let first = [ours, oracle]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(document.len());
+    if [b"</br".as_slice(), b"</body", b"</html"]
+        .iter()
+        .any(|end_tag| return contains(&lower[..(first + 6).min(lower.len())], end_tag))
+    {
+        return Some(Exception::EndTagClosingHead);
+    }
+    // Declined, or held back, before a declaration that the snippet would push out of the window.
+    if let (None, Some(point)) = (ours, oracle) {
+        if point < WINDOW && contains(&lower[point..lower.len().min(WINDOW)], b"charset") {
+            return Some(Exception::EncodingDeclaration);
+        }
+    }
     if strategy == InjectionStrategy::HeadCloseTag {
         return head_close_exception(&lower, observed, ours, oracle);
+    }
+    // A head without a start tag, or past one the browser ignores.
+    if let (Some(ours), None) = (ours, oracle) {
+        let ignored = |head: &Range<usize>| {
+            return head.start > ours
+                || observed
+                    .body_content
+                    .is_some_and(|start| return start < head.start)
+                || text_before(observed, head.start);
+        };
+        if first_head(observed).is_none_or(ignored) {
+            return Some(Exception::HeadStartOmitted);
+        }
+    }
+    // A `</head>` before the head lol_html sees closed the head the browser opened for it: the
+    // `<head>` tag that follows is ignored.
+    if oracle.is_some()
+        && first_head(observed).is_some_and(|head| return contains(&lower[..head.start], b"</head"))
+    {
+        return Some(Exception::HeadStartOmitted);
     }
     let window = &lower[..lower.len().min(WINDOW)];
     if let Some(head) = observed.heads.first() {

@@ -32,17 +32,17 @@ pub enum InjectionStrategy {
     ///
     /// Only the first real one counts (not one written in a comment, an attribute value, a script or
     /// a style), and only in a document that looks like HTML: an `<html>`, `<meta>` or `<head>`
-    /// start tag within its first 1024 bytes, before it. Body content (`<body>`, `<div>`…), text
+    /// start tag or a `<!DOCTYPE html>` within its first 10 KiB, comments, doctypes and whitespace
+    /// not counted, before it. Body content (`<body>`, `<div>`…), text
     /// outside tags (whitespace and a leading byte order mark aside), a `</body>`, `</html>` or
-    /// `</br>` end tag and a CDATA section end the search. The `</head>` tag
-    /// may come anywhere past those bytes. Holds back nothing but a `</head` tag a write cuts short.
+    /// `</br>` end tag and a CDATA section end the search. The `</head>` tag may come anywhere. Holds back nothing but a `</head` tag a write cuts short.
     HeadCloseTag = 0,
 
     /// As early as possible within the head: right after the `<head>` start tag when it is within
     /// the first 1024 bytes, unless the head holds `<meta>` tags declaring the character encoding,
     /// `X-UA-Compatible` or a `Content-Security-Policy`: then right after the last of them. Other
     /// `<meta>` tags, SEO, viewport or the tracer's, do not hold the snippet back. Past those bytes,
-    /// right after a `<head>` tag if they look like an HTML document. A `<head>` tag past body
+    /// right after a `<head>` tag if the document looks like HTML, as `HeadCloseTag` tells it. A `<head>` tag past body
     /// content does not count: the browser ignores it.
     ///
     /// Holds the first 1024 bytes back until they are complete (see [`injector_held_back_length`]),

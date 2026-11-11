@@ -31,6 +31,13 @@ const DOCUMENT_CHARSET_SCAN_LIMIT: usize = 1024;
 /// that no more than this is ever held back.
 const WALK_LIMIT: usize = 10 * 1024;
 
+/// How far into the document HTML evidence is looked for: an `<html>`, `<meta>` (or, looking for
+/// `</head>`, `<head>`) start tag or a `<!DOCTYPE html>` has to start within this many bytes,
+/// comments, doctypes and whitespace not counted, for the document to be taken for HTML. A license
+/// banner or blank lines at the top do not push the evidence out of reach, while a body that is not
+/// HTML, JSON or text, is scanned no further. Nothing is held back for it.
+const EVIDENCE_LIMIT: usize = 10 * 1024;
+
 /// The longest `</head>` end tag injected before, from its `<` to its `>`, and so the most that is
 /// held back looking for its `>`: a valid one has no attributes, so only an end tag stuffed with
 /// them is given up on, rather than held back without bound.
@@ -42,11 +49,12 @@ pub enum InjectionStrategy {
     /// Right before the `</head>` end tag, the default and what [`Injector::new`] selects. Only the
     /// first real one counts (not one written in a comment, an attribute value or a raw text
     /// element), and only in a document that looks like HTML: an `<html>`, `<meta>` or `<head>`
-    /// start tag starts within the first DOCUMENT_CHARSET_SCAN_LIMIT bytes, before it. Body content
+    /// start tag or a `<!DOCTYPE html>` starts within EVIDENCE_LIMIT bytes, comments, doctypes and
+    /// whitespace not counted, before it. Body content
     /// (`<body>`, `<div>`…), text outside tags (whitespace and a leading byte order mark aside), a
     /// `</body>`, `</html>` or `</br>` end tag, all of which close the head first, and a CDATA
-    /// section end the search; without HTML evidence in those bytes, the rest of the
-    /// document is not scanned. The `</head>` tag may come anywhere past them.
+    /// section end the search; without HTML evidence within the limit, the rest of the document is
+    /// not scanned. The `</head>` tag may come anywhere past it.
     ///
     /// Holds back nothing but a `</head` tag that a chunk cuts short.
     #[default]
@@ -108,8 +116,9 @@ enum HeadWindow<'a> {
 ///   or a `Content-Security-Policy`: then right after the last of them. Other `<meta>` tags, SEO, viewport or
 ///   the tracer's, do not hold the snippet back (see [`parser::find_injection_point`] for the
 ///   details);
-/// * otherwise, if those bytes look like an HTML document, as they hold an `<html>` or a `<meta>`
-///   start tag, right after the first `<head>` start tag that follows;
+/// * otherwise, if the document looks like HTML, holding an `<html>` or `<meta>` start tag or a
+///   `<!DOCTYPE html>` within EVIDENCE_LIMIT bytes, comments, doctypes and whitespace not counted,
+///   right after the first `<head>` start tag that follows;
 /// * otherwise not at all: the document passes through untouched, padded as [`Injector::end`]
 ///   describes. This keeps the snippet out of fragments, JSON, plain text and any other content
 ///   served as `text/html`, and out of documents that have no `<head>` tag.
@@ -539,28 +548,32 @@ impl<'snippet> Injector<'snippet> {
     /// evidence.
     fn may_find_head_close_tag(&self) -> bool {
         return self.head_locator.is_searching()
-            && (self.holds_html_evidence()
-                || self.head_locator.offset() < DOCUMENT_CHARSET_SCAN_LIMIT
-                || self
-                    .head_locator
-                    .pending_tag_start()
-                    .is_some_and(|start| return start < DOCUMENT_CHARSET_SCAN_LIMIT));
+            && (self.holds_html_evidence() || self.may_still_find_evidence());
     }
 
     /// [`InjectionStrategy::HeadCloseTag`]'s evidence that the document is HTML: an `<html>`,
-    /// `<meta>` or `<head>` start tag starting within the first DOCUMENT_CHARSET_SCAN_LIMIT bytes.
+    /// `<meta>` or `<head>` start tag or a `<!DOCTYPE html>`, within EVIDENCE_LIMIT bytes.
     fn holds_html_evidence(&self) -> bool {
         return self
             .head_locator
-            .evidence()
-            .is_some_and(|start| return start < DOCUMENT_CHARSET_SCAN_LIMIT);
+            .significant_evidence()
+            .is_some_and(|start| return start < EVIDENCE_LIMIT);
+    }
+
+    /// Whether evidence may still come within EVIDENCE_LIMIT bytes, comments, doctypes and
+    /// whitespace not counted: in what follows, or in a tag still being read.
+    fn may_still_find_evidence(&self) -> bool {
+        return self.head_locator.significant_scanned() < EVIDENCE_LIMIT
+            || self
+                .head_locator
+                .significant_pending_tag_start()
+                .is_some_and(|start| return start < EVIDENCE_LIMIT);
     }
 
     /// Whether the snippet may go after `head`, a `<head>` tag found past the head window or ending
-    /// past it: only if the tag starts within the window, or if the window looks like an HTML
-    /// document.
+    /// past it: only if the tag starts within the window, or if the document looks like HTML.
     fn may_inject_after(&self, head: HeadOpenTag) -> bool {
-        return head.start < DOCUMENT_CHARSET_SCAN_LIMIT || self.window_holds_html_evidence();
+        return head.start < DOCUMENT_CHARSET_SCAN_LIMIT || self.looks_like_html();
     }
 
     /// Whether a `<head>` tag found in what follows may still be injected after, see
@@ -569,18 +582,17 @@ impl<'snippet> Injector<'snippet> {
         if !self.head_locator.is_searching() {
             return false;
         }
-        return self.window_holds_html_evidence()
-            || self
-                .head_locator
-                .pending_tag_start()
-                .is_some_and(|start| return start < DOCUMENT_CHARSET_SCAN_LIMIT);
+        return self.looks_like_html() || self.may_still_find_evidence();
     }
 
-    fn window_holds_html_evidence(&self) -> bool {
+    /// [`InjectionStrategy::HeadOpenTag`]'s evidence that the document is HTML: an `<html>` or
+    /// `<meta>` start tag or a `<!DOCTYPE html>`, within EVIDENCE_LIMIT bytes, comments, doctypes and
+    /// whitespace not counted.
+    fn looks_like_html(&self) -> bool {
         return self
             .head_locator
-            .html_evidence()
-            .is_some_and(|start| return start < DOCUMENT_CHARSET_SCAN_LIMIT);
+            .significant_html_evidence()
+            .is_some_and(|start| return start < EVIDENCE_LIMIT);
     }
 
     fn create_result<'a>(&'a self, slices: &[BytesSlice<'a>]) -> Result<'a> {
@@ -1096,9 +1108,16 @@ mod tests {
         use super::*;
         use pretty_assertions::assert_eq;
 
-        /// A comment long enough to fill the window, which holds no HTML evidence of its own.
+        /// A comment long enough to fill the window, which holds no HTML evidence of its own, and does
+        /// not count towards EVIDENCE_LIMIT either.
         fn filler() -> String {
             return format!("<!-- {} -->", "c".repeat(DOCUMENT_CHARSET_SCAN_LIMIT));
+        }
+
+        /// Markup past which no evidence is looked for: more than EVIDENCE_LIMIT bytes of `<link>`
+        /// tags, which are no evidence, and which the head may hold.
+        fn opaque_filler() -> String {
+            return "<link rel=icon>".repeat(EVIDENCE_LIMIT / 15 + 1);
         }
 
         #[test]
@@ -1107,6 +1126,8 @@ mod tests {
                 "<html>",
                 "<!DOCTYPE html><HTML lang=en>",
                 "<meta charset=utf-8>",
+                "<!DOCTYPE html>",
+                "<!doctype HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\">",
             ] {
                 let input = format!("{evidence}{}<head><meta name=a></head>", filler());
                 let expected = format!(
@@ -1119,10 +1140,10 @@ mod tests {
 
         #[test]
         fn does_not_inject_when_the_window_does_not_look_like_html() {
-            // A doctype alone is no evidence, and neither are tags within comments or raw text.
+            // Tags within comments or raw text are no evidence, nor is another doctype.
             for prefix in [
                 "",
-                "<!DOCTYPE html>",
+                "<!DOCTYPE htmlx>",
                 "<!-- <html> -->",
                 "<script>'<html>'</script>",
                 "<div><p>",
@@ -1173,8 +1194,14 @@ mod tests {
                 ],
                 &(filler.clone() + "<mark> <head>y           "),
             );
-            // Nor is one that only starts past the window.
+            // Whitespace does not count towards the limit, nor do comments: evidence past them is.
             let filler = " ".repeat(DOCUMENT_CHARSET_SCAN_LIMIT);
+            test_injector(
+                [filler.clone() + "<html><head>y"],
+                &(filler + "<html><head>{{SNIPPET}}y"),
+            );
+            // Evidence past EVIDENCE_LIMIT bytes of anything else is not.
+            let filler = opaque_filler();
             test_injector(
                 [filler.clone() + "<html><head>y"],
                 &(filler + "<html><head>y           "),
@@ -1241,14 +1268,14 @@ mod tests {
         fn stops_scanning_without_evidence() {
             let mut injector =
                 Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadOpenTag);
-            injector.write(filler().as_bytes());
+            injector.write(opaque_filler().as_bytes());
             assert_eq!(injector.injector_state, InjectorState::PassingThrough);
         }
 
         #[test]
         fn fuzzy() {
             fuzz_head_open_tag(&(String::from("<html>") + &filler()), true);
-            fuzz_head_open_tag(&filler(), false);
+            fuzz_head_open_tag(&opaque_filler(), false);
         }
     }
 
@@ -1648,9 +1675,38 @@ mod tests {
             );
             check("Some text </head> more text", "Some text </head> more text");
             check("{\"a\": \"</head>\"}", "{\"a\": \"</head>\"}");
-            // Nor within the first kilobyte: what follows is not even scanned.
+            // Nor with text first, which closes the head the browser opens for it.
             let preamble = "x".repeat(DOCUMENT_CHARSET_SCAN_LIMIT);
             let document = format!("{preamble}<html><head></head>");
+            run_injector(
+                || return Injector::new(b"{{SNIPPET}}"),
+                [&document],
+                &format!("{document}           "),
+            );
+            // A doctype is evidence, and neither comments nor whitespace count towards the limit: a
+            // license banner or blank lines ahead of the document do not keep the snippet out.
+            let banner = format!(
+                "<!--\n{}-->\n",
+                "  Licensed under the Apache License, Version 2.0\n".repeat(30)
+            );
+            check(
+                &format!("<!DOCTYPE html>\n{banner}<html><head><title>t</title></head>"),
+                &format!(
+                    "<!DOCTYPE html>\n{banner}<html><head><title>t</title>{{{{SNIPPET}}}}</head>"
+                ),
+            );
+            let blank = "\n".repeat(1500);
+            check(
+                &format!("{blank}<html><head><title>t</title></head>"),
+                &format!("{blank}<html><head><title>t</title>{{{{SNIPPET}}}}</head>"),
+            );
+            check(
+                "<!DOCTYPE html><title>t</title></head>",
+                "<!DOCTYPE html><title>t</title>{{SNIPPET}}</head>",
+            );
+            // Past EVIDENCE_LIMIT bytes of anything else, the rest is not scanned.
+            let links = "<link rel=icon>".repeat(EVIDENCE_LIMIT / 15 + 1);
+            let document = format!("{links}<html><head></head>");
             run_injector(
                 || return Injector::new(b"{{SNIPPET}}"),
                 [&document],

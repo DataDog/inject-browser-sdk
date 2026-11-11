@@ -45,6 +45,9 @@ const MAX_RECENT: usize = 11;
 /// like are text then, rather than held without bound.
 const MAX_REFERENCE: usize = 12;
 
+/// How many bytes of a `<!` declaration are kept, to tell a `<!DOCTYPE html>` one.
+const MAX_DECLARATION: usize = 16;
+
 /// What follows the `<!` of a CDATA section opener.
 const CDATA_SECTION_OPEN: &[u8] = b"[CDATA[";
 
@@ -188,6 +191,23 @@ pub(super) struct HeadOpenTagLocator {
     /// Offset of the `<` of the first `<html>` or `<meta>` start tag.
     html_evidence: Option<usize>,
 
+    /// Where the first `<html>`, `<meta>` start tag or `<!DOCTYPE html>` starts, counting only the
+    /// bytes that are not [`HeadOpenTagLocator::free`].
+    significant_html_evidence: Option<usize>,
+
+    /// Where the first `<head>` start tag starts, counting the same way, looking for `</head>`.
+    significant_head_start: Option<usize>,
+
+    /// Bytes that tell nothing about whether the document is HTML, scanned so far: comments,
+    /// bogus comments and doctypes, once ended, and whitespace in text. A license banner in a
+    /// comment, or blank lines, do not push the evidence out of reach.
+    free: usize,
+
+    /// The first bytes of the `<!` declaration being read, lower case, and whether the markup is one.
+    declaration: [u8; MAX_DECLARATION],
+    declaration_length: usize,
+    declaration_open: bool,
+
     /// Offset of the `<` of the first `<head>` start tag, looking for the `</head>` one.
     head_start: Option<usize>,
 
@@ -214,6 +234,12 @@ impl HeadOpenTagLocator {
             recent: [0; MAX_RECENT],
             recent_length: 0,
             html_evidence: None,
+            significant_html_evidence: None,
+            significant_head_start: None,
+            free: 0,
+            declaration: [0; MAX_DECLARATION],
+            declaration_length: 0,
+            declaration_open: false,
             head_start: None,
             template_depth: 0,
         };
@@ -221,22 +247,50 @@ impl HeadOpenTagLocator {
 
     /// Offset of the first `<html>` or `<meta>` start tag scanned, if any: the sign that the document
     /// is HTML rather than a fragment or some other content served as `text/html`.
+    #[cfg(test)]
     pub(super) fn html_evidence(&self) -> Option<usize> {
         return self.html_evidence;
-    }
-
-    /// Offset of the first `<html>`, `<meta>` or `<head>` start tag scanned, if any: the HTML
-    /// evidence of [`Target::HeadEnd`], where the `<head>` tag is not what is looked for.
-    pub(super) fn evidence(&self) -> Option<usize> {
-        return match (self.html_evidence, self.head_start) {
-            (Some(html), Some(head)) => Some(html.min(head)),
-            (html, head) => html.or(head),
-        };
     }
 
     /// Number of bytes scanned so far, across every chunk.
     pub(super) fn offset(&self) -> usize {
         return self.offset;
+    }
+
+    /// Where the first `<html>` or `<meta>` start tag or `<!DOCTYPE html>` starts, counting only
+    /// bytes that are not free (see [`HeadOpenTagLocator::significant_scanned`]).
+    pub(super) fn significant_html_evidence(&self) -> Option<usize> {
+        return self.significant_html_evidence;
+    }
+
+    /// [`HeadOpenTagLocator::significant_html_evidence`], or where the first `<head>` start tag
+    /// starts, counted the same way: the HTML evidence of [`Target::HeadEnd`].
+    pub(super) fn significant_evidence(&self) -> Option<usize> {
+        return match (self.significant_html_evidence, self.significant_head_start) {
+            (Some(html), Some(head)) => Some(html.min(head)),
+            (html, head) => html.or(head),
+        };
+    }
+
+    /// How many of the bytes scanned so far tell whether the document is HTML: all of them but
+    /// comments, bogus comments, doctypes and whitespace in text. Within one of those still being
+    /// read, where it started.
+    pub(super) fn significant_scanned(&self) -> usize {
+        return match self.state {
+            State::MarkupDeclarationOpen { .. }
+            | State::Comment { .. }
+            | State::BogusComment
+            | State::CdataSectionOpen { .. } => self.markup_start - self.free,
+            _ => self.offset - self.free,
+        };
+    }
+
+    /// [`HeadOpenTagLocator::pending_tag_start`], counted as
+    /// [`HeadOpenTagLocator::significant_scanned`] does.
+    pub(super) fn significant_pending_tag_start(&self) -> Option<usize> {
+        return self
+            .pending_tag_start()
+            .map(|start| return start - self.free);
     }
 
     /// Offset of the `<` of an end tag being read while it may still turn out to be `</head>`,
@@ -324,9 +378,15 @@ impl HeadOpenTagLocator {
                     self.state = State::PastHead;
                     return rest.len();
                 }
+                // Whitespace, or the byte order mark: nothing that tells the document is HTML.
+                self.free += skipped;
                 skipped
             }
-            State::BogusComment => found(memchr(b'>', rest)),
+            State::BogusComment => {
+                let skipped = found(memchr(b'>', rest));
+                self.push_declaration(&rest[..skipped]);
+                skipped
+            }
             State::Tag {
                 position: TagPosition::QuotedAttributeValue(quote),
                 ..
@@ -526,7 +586,12 @@ impl HeadOpenTagLocator {
                     content_run: 0,
                     bang: false,
                 },
-                (_, b'>') => State::Data,
+                (_, b'>') => self.end_free_markup(offset),
+                (0, _) => {
+                    self.declaration_open = true;
+                    self.push_declaration(&[byte]);
+                    State::BogusComment
+                }
                 _ => State::BogusComment,
             },
 
@@ -547,7 +612,9 @@ impl HeadOpenTagLocator {
                 },
                 // `-->` may reuse the dashes of the `<!--`, which ends `<!-->` and `<!--->`, while
                 // the ones of a `--!>` have to be comment content.
-                b'>' if (!bang && run == 2) || (bang && content_run == 2) => State::Data,
+                b'>' if (!bang && run == 2) || (bang && content_run == 2) => {
+                    self.end_free_markup(offset)
+                }
                 b'!' if !bang && content_run == 2 => State::Comment {
                     run,
                     content_run,
@@ -567,14 +634,22 @@ impl HeadOpenTagLocator {
                         matched: matched + 1,
                     },
                     // Any other `<![…` is a bogus comment, which the very next `>` ends.
-                    (false, b'>') => State::Data,
+                    (false, b'>') => self.end_free_markup(offset),
                     (false, _) => State::BogusComment,
                 }
             }
 
             State::BogusComment => match byte {
-                b'>' => State::Data,
-                _ => State::BogusComment,
+                b'>' => {
+                    if self.is_html_doctype() && self.significant_html_evidence.is_none() {
+                        self.significant_html_evidence = Some(self.markup_start - self.free);
+                    }
+                    self.end_free_markup(offset)
+                }
+                _ => {
+                    self.push_declaration(&[byte]);
+                    State::BogusComment
+                }
             },
 
             State::RawText { script } => self.step_raw_text(script, byte),
@@ -700,7 +775,47 @@ impl HeadOpenTagLocator {
         self.markup_start = offset;
         self.name_length = 0;
         self.name_overflow = false;
+        self.declaration_length = 0;
+        self.declaration_open = false;
         return State::TagOpen;
+    }
+
+    /// Ends a comment, a bogus comment or a doctype at the `>` at `offset`: all of it is free.
+    fn end_free_markup(&mut self, offset: usize) -> State {
+        self.free += offset + 1 - self.markup_start;
+        return State::Data;
+    }
+
+    fn push_declaration(&mut self, bytes: &[u8]) {
+        let taken = bytes.len().min(MAX_DECLARATION - self.declaration_length);
+        for (slot, byte) in self.declaration[self.declaration_length..]
+            .iter_mut()
+            .zip(&bytes[..taken])
+        {
+            *slot = byte.to_ascii_lowercase();
+        }
+        self.declaration_length += taken;
+    }
+
+    /// Whether the `<!` declaration just read is an HTML doctype: `doctype`, then the name `html`,
+    /// whitespace between them optional, as the tokenizer has it, and a public or system
+    /// identifier allowed after it.
+    fn is_html_doctype(&self) -> bool {
+        if !self.declaration_open {
+            return false;
+        }
+        let Some(rest) = self.declaration[..self.declaration_length].strip_prefix(b"doctype")
+        else {
+            return false;
+        };
+        let rest = rest.trim_ascii_start();
+        let Some(after) = rest.strip_prefix(b"html") else {
+            return false;
+        };
+        // `<!DOCTYPE html>` ends right there, which is all the declaration holds then.
+        return after
+            .first()
+            .is_none_or(|byte| return byte.is_ascii_whitespace());
     }
 
     fn push_name(&mut self, byte: u8) {
@@ -718,8 +833,14 @@ impl HeadOpenTagLocator {
         if self.html_evidence.is_none() && (self.name_is(b"html") || self.name_is(b"meta")) {
             self.html_evidence = Some(self.markup_start);
         }
+        if self.significant_html_evidence.is_none()
+            && (self.name_is(b"html") || self.name_is(b"meta"))
+        {
+            self.significant_html_evidence = Some(self.markup_start - self.free);
+        }
         if self.target == Target::HeadEnd && self.head_start.is_none() && self.name_is(b"head") {
             self.head_start = Some(self.markup_start);
+            self.significant_head_start = Some(self.markup_start - self.free);
         }
     }
 

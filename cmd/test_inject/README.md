@@ -23,7 +23,7 @@ is also the library default.
 
 | Strategy | Injects |
 | --- | --- |
-| `head-close-tag` | right before the first real `</head>`, wherever it is, if the document looks like HTML: an `<html>`, `<meta>` or `<head>` tag within its first 1024 bytes |
+| `head-close-tag` | right before the first real `</head>`, wherever it is, if the document looks like HTML: an `<html>`, `<meta>` or `<head>` tag or a `<!DOCTYPE html>` within its first 10 KiB, comments and whitespace not counted |
 | `head-open-tag` | as early as possible in `<head>`: right after the `<head>` tag, or after the last `<meta>` declaring the character encoding, `X-UA-Compatible` or a `Content-Security-Policy` |
 
 Either way, nothing goes past body content, and a document that does not look like HTML is left

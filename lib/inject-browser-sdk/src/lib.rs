@@ -14,6 +14,7 @@ extern crate std;
 mod configuration;
 pub mod error;
 pub mod injector;
+pub mod scanner;
 mod snippet;
 
 // The filesystem-backed stable-configuration surface only exists on platforms

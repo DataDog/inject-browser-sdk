@@ -9,6 +9,7 @@
 //! oracle.
 
 use inject_browser_sdk::injector::{InjectionStrategy, Injector};
+use inject_browser_sdk::scanner::{Decision, Scanner};
 
 use super::oracle;
 
@@ -126,6 +127,46 @@ pub fn rebuild(strategy: InjectionStrategy, chunks: &[&[u8]]) -> Vec<u8> {
     return served;
 }
 
+/// Feeds `chunks` to a [`Scanner`], and returns where it puts the snippet, checking its contract
+/// along the way: `Hold.from` never moves backwards, nor past where the snippet goes, a final
+/// decision stays as it is, and the end of the body leaves nothing undecided.
+pub fn scan(strategy: InjectionStrategy, chunks: &[&[u8]]) -> Option<usize> {
+    let mut scanner = Scanner::with_strategy(strategy);
+    let mut from = 0;
+    let mut decided: Option<Decision> = None;
+    let mut fed = 0u64;
+    for chunk in chunks.iter().map(|chunk| return Some(*chunk)).chain([None]) {
+        let decision = match chunk {
+            Some(chunk) => scanner.feed(chunk),
+            None => scanner.finish(),
+        };
+        fed += chunk.map_or(0, |chunk| return chunk.len() as u64);
+        assert_eq!(scanner.fed(), fed, "fed");
+        assert_eq!(scanner.decision(), decision, "decision");
+        if let Some(decided) = decided {
+            assert_eq!(decision, decided, "a final decision changed");
+        }
+        match decision {
+            Decision::Hold { from: now } => {
+                assert!(now >= from, "Hold.from moved backwards");
+                assert!(now <= fed, "Hold.from past what was fed");
+                from = now;
+            }
+            Decision::Searching => {}
+            Decision::InjectAt(point) => {
+                assert!(point >= from, "injected before Hold.from");
+                assert!(point <= fed, "injected past what was fed");
+                decided = Some(decision);
+            }
+            Decision::Never => decided = Some(decision),
+        }
+    }
+    return match decided.expect("undecided after the end") {
+        Decision::InjectAt(point) => Some(point as usize),
+        _ => None,
+    };
+}
+
 /// Checks `document` split at `points` behaves exactly like `single`, the single chunk run.
 pub fn check_chunking(
     strategy: InjectionStrategy,
@@ -143,6 +184,11 @@ pub fn check_chunking(
         rebuild(strategy, &chunks),
         single.output,
         "{strategy:?} split at {points:?}: the rebuilt chunks differ from the single chunk output"
+    );
+    assert_eq!(
+        scan(strategy, &chunks),
+        single.injected_at,
+        "{strategy:?} split at {points:?}: the scanner decides otherwise than the injector"
     );
 }
 

@@ -36,6 +36,7 @@ jobs:
           - chunking_invariance
           - oracle_differential
           - injector_c_api
+          - scanner
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # rust-toolchain.toml pins a stable toolchain for the build, while fuzzing needs nightly.

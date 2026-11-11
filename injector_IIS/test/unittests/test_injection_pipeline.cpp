@@ -1307,8 +1307,9 @@ TEST(InjectionPipeline, HeldBackBytesGoOutAheadOfAChunkNotInMemory) {
   response.stop();
 }
 
-// The carried injector never finds a `<head>`: the last part is padded to the length announced,
-// which counted the snippet, unless the response announced none.
+// The carried injector never finds where the snippet goes: the last part is padded to the length
+// announced, which counted the snippet, unless the response announced none. A fragment: after an
+// `<html>` tag, the `<body>` tag would close the head the browser opens, and the snippet go there.
 TEST(InjectionPipeline, CarriedInjectionPadsTheLastPart) {
   for (const bool announced : {true, false}) {
     SCOPED_TRACE(announced ? "with a Content-Length" : "chunked");
@@ -1318,9 +1319,9 @@ TEST(InjectionPipeline, CarriedInjectionPadsTheLastPart) {
     }
     response.start();
 
-    const Part first{"<html><!-- " + std::string(2000, 'c') + " -->", TRUE, true};
-    const Part second{"<body><p>no head</p>", FALSE, true};
-    const Part last{"</body></html>", FALSE, false};
+    const Part first{"<!-- " + std::string(2000, 'c') + " -->", TRUE, true};
+    const Part second{"<div><p>no head</p>", FALSE, true};
+    const Part last{"</div>", FALSE, false};
 
     EXPECT_EQ(response.send(first), first.body);
     EXPECT_EQ(response.send(second), second.body);

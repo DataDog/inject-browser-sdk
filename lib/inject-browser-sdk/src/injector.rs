@@ -1826,7 +1826,10 @@ mod tests {
 
         #[test]
         fn hands_the_window_out() {
-            assert_eq!(flushed("<html>", ""), "<html>");
+            assert_eq!(flushed("<div>", ""), "<div>");
+            // The head an `<html>` tag opens closes with the document, which the snippet still goes
+            // into, after everything that was handed out.
+            assert_eq!(flushed("<html>", ""), "<html>{{SNIPPET}}");
             // Past the window, there is nothing left to hand out.
             let mut injector =
                 Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadOpenTag);
@@ -1875,7 +1878,7 @@ mod tests {
         fn pads_when_ended_with_padding() {
             let mut injector =
                 Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadOpenTag);
-            injector.write(b"<html>");
+            injector.write(b"<div>");
             injector.flush();
             let end = injector.end();
             assert!(!end.injected);
@@ -2644,14 +2647,26 @@ mod tests {
             assert!(injector.write(b"</script></head>").injected);
             assert!(!injector.is_pending());
 
-            // Body content ends the search.
+            // Body content and text are where the snippet goes, when the head closes on them.
+            for closes in ["<div>", "text"] {
+                let mut injector = Injector::new(b"{{SNIPPET}}");
+                let head = format!("<html><head><meta charset=utf-8>{closes}");
+                assert!(injector.write(head.as_bytes()).injected);
+                assert!(!injector.is_pending());
+            }
+            // Without an encoding declaration before them, within the first
+            // DOCUMENT_CHARSET_SCAN_LIMIT bytes, it is pending until those are complete.
             let mut injector = Injector::new(b"{{SNIPPET}}");
-            injector.write(b"<html><head><div>");
+            assert!(!injector.write(b"<html><head><div>").injected);
+            assert!(injector.is_pending());
+            let rest = "x".repeat(DOCUMENT_CHARSET_SCAN_LIMIT);
+            assert!(injector.write(rest.as_bytes()).injected);
             assert!(!injector.is_pending());
 
-            // So does text.
+            // A fragment ends the search on text.
             let mut injector = Injector::new(b"{{SNIPPET}}");
-            injector.write(b"<html><head>text");
+            injector.write(b"<div>text");
+            injector.write(b"x".repeat(EVIDENCE_LIMIT).as_slice());
             assert!(!injector.is_pending());
 
             // And EVIDENCE_LIMIT bytes without HTML evidence, comments and whitespace not counted.
@@ -2669,7 +2684,7 @@ mod tests {
         fn flush_hands_back_an_end_tag_cut_short() {
             // Nothing held: a later `</head>` is still injected before.
             let mut injector = Injector::new(b"{{SNIPPET}}");
-            injector.write(b"<html><head><title>t</title>");
+            injector.write(b"<html><head><meta charset=utf-8><title>t</title>");
             assert_eq!(injector.flush().length, 0);
             assert!(injector.write(b"</head>").injected);
 
@@ -2706,7 +2721,7 @@ mod tests {
 
             // Should it turn out to be another tag, the search goes on.
             let mut injector = Injector::new(b"{{SNIPPET}}");
-            injector.write(b"<html><head></he");
+            injector.write(b"<html><head><meta charset=utf-8></he");
             injector.flush();
             injector.write(b"ader>");
             assert!(injector.is_pending());

@@ -64,9 +64,6 @@ const MAX_DECLARATION: usize = 16;
 /// Longest attribute name of the `<html>` tag kept, to tell an AMP document: `amp4email`.
 const MAX_ATTRIBUTE: usize = 9;
 
-/// What follows the `<!` of a CDATA section opener.
-const CDATA_SECTION_OPEN: &[u8] = b"[CDATA[";
-
 /// The start tags that may come before the `<head>` tag without the browser ignoring it: `html`,
 /// and the ones the head may hold, which the browser moves into it when they come first.
 const MAY_PRECEDE_HEAD: &[&[u8]] = &[
@@ -153,11 +150,6 @@ enum State {
     MarkupDeclarationOpen {
         dashes: u8,
     },
-    /// Within the `[CDATA[` of a `<![CDATA[` in foreign content, holding how many of its bytes were
-    /// read.
-    CdataSectionOpen {
-        matched: usize,
-    },
     /// Within a comment: `run` is the number of dashes just read, capped at two, `content_run` the
     /// part of them that is comment content rather than the `<!--` opener, and `bang` whether a `!`
     /// followed two content dashes.
@@ -181,15 +173,11 @@ enum State {
         name: [u8; MAX_REFERENCE],
         length: usize,
     },
-    /// A CDATA section in foreign content within a template, which only `]]>` ends: `brackets` is
-    /// how many `]` were just read, capped at two.
-    CdataSection {
-        brackets: u8,
-    },
     /// Where the snippet goes was found; nothing is left to look for.
     Found,
     /// Nothing is left to look for: the head closed in a document that does not look like one, the
-    /// body reached foreign content before any evidence, or the document is an AMP one.
+    /// body reached foreign content before any evidence, a template holds foreign content, or the
+    /// document is an AMP one.
     PastHead,
 }
 
@@ -261,12 +249,6 @@ pub(super) struct HeadOpenTagLocator {
     /// tag, body content or text within one changes nothing outside it.
     template_depth: usize,
 
-    /// How deep within foreign content (`<svg>`, `<math>`) inside a template the locator is, where
-    /// no element holds raw text, a `/>` closes the element and a CDATA section runs to its `]]>`.
-    /// Elements are counted by start and end tags, without the breakouts and integration points of
-    /// the spec: what matters within a template is only where it ends.
-    foreign_depth: usize,
-
     /// Whether the head closed before any evidence, on a tag: reading on within the body, for an
     /// `<html>` or `<body>` start tag. See [`HeadOpenTag`].
     body_mode: bool,
@@ -323,7 +305,6 @@ impl HeadOpenTagLocator {
             declaration_open: false,
             head_start: None,
             template_depth: 0,
-            foreign_depth: 0,
             body_mode: false,
             prologue_end: 0,
             prologue_open: true,
@@ -378,10 +359,12 @@ impl HeadOpenTagLocator {
     /// read, where it started.
     pub(super) fn significant_scanned(&self) -> usize {
         return match self.state {
-            State::MarkupDeclarationOpen { .. }
+            // A `<` or `</` may still open a bogus comment (`<?`, `</?`).
+            State::TagOpen
+            | State::EndTagOpen
+            | State::MarkupDeclarationOpen { .. }
             | State::Comment { .. }
-            | State::BogusComment
-            | State::CdataSectionOpen { .. } => self.markup_start - self.free,
+            | State::BogusComment => self.markup_start - self.free,
             _ => self.offset - self.free,
         };
     }
@@ -564,7 +547,6 @@ impl HeadOpenTagLocator {
                 }
                 skipped
             }
-            State::CdataSection { brackets: 0 } => found(memchr(b']', rest)),
             // Every sequence raw text is matched against starts with a `<` or a `-`: once none is
             // among the last bytes read, none is in progress, and the bytes up to the next one can
             // only push the ones read before out of `recent`, which emptying it stands for.
@@ -639,6 +621,9 @@ impl HeadOpenTagLocator {
                         .unwrap_or(State::PastHead)
                 } else if byte == b';' {
                     State::Data
+                } else if !matches!(byte, b'<' | b'&' | b'\t' | b'\n' | b'\x0C' | b'\r' | b' ') {
+                    // The reference ends before text, where the head closes.
+                    self.head_closes(offset, false).unwrap_or(State::PastHead)
                 } else {
                     // The reference ends before this byte, which is read as the data it is.
                     self.state = State::Data;
@@ -729,7 +714,6 @@ impl HeadOpenTagLocator {
             },
 
             State::MarkupDeclarationOpen { dashes } => match (dashes, byte) {
-                (0, b'[') if self.foreign_depth > 0 => State::CdataSectionOpen { matched: 1 },
                 (0, b'-') => State::MarkupDeclarationOpen { dashes: 1 },
                 (_, b'-') => State::Comment {
                     run: 2,
@@ -775,28 +759,6 @@ impl HeadOpenTagLocator {
                     content_run: 0,
                     bang: false,
                 },
-            },
-
-            State::CdataSectionOpen { matched } => {
-                match (CDATA_SECTION_OPEN[matched] == byte, byte) {
-                    (true, _) if matched + 1 == CDATA_SECTION_OPEN.len() => {
-                        State::CdataSection { brackets: 0 }
-                    }
-                    (true, _) => State::CdataSectionOpen {
-                        matched: matched + 1,
-                    },
-                    // Any other `<![…` is a bogus comment, which the very next `>` ends.
-                    (false, b'>') => self.end_free_markup(offset),
-                    (false, _) => State::BogusComment,
-                }
-            }
-
-            State::CdataSection { brackets } => match byte {
-                b']' => State::CdataSection {
-                    brackets: (brackets + 1).min(2),
-                },
-                b'>' if brackets == 2 => State::Data,
-                _ => State::CdataSection { brackets: 0 },
             },
 
             State::BogusComment => match byte {
@@ -867,20 +829,16 @@ impl HeadOpenTagLocator {
 
     /// The state following the `>` of a start tag, self-closing when `self_closing`, at `offset`.
     fn start_tag_ends(&mut self, self_closing: bool, offset: usize) -> State {
-        if self.foreign_depth > 0 {
-            if !self_closing {
-                self.foreign_depth += 1;
-            }
-            return State::Data;
-        }
         if self.name_is(b"template") {
             self.template_depth += 1;
             return State::Data;
         }
         if self.template_depth > 0 {
+            // Where foreign content ends the template, an SVG `<template>` or an HTML integration
+            // point (`<foreignObject>`, `<mi>`…) within it decides, which takes namespaces the
+            // locator does not track: it gives up rather than inject within the template.
             if !self_closing && (self.name_is(b"svg") || self.name_is(b"math")) {
-                self.foreign_depth = 1;
-                return State::Data;
+                return State::PastHead;
             }
             return self.state_after_start_tag();
         }
@@ -902,18 +860,11 @@ impl HeadOpenTagLocator {
 
     /// The state following the `>` of an end tag.
     fn end_tag_ends(&mut self) -> State {
-        if self.name_is(b"template") && self.foreign_depth == 0 {
+        if self.name_is(b"template") {
             self.template_depth = self.template_depth.saturating_sub(1);
             return State::Data;
         }
         if self.template_depth > 0 {
-            // Within foreign content, an HTML `</template>` still closes the template.
-            if self.name_is(b"template") {
-                self.foreign_depth = 0;
-                self.template_depth -= 1;
-            } else {
-                self.foreign_depth = self.foreign_depth.saturating_sub(1);
-            }
             return State::Data;
         }
         if self.body_mode || !CLOSES_HEAD.iter().any(|name| return self.name_is(name)) {
@@ -1247,6 +1198,7 @@ fn text_start(text: &[u8], position: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
     use alloc::vec::Vec;
     use pretty_assertions::assert_eq;
 
@@ -1500,26 +1452,26 @@ mod tests {
     #[test]
     fn foreign_content_within_a_template() {
         for target in [Target::HeadStart, Target::HeadEnd] {
-            // A `<title>` in SVG holds no raw text, and closes itself: the template ends.
+            // Where it ends the template takes namespaces: the search gives up, rather than inject
+            // within the template.
+            for content in [
+                "<svg><template></template></svg><div>x</div>",
+                "<svg><foreignObject><style>/* </template> */</style></foreignObject></svg>",
+                "<svg><![CDATA[</template>]]></svg>",
+                "<math><mi>",
+            ] {
+                assert_eq!(
+                    locate_break(
+                        target,
+                        &format!("<html><template>{content}</template><img>")
+                    ),
+                    None
+                );
+            }
+            // Not on an element that holds nothing.
             assert_eq!(
-                locate_break(
-                    target,
-                    "<html><template><svg><title/></svg></template><img>"
-                ),
-                Some(46)
-            );
-            // A CDATA section in foreign content runs to its `]]>`.
-            assert_eq!(
-                locate_break(
-                    target,
-                    "<html><template><svg><![CDATA[</template>]]></svg></template><img>"
-                ),
-                Some(61)
-            );
-            // An HTML `</template>` closes it from within foreign content.
-            assert_eq!(
-                locate_break(target, "<html><template><math><mi></template><img>"),
-                Some(37)
+                locate_break(target, "<html><template><svg/></template><img>"),
+                Some(33)
             );
         }
     }

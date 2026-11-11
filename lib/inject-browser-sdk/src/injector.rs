@@ -2085,6 +2085,26 @@ mod tests {
                 [&document],
                 &format!("{document}           "),
             );
+            // A `</` cut short at the limit opens a bogus comment, which does not count, whatever
+            // the chunking.
+            let links = format!("{}<link  x>", "<link>".repeat(1705));
+            assert_eq!(links.len(), EVIDENCE_LIMIT - 1);
+            let document = format!("{links}</?bogus><html><head></head>");
+            check(
+                &document,
+                &format!("{links}</?bogus><html><head>{{{{SNIPPET}}}}</head>"),
+            );
+            let split = links.len() + 2;
+            for (strategy, expected) in [
+                (InjectionStrategy::HeadCloseTag, "<head>{{SNIPPET}}</head>"),
+                (InjectionStrategy::HeadOpenTag, "<head>{{SNIPPET}}</head>"),
+            ] {
+                run_injector(
+                    || return Injector::with_strategy(b"{{SNIPPET}}", strategy),
+                    [&document[..split], &document[split..]],
+                    &format!("{links}</?bogus><html>{expected}"),
+                );
+            }
             // Evidence starting within it counts, wherever the `</head>` tag comes.
             let comment = format!("<!-- {} -->", "c".repeat(3 * DOCUMENT_CHARSET_SCAN_LIMIT));
             check(
@@ -2167,6 +2187,11 @@ mod tests {
                     &format!("<html><head>{{{{SNIPPET}}}}{text}</head>"),
                 );
             }
+            // A whitespace reference ending right before text: the head closes at the text.
+            check(
+                "<html><head>&#32!</head>",
+                "<html><head>&#32{{SNIPPET}}!</head>",
+            );
             // A stray `<` is text.
             check(
                 "<html><head><<meta name=a></head>",

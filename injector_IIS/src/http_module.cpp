@@ -17,6 +17,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -191,14 +192,14 @@ struct Injection {
 // How much of a file the first read takes: most static pages whole. Each later one reads as much
 // again as was read so far, up to k_file_read_limit bytes of files in all, while the injector has
 // not decided.
-constexpr uint64_t k_file_first_read = 16 * 1024;
-constexpr uint64_t k_file_read_limit = 1024 * 1024;
+constexpr uint64_t k_file_first_read = uint64_t{16} * 1024;
+constexpr uint64_t k_file_read_limit = uint64_t{1024} * 1024;
 
-// Reads `length` bytes at `offset` of `file` into `into`. IIS may have opened the file for
+// Fills `into` with the bytes at `offset` of `file`. IIS may have opened the file for
 // overlapped I/O and bound it to its completion port: the read gives its own offset, so it leaves
 // the file as IIS uses it, and an event whose low bit is set, so that its completion is not queued
 // to that port.
-bool read_file_at(HANDLE file, uint64_t offset, DWORD length, void* into) {
+bool read_file_at(HANDLE file, uint64_t offset, std::span<uint8_t> into) {
   HANDLE const event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   if (event == nullptr) {
     return false;
@@ -206,10 +207,11 @@ bool read_file_at(HANDLE file, uint64_t offset, DWORD length, void* into) {
   const auto close_event = defer([&] { CloseHandle(event); });
   OVERLAPPED overlapped{};
   overlapped.Offset = static_cast<DWORD>(offset);
-  overlapped.OffsetHigh = static_cast<DWORD>(offset >> 32);
-  overlapped.hEvent = reinterpret_cast<HANDLE>(reinterpret_cast<uintptr_t>(event) | 1);
+  overlapped.OffsetHigh = static_cast<DWORD>(offset >> 32U);
+  overlapped.hEvent = reinterpret_cast<HANDLE>(reinterpret_cast<uintptr_t>(event) | 1U);
   DWORD read = 0;
-  if (ReadFile(file, into, length, &read, &overlapped) == FALSE) {
+  const auto length = static_cast<DWORD>(into.size());
+  if (ReadFile(file, into.data(), length, &read, &overlapped) == FALSE) {
     if (GetLastError() != ERROR_IO_PENDING ||
         WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0 ||
         GetOverlappedResult(file, &overlapped, &read, FALSE) == FALSE) {
@@ -243,8 +245,9 @@ bool read_file_chunk(IHttpContext& http_context, IHttpResponse& http_response,
   if (length == 0) {
     return false;
   }
-  void* bytes = http_context.AllocateRequestMemory(static_cast<DWORD>(length));
-  if (bytes == nullptr || !read_file_at(handle, offset, static_cast<DWORD>(length), bytes)) {
+  auto* bytes =
+      static_cast<uint8_t*>(http_context.AllocateRequestMemory(static_cast<DWORD>(length)));
+  if (bytes == nullptr || !read_file_at(handle, offset, {bytes, static_cast<size_t>(length)})) {
     return false;
   }
 

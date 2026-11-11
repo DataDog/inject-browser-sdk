@@ -1155,8 +1155,8 @@ static void serveStaticFile(ModuleUnderTest& module, const StaticFile& file,
 // A static file is read as the scan reaches it, and only that far: the snippet goes before its
 // `</head>`, the rest of the file still going out from it.
 TEST(InjectionPipeline, StaticFiles) {
-  const std::string body(100 * 1024, 'x');
-  const std::string inline_script = "<script>" + std::string(40 * 1024, 'x') + "</script>";
+  const std::string body(size_t{100} * 1024, 'x');
+  const std::string inline_script = "<script>" + std::string(size_t{40} * 1024, 'x') + "</script>";
   struct Case {
     const char* name;
     std::string content;
@@ -1202,7 +1202,7 @@ TEST(InjectionPipeline, StaticFiles) {
 // as it is.
 TEST(InjectionPipeline, StaticFileNotInjectedIsReadOnlyAsFarAsNeeded) {
   ModuleUnderTest module;
-  const StaticFile file("{\"page\": \"" + std::string(100 * 1024, 'x') + "\"}");
+  const StaticFile file("{\"page\": \"" + std::string(size_t{100} * 1024, 'x') + "\"}");
   PreparedChunkedResponse pr;
   serveStaticFile(module, file, pr);
 

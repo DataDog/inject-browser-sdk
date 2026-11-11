@@ -1697,7 +1697,7 @@ mod tests {
 
             let mut injector =
                 Injector::with_strategy(b"{{SNIPPET}}", InjectionStrategy::HeadOpenTag);
-            injector.write(filler().as_bytes());
+            injector.write(opaque_filler().as_bytes());
             assert!(!injector.is_pending());
 
             let mut injector =
@@ -2654,12 +2654,14 @@ mod tests {
             injector.write(b"<html><head>text");
             assert!(!injector.is_pending());
 
-            // And a first kilobyte without HTML evidence, here a comment.
+            // And EVIDENCE_LIMIT bytes without HTML evidence, comments and whitespace not counted.
             let mut injector = Injector::new(b"{{SNIPPET}}");
-            let comment = format!("<!--{}", "c".repeat(DOCUMENT_CHARSET_SCAN_LIMIT - 5));
-            injector.write(comment.as_bytes());
+            injector.write(format!("<!--{}-->\n", "c".repeat(3 * EVIDENCE_LIMIT)).as_bytes());
             assert!(injector.is_pending());
-            injector.write(b"cc");
+            let links = "<link rel=icon>".repeat(EVIDENCE_LIMIT / 15);
+            injector.write(links.as_bytes());
+            assert!(injector.is_pending());
+            injector.write(b"<link rel=icon>");
             assert!(!injector.is_pending());
         }
 

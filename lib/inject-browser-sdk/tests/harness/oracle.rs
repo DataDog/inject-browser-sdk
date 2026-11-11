@@ -587,6 +587,9 @@ pub enum Exception {
     /// insertion mode closes the head. lol_html only pops elements its stack holds, and keeps the
     /// head open when it holds none of those.
     EndTagClosingHead,
+    /// Bytes that are no UTF-8 before the injection point lol_html sees: the browser decodes them to
+    /// U+FFFD, text that ends the search, while lol_html drops them from its text nodes.
+    InvalidUtf8,
     /// A `<head>` or `<html>` start tag within the head, which the browser ignores or merges into the
     /// root element, the injector walking on: lol_html takes what follows for the content of that
     /// element, out of the head.
@@ -616,6 +619,11 @@ pub fn exception(
     oracle: Option<usize>,
 ) -> Option<Exception> {
     let lower = document.to_ascii_lowercase();
+    if let (None, Some(point)) = (ours, oracle) {
+        if std::str::from_utf8(&document[..point.min(document.len())]).is_err() {
+            return Some(Exception::InvalidUtf8);
+        }
+    }
     if strategy == InjectionStrategy::HeadCloseTag {
         return head_close_exception(&lower, observed, ours, oracle);
     }

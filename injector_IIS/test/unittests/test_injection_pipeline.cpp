@@ -803,7 +803,7 @@ TEST(InjectionPipeline, ResponseSentInSeveralParts) {
       {"first part with an unreadable length", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA, head, true,
        "12x", LengthUpdate::Removed},
       {"first part without an injection point", TRUE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
-       "<html><body><p>no head here</p>", false, "2621440", LengthUpdate::Unchanged},
+       "<div><p>no head here</p></div>", false, "2621440", LengthUpdate::Unchanged},
       {"later part", FALSE, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
        "<p>more</p><head><title>t</title></head>", false, "2621440", LengthUpdate::Unchanged},
       {"last part", FALSE, 0, "<p>more</p><head><title>t</title></head></html>", false, "2621440",

@@ -621,7 +621,7 @@ fn is_tag_named(rest: &[u8], closing: bool, name: &[u8]) -> bool {
 /// A `<meta>` tag that `content` ends in the middle of counts as a declaration if the part of it
 /// that can be seen is one: the snippet is never placed before a declaration that more data might
 /// complete.
-fn contains_encoding_declaration(content: &[u8]) -> bool {
+pub(super) fn contains_encoding_declaration(content: &[u8]) -> bool {
     // A declaration is a `<meta` tag, whose name has to be there in full: without one, walking the
     // markup cannot find any.
     if !holds_meta_tag(content) {
@@ -1820,7 +1820,10 @@ mod tests {
 
     fn test_injector(input: &str, expected: &str) {
         let mut input_bytes: Vec<u8> = input.as_bytes().to_vec();
-        let head = HeadOpenTagLocator::new().scan(&input_bytes);
+        // Only a `<head>` tag is walked from: where the head closes without one is the injector's.
+        let head = HeadOpenTagLocator::new()
+            .scan(&input_bytes)
+            .filter(|head| return !head.breaks);
         if let Some(Placement::At(index)) =
             head.map(|head| return find_injection_point(input.as_bytes(), head.end, true))
         {

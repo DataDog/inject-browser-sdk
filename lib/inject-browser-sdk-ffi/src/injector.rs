@@ -28,21 +28,28 @@ pub struct Injector {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InjectionStrategy {
-    /// Right before the `</head>` end tag, what [`injector_create`] uses.
-    ///
-    /// Only the first real one counts (not one written in a comment, an attribute value, a script or
-    /// a style), and only in a document that looks like HTML: an `<html>`, `<meta>` or `<head>`
-    /// start tag or a `<!DOCTYPE html>` within its first 10 KiB, comments, doctypes and whitespace
-    /// not counted, before it. Body content (`<body>`, `<div>`…), text
+    /// Right before the `</head>` end tag, what [`injector_create`] uses, or right before where the
+    /// browser closes the head without one: body content (`<body>`, `<div>`, an `<img>`…), text
     /// outside tags (whitespace and a leading byte order mark aside), a `</body>`, `</html>` or
-    /// `</br>` end tag and a CDATA section end the search. The `</head>` tag may come anywhere. Holds back nothing but a `</head` tag a write cuts short.
+    /// `</br>` end tag, or the end of the document.
+    ///
+    /// Only the first real `</head>` counts (not one written in a comment, an attribute value, a
+    /// script or a style), and only in a document that looks like HTML: an `<html>`, `<meta>` or
+    /// `<head>` start tag or a `<!DOCTYPE html>` within its first 10 KiB, comments, doctypes and
+    /// whitespace not counted, or the `</head>` tag itself. Where the head closes without one, a
+    /// doctype, an `<html>`, `<head>` or `<body>` tag has to come first; past an error printed
+    /// ahead of the document, the snippet goes before its `<html>` or `<body>` tag. Never in an AMP
+    /// document. Holds back a tag a write cuts short while it may be where the snippet goes, and,
+    /// for a point within the first 1024 bytes with no encoding declaration before it, the bytes
+    /// from the point until those are complete, a declaration that follows declining injection.
     HeadCloseTag = 0,
 
     /// As early as possible within the head: right after the `<head>` start tag when it is within
     /// the first 1024 bytes, unless the head holds `<meta>` tags declaring the character encoding,
     /// `X-UA-Compatible` or a `Content-Security-Policy`: then right after the last of them. Other
     /// `<meta>` tags, SEO, viewport or the tracer's, do not hold the snippet back. Past those bytes,
-    /// right after a `<head>` tag if the document looks like HTML, as `HeadCloseTag` tells it. A `<head>` tag past body
+    /// right after a `<head>` tag if the document looks like HTML, as `HeadCloseTag` tells it.
+    /// Without a `<head>` tag, where `HeadCloseTag` says the head closes. A `<head>` tag past body
     /// content does not count: the browser ignores it.
     ///
     /// Holds the first 1024 bytes back until they are complete (see [`injector_held_back_length`]),

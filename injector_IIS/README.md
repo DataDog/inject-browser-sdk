@@ -16,16 +16,20 @@ the `datadogRum` section:
 * `headCloseTag` (the default): right before the first `</head>` end tag, wherever it is in the
   body, if the document looks like HTML: an `<html>`, `<meta>` or `<head>` tag or a
   `<!DOCTYPE html>` within its first 10 KiB, comments, doctypes and whitespace not counted, so a
-  license banner or blank lines at the top don't keep it out. Only a `</head>` before body content (`<body>`, `<div>`…) and text counts, and none
-  written in a comment, a script, a style or an attribute value. Nothing is held back but a `</head>` tag split
-  across writes: the response streams through.
+  license banner or blank lines at the top don't keep it out. None written in a comment, a script,
+  a style or an attribute value counts. Where the browser closes the head without one, on body
+  content (`<body>`, `<div>`, an `<img>` pixel…), text such as a server warning, or the end of the
+  document, the snippet goes right there, which the browser still parses within the head. AMP
+  documents are left alone, and the snippet never pushes a `<meta charset>` out of the first 1 KiB.
+  Little is held back: a tag split across writes, and, when the injection point lies within the
+  first 1 KiB with no `<meta charset>` before it, the rest of that kilobyte.
 * `headOpenTag`: as early as possible. If the `<head>` tag is within the first 1 KiB, right after
   it, unless the head holds `<meta>` tags declaring the character encoding, `X-UA-Compatible` or a
   `Content-Security-Policy`: then right after the last of them, so a meta-delivered policy governs
   the snippet. Other `<meta>` tags (SEO, viewport, the tracer's `dd-trace-id`…) do not hold it
   back. Otherwise, if the document looks like HTML (as above, `<head>` aside), right after the
-  first `<head>` tag that follows. A `<head>` tag after body content does
-  not count: browsers ignore it. The first 1 KiB is held back, or up to 10 KiB while the head is
+  first `<head>` tag that follows, or, without one, where the head closes as for `headCloseTag`.
+  A `<head>` tag after body content does not count: browsers ignore it. The first 1 KiB is held back, or up to 10 KiB while the head is
   still a run of `<meta>` and `<title>` tags past it.
 
 ```xml

@@ -4,7 +4,8 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-//! Streaming locator for the first `<head>` start tag, or the first `</head>` end tag. See
+//! Streaming locator for where the snippet goes: the first `<head>` start tag, the first `</head>`
+//! end tag, or the point where the browser closes the head without one. See
 //! [`HeadOpenTagLocator`].
 
 use memchr::{memchr, memchr2, memchr3};
@@ -14,22 +15,37 @@ use memchr::{memchr, memchr2, memchr3};
 pub(super) enum Target {
     /// The first `<head>` start tag, to inject right after it.
     HeadStart,
-    /// The first `</head>` end tag, to inject right before it: one closing the head of a document
-    /// that looked like HTML before it (see [`HeadOpenTagLocator::evidence`]), and coming before any
-    /// body content. A `</body>`, `</html>` or `</br>` end tag closes the head first, and ends the
-    /// search, as body content does, and so does text other than whitespace (a byte order mark
-    /// starting the document aside): the browser closes the head on it.
+    /// The first `</head>` end tag, to inject right before it.
     HeadEnd,
 }
 
-/// The tag a [`HeadOpenTagLocator`] looks for, as found by [`HeadOpenTagLocator::scan`].
+/// Where the snippet goes, as found by [`HeadOpenTagLocator::scan`].
+///
+/// Either target also stops where the browser closes the head without the tag looked for: at body
+/// content (`<body>`, `<div>`, `<img>`…), at text other than whitespace, or at a `</body>`,
+/// `</html>` or `</br>` end tag (and a `</head>` one, looking for `<head>`). The snippet goes right
+/// before that point, which the browser still parses within the head, provided the document is one
+/// (see [`HeadOpenTagLocator::strong_evidence`]): `breaks` is set then.
+///
+/// When the head closes before any such evidence, and does so on a tag, the document may be one
+/// whose head an earlier error closed, a server warning printed ahead of it for instance: the
+/// locator then reads on as the browser does, within the body, and stops right before the first
+/// `<html>` or `<body>` start tag, `breaks` set, or gives up at foreign content (`<svg>`,
+/// `<math>`), which it does not follow. A `<head>` tag is not enough there: partial responses
+/// hold one for a client to merge into the page's head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct HeadOpenTag {
-    /// Offset of its `<` from the start of the document, across every chunk scanned.
+    /// Offset of its `<` from the start of the document, across every chunk scanned: where the
+    /// snippet goes when it goes before it. For a break on text, the offset of that text.
     pub(super) start: usize,
 
-    /// Index just past its `>`, within the chunk the match was completed in.
+    /// Index just past its `>`, within the chunk the match was completed in. Only meaningful for a
+    /// `<head>` start tag, which the snippet goes after.
     pub(super) end: usize,
+
+    /// Whether the browser closes the head at `start`, rather than the tag being the one looked for:
+    /// the snippet goes right before `start` then.
+    pub(super) breaks: bool,
 }
 
 /// Longest tag name the locator has to tell apart, `plaintext`.
@@ -38,15 +54,15 @@ const MAX_TAG_NAME: usize = 9;
 /// Longest sequence raw text content is matched against: `</noscript` and its delimiter.
 const MAX_RECENT: usize = 11;
 
-/// Elements whose content is text rather than markup, so a `<head>` written within one is not a tag.
-///
-/// `noscript` is among them as browsers run with scripting enabled, and so does lol_html.
 /// Longest character reference read after its `&`, to tell a whitespace one: `#x0000000020` and the
 /// like are text then, rather than held without bound.
 const MAX_REFERENCE: usize = 12;
 
 /// How many bytes of a `<!` declaration are kept, to tell a `<!DOCTYPE html>` one.
 const MAX_DECLARATION: usize = 16;
+
+/// Longest attribute name of the `<html>` tag kept, to tell an AMP document: `amp4email`.
+const MAX_ATTRIBUTE: usize = 9;
 
 /// What follows the `<!` of a CDATA section opener.
 const CDATA_SECTION_OPEN: &[u8] = b"[CDATA[";
@@ -68,6 +84,24 @@ const MAY_PRECEDE_HEAD: &[&[u8]] = &[
     b"title",
 ];
 
+/// The end tags the `in head` and `before head` insertion modes do not ignore: each closes the
+/// head, implicitly but for `</head>` within it.
+const CLOSES_HEAD: &[&[u8]] = &[b"head", b"body", b"html", b"br"];
+
+/// The attributes that make an `<html>` tag the root of an AMP document, whose rules forbid any
+/// script but its own: the snippet is kept out of one.
+const AMP_ATTRIBUTES: &[&[u8]] = &[
+    b"amp",
+    "\u{26A1}".as_bytes(),
+    b"amp4email",
+    "\u{26A1}4email".as_bytes(),
+    b"amp4ads",
+    "\u{26A1}4ads".as_bytes(),
+];
+
+/// Elements whose content is text rather than markup, so a `<head>` written within one is not a tag.
+///
+/// `noscript` is among them as browsers run with scripting enabled, and so does lol_html.
 const RAW_TEXT_ELEMENTS: &[&[u8]] = &[
     b"script",
     b"style",
@@ -119,7 +153,8 @@ enum State {
     MarkupDeclarationOpen {
         dashes: u8,
     },
-    /// Within the `[CDATA[` of a `<![CDATA[`, holding how many of its bytes were read.
+    /// Within the `[CDATA[` of a `<![CDATA[` in foreign content, holding how many of its bytes were
+    /// read.
     CdataSectionOpen {
         matched: usize,
     },
@@ -131,7 +166,8 @@ enum State {
         content_run: u8,
         bang: bool,
     },
-    /// A doctype, a `<?…>`, or any `<!…>` that opens no comment: all end at the very next `>`.
+    /// A doctype, a `<?…>`, or any `<!…>` that opens no comment: all end at the very next `>`. So
+    /// does a `<![CDATA[` out of foreign content, which the tokenizer reads as a bogus comment.
     BogusComment,
     /// Within the content of the raw text element named [`HeadOpenTagLocator::name`].
     RawText {
@@ -139,32 +175,31 @@ enum State {
     },
     /// Past a `<plaintext>` tag, which nothing ends.
     Plaintext,
-    /// A character reference in text, past its `&`: one that decodes to whitespace keeps the head
-    /// open, any other is text.
+    /// A character reference in text, past its `&` (at `markup_start`): one that decodes to
+    /// whitespace keeps the head open, any other is text.
     CharacterReference {
         name: [u8; MAX_REFERENCE],
         length: usize,
     },
-    /// Past a `<![CDATA[`, whose end cannot be told without tracking foreign content: it runs to
-    /// `]]>` within `svg` or `math` and to the first `>` anywhere else. Guessing wrong would find a
-    /// `<head>` written in CDATA text, so nothing is looked for past it, as the window walk does.
-    CdataSection,
-    /// The tag looked for was found; nothing is left to look for.
+    /// A CDATA section in foreign content within a template, which only `]]>` ends: `brackets` is
+    /// how many `]` were just read, capped at two.
+    CdataSection {
+        brackets: u8,
+    },
+    /// Where the snippet goes was found; nothing is left to look for.
     Found,
-    /// Past a start tag the head cannot follow, `<body>`, `<div>` or any other but the few
-    /// [`MAY_PRECEDE_HEAD`] lists, or past text other than whitespace: the browser has started the
-    /// body by then and ignores a `<head>` tag written later, so nothing is looked for past it. A
-    /// document without a `<head>` tag, which HTML allows, is not read to its end for nothing.
+    /// Nothing is left to look for: the head closed in a document that does not look like one, the
+    /// body reached foreign content before any evidence, or the document is an AMP one.
     PastHead,
 }
 
-/// Stateful object used to locate the first `<head>` start tag of a document fed in chunks, so the
-/// snippet can be injected right after it.
+/// Stateful object used to locate where the snippet goes in a document fed in chunks: see
+/// [`Target`] and [`HeadOpenTag`].
 ///
-/// It follows the HTML tokenizer closely enough to tell a real `<head>` tag from one written within a
+/// It follows the HTML tokenizer closely enough to tell a real tag from one written within a
 /// comment, an attribute value, or the content of a raw text element (`<script>`, `<title>`…), and
-/// carries its state across chunks. The snippet goes after the tag, so the bytes scanned so far can
-/// always be emitted: unlike a locator for a closing tag, this one never holds data back.
+/// carries its state across chunks. Some points can only be told once the bytes that follow them
+/// are read, see [`HeadOpenTagLocator::pending_point_start`].
 ///
 /// It also records whether the document looks like HTML: see [`HeadOpenTagLocator::html_evidence`].
 pub(super) struct HeadOpenTagLocator {
@@ -175,7 +210,8 @@ pub(super) struct HeadOpenTagLocator {
     /// Number of bytes scanned so far, across every chunk.
     offset: usize,
 
-    /// Offset of the `<` that started the markup being read.
+    /// Offset of the `<` that started the markup being read, or of the `&` of a character
+    /// reference.
     markup_start: usize,
 
     /// Lower case name of the tag being read, or of the raw text element whose content is being
@@ -183,6 +219,10 @@ pub(super) struct HeadOpenTagLocator {
     name: [u8; MAX_TAG_NAME],
     name_length: usize,
     name_overflow: bool,
+
+    /// Whether the start tag being read was already told apart by its name: it is once its name is
+    /// complete, or once it outgrows every name that matters.
+    name_checked: bool,
 
     /// The last bytes of raw text content, lower case, to match its closing tag across chunks.
     recent: [u8; MAX_RECENT],
@@ -195,8 +235,14 @@ pub(super) struct HeadOpenTagLocator {
     /// bytes that are not [`HeadOpenTagLocator::free`].
     significant_html_evidence: Option<usize>,
 
-    /// Where the first `<head>` start tag starts, counting the same way, looking for `</head>`.
+    /// Where the first `<head>` start tag, or a `</head>` end tag found looking for one, starts,
+    /// counted the same way.
     significant_head_start: Option<usize>,
+
+    /// Whether a `<!DOCTYPE html>`, an `<html>` or a `<head>` start tag was read out of any template:
+    /// the evidence that lets the snippet go where the head closes implicitly. A `<meta>` tag alone
+    /// is not enough there: fragments start with one too.
+    strong_evidence: bool,
 
     /// Bytes that tell nothing about whether the document is HTML, scanned so far: comments,
     /// bogus comments and doctypes, once ended, and whitespace in text. A license banner in a
@@ -214,6 +260,39 @@ pub(super) struct HeadOpenTagLocator {
     /// How many `<template>` elements are open. Their content is inert: a `<head>` or `</head>`
     /// tag, body content or text within one changes nothing outside it.
     template_depth: usize,
+
+    /// How deep within foreign content (`<svg>`, `<math>`) inside a template the locator is, where
+    /// no element holds raw text, a `/>` closes the element and a CDATA section runs to its `]]>`.
+    /// Elements are counted by start and end tags, without the breakouts and integration points of
+    /// the spec: what matters within a template is only where it ends.
+    foreign_depth: usize,
+
+    /// Whether the head closed before any evidence, on a tag: reading on within the body, for an
+    /// `<html>` or `<body>` start tag. See [`HeadOpenTag`].
+    body_mode: bool,
+
+    /// Offset just past the last `<!DOCTYPE html>` or `<html>` start tag that only comments,
+    /// doctypes and whitespace precede, and whether no other markup was read yet: the earliest
+    /// point the snippet may go within a head whose start tag is omitted.
+    prologue_end: usize,
+    prologue_open: bool,
+
+    /// The attribute of the `<html>` tag being read, lower case, and whether whitespace ended its
+    /// name: any byte but `=` starts another one then.
+    attribute: [u8; MAX_ATTRIBUTE],
+    attribute_length: usize,
+    attribute_overflow: bool,
+    attribute_ended: bool,
+
+    /// Whether the `<html>` tag being read is the root of an AMP document.
+    amp: bool,
+
+    /// Where the snippet goes and whether the head closes there, once found.
+    found_start: usize,
+    /// Where the markup found starts, counting only significant bytes, see
+    /// [`HeadOpenTagLocator::significant_scanned`].
+    found_significant: usize,
+    found_breaks: bool,
 }
 
 impl HeadOpenTagLocator {
@@ -231,17 +310,31 @@ impl HeadOpenTagLocator {
             name: [0; MAX_TAG_NAME],
             name_length: 0,
             name_overflow: false,
+            name_checked: false,
             recent: [0; MAX_RECENT],
             recent_length: 0,
             html_evidence: None,
             significant_html_evidence: None,
             significant_head_start: None,
+            strong_evidence: false,
             free: 0,
             declaration: [0; MAX_DECLARATION],
             declaration_length: 0,
             declaration_open: false,
             head_start: None,
             template_depth: 0,
+            foreign_depth: 0,
+            body_mode: false,
+            prologue_end: 0,
+            prologue_open: true,
+            attribute: [0; MAX_ATTRIBUTE],
+            attribute_length: 0,
+            attribute_overflow: false,
+            attribute_ended: false,
+            amp: false,
+            found_start: 0,
+            found_significant: 0,
+            found_breaks: false,
         };
     }
 
@@ -255,6 +348,14 @@ impl HeadOpenTagLocator {
     /// Number of bytes scanned so far, across every chunk.
     pub(super) fn offset(&self) -> usize {
         return self.offset;
+    }
+
+    /// Offset just past the doctype or `<html>` start tag that opens the document, if only comments,
+    /// doctypes and whitespace precede it: where the snippet may go at the earliest within a head
+    /// whose `<head>` tag is omitted, rather than before the doctype, which would trigger quirks
+    /// mode. 0 when the document opens with neither.
+    pub(super) fn prologue_end(&self) -> usize {
+        return self.prologue_end;
     }
 
     /// Where the first `<html>` or `<meta>` start tag or `<!DOCTYPE html>` starts, counting only
@@ -293,24 +394,39 @@ impl HeadOpenTagLocator {
             .map(|start| return start - self.free);
     }
 
-    /// Offset of the `<` of an end tag being read while it may still turn out to be `</head>`,
-    /// looking for one: what precedes the snippet if it is, so what has to be held back meanwhile.
-    pub(super) fn pending_end_tag_start(&self) -> Option<usize> {
-        if self.target != Target::HeadEnd {
+    /// Offset of the markup or character reference being read while it may still turn out to be
+    /// where the snippet goes before: a start tag whose name is not told apart yet, an end tag that
+    /// may still be one of [`CLOSES_HEAD`], a character reference that may not be whitespace, or a
+    /// `<` that may be text. What precedes the snippet if it is, so what has to be held back
+    /// meanwhile; each is short, but an end tag stuffed with attributes.
+    pub(super) fn pending_point_start(&self) -> Option<usize> {
+        if self.template_depth > 0 || !self.is_searching() {
             return None;
         }
+        let may_close_head = |complete: bool| {
+            return !self.body_mode
+                && !self.name_overflow
+                && CLOSES_HEAD.iter().any(|name| {
+                    let read = &self.name[..self.name_length];
+                    return match complete {
+                        true => *name == read,
+                        false => name.starts_with(read),
+                    };
+                });
+        };
         return match self.state {
-            State::TagOpen | State::EndTagOpen => Some(self.markup_start),
-            // Only while the name read so far may still be `head`: any other end tag is released
-            // as soon as it cannot be, however long it goes on.
+            State::TagOpen | State::CharacterReference { .. } => Some(self.markup_start),
+            State::EndTagOpen if !self.body_mode => Some(self.markup_start),
+            State::Tag {
+                closing: false,
+                position: TagPosition::TagName,
+            } if !self.name_checked => Some(self.markup_start),
             State::Tag {
                 closing: true,
                 position: TagPosition::TagName,
-            } if !self.name_overflow && b"head".starts_with(&self.name[..self.name_length]) => {
-                Some(self.markup_start)
-            }
-            // The name is complete: only a `head` end tag is still pending, on its `>`.
-            State::Tag { closing: true, .. } if self.name_is(b"head") => Some(self.markup_start),
+            } if may_close_head(false) => Some(self.markup_start),
+            // The name is complete: it is pending on its `>`.
+            State::Tag { closing: true, .. } if may_close_head(true) => Some(self.markup_start),
             _ => None,
         };
     }
@@ -330,30 +446,56 @@ impl HeadOpenTagLocator {
         };
     }
 
-    /// Whether the tag looked for may still be found in what follows: not once it has been, nor past
-    /// markup that ends the search, a `<plaintext>` tag or a CDATA section.
+    /// Whether the document may end right here with the snippet going last: within an open head
+    /// of a document that looks like one, which the end of the document closes, rather than within
+    /// a tag, a comment, raw text or a template.
+    pub(super) fn may_inject_at_end(&self) -> bool {
+        return self.state == State::Data
+            && self.template_depth == 0
+            && !self.body_mode
+            && self.strong_evidence;
+    }
+
+    /// Whether the head closed before any evidence, the search going on within the body: what is
+    /// found then is the evidence, which the snippet goes right before.
+    pub(super) fn in_body(&self) -> bool {
+        return self.body_mode;
+    }
+
+    /// Where what was found starts, counting only significant bytes: how far into the document
+    /// the evidence a break found within the body is.
+    pub(super) fn found_significant(&self) -> usize {
+        return self.found_significant;
+    }
+
+    /// Whether where the snippet goes may still be found in what follows: not once it has been, nor
+    /// once there is nothing left to look for, nor past a `<plaintext>` tag.
     pub(super) fn is_searching(&self) -> bool {
         return !matches!(
             self.state,
-            State::Found | State::PastHead | State::Plaintext | State::CdataSection
+            State::Found | State::PastHead | State::Plaintext
         );
     }
 
-    /// Scans the next chunk of the document, and returns the tag looked for if it ends within it.
-    /// Only the first one is ever returned.
+    /// Scans the next chunk of the document, and returns where the snippet goes if that is told
+    /// within it. Only the first one is ever returned.
     pub(super) fn scan(&mut self, chunk: &[u8]) -> Option<HeadOpenTag> {
+        if !self.is_searching() {
+            self.offset += chunk.len();
+            return None;
+        }
         let mut index = 0;
         loop {
             index += self.skip(&chunk[index..], self.offset + index);
+            // Text found while skipping.
+            if self.state == State::Found {
+                return Some(self.found(chunk.len(), index));
+            }
             let Some(&byte) = chunk.get(index) else {
                 break;
             };
             if self.step(byte, self.offset + index) {
-                self.offset += chunk.len();
-                return Some(HeadOpenTag {
-                    start: self.markup_start,
-                    end: index + 1,
-                });
+                return Some(self.found(chunk.len(), index + 1));
             }
             index += 1;
         }
@@ -361,22 +503,41 @@ impl HeadOpenTagLocator {
         return None;
     }
 
+    fn found(&mut self, chunk_length: usize, end: usize) -> HeadOpenTag {
+        // Whatever was found, no free byte follows it.
+        self.found_significant = self.found_start - self.free.min(self.found_start);
+        self.offset += chunk_length;
+        return HeadOpenTag {
+            start: self.found_start,
+            end,
+            breaks: self.found_breaks,
+        };
+    }
+
     /// Returns how many bytes at the start of `rest` leave the state as [`Self::step`] would after
     /// reading them one by one, so they can be skipped at once: text up to the next `<`, a bogus
     /// comment up to its `>`, comment content up to the next byte that may end it, a quoted
     /// attribute value up to its quote, raw text up to the next byte that may start its closing tag
     /// or, in a script, change its state. Most of a document is skipped this way.
+    ///
+    /// Text other than whitespace, where the head closes, sets the state to [`State::Found`] or
+    /// [`State::PastHead`]; when found, the number returned is the index of the text.
     fn skip(&mut self, rest: &[u8], position: usize) -> usize {
         let found = |index: Option<usize>| return index.unwrap_or(rest.len());
         return match self.state {
-            State::Found | State::PastHead | State::Plaintext | State::CdataSection => rest.len(),
-            // Text within a template does not count.
-            State::Data if self.template_depth > 0 => found(memchr(b'<', rest)),
+            State::Found | State::PastHead | State::Plaintext => rest.len(),
+            // Text within a template does not count, nor does it once the head is closed.
+            State::Data if self.template_depth > 0 || self.body_mode => found(memchr(b'<', rest)),
             State::Data => {
                 let skipped = found(memchr2(b'<', b'&', rest));
-                if holds_text(&rest[..skipped], position) {
-                    self.state = State::PastHead;
-                    return rest.len();
+                if let Some(text) = text_start(&rest[..skipped], position) {
+                    self.state = self
+                        .head_closes(position + text, false)
+                        .unwrap_or(State::PastHead);
+                    return match self.state {
+                        State::Found => text,
+                        _ => rest.len(),
+                    };
                 }
                 // Whitespace, or the byte order mark: nothing that tells the document is HTML.
                 self.free += skipped;
@@ -403,6 +564,7 @@ impl HeadOpenTagLocator {
                 }
                 skipped
             }
+            State::CdataSection { brackets: 0 } => found(memchr(b']', rest)),
             // Every sequence raw text is matched against starts with a `<` or a `-`: once none is
             // among the last bytes read, none is in progress, and the bytes up to the next one can
             // only push the ones read before out of `recent`, which emptying it stands for.
@@ -426,17 +588,37 @@ impl HeadOpenTagLocator {
             .any(|&byte| return byte == b'<' || byte == b'-');
     }
 
-    /// Consumes one byte at `offset`, and returns whether it is the `>` closing the tag looked for.
+    /// The head closes at `at`, on markup when `markup`, on text otherwise. Returns the state that
+    /// follows: found, when the document looks like one; nothing left to look for, on text; on a
+    /// tag, `None`, the tag carrying on to be read within the body.
+    fn head_closes(&mut self, at: usize, markup: bool) -> Option<State> {
+        self.prologue_open = false;
+        if self.strong_evidence {
+            self.found_start = at;
+            self.found_breaks = true;
+            return Some(State::Found);
+        }
+        if markup {
+            self.body_mode = true;
+            return None;
+        }
+        return Some(State::PastHead);
+    }
+
+    /// Consumes one byte at `offset`, and returns whether it tells where the snippet goes.
     fn step(&mut self, byte: u8, offset: usize) -> bool {
         self.state = match self.state {
-            State::Found | State::PastHead | State::Plaintext | State::CdataSection => self.state,
+            State::Found | State::PastHead | State::Plaintext => self.state,
 
             State::Data => match byte {
                 b'<' => self.open_markup(offset),
-                b'&' if self.template_depth == 0 => State::CharacterReference {
-                    name: [0; MAX_REFERENCE],
-                    length: 0,
-                },
+                b'&' if self.template_depth == 0 && !self.body_mode => {
+                    self.markup_start = offset;
+                    State::CharacterReference {
+                        name: [0; MAX_REFERENCE],
+                        length: 0,
+                    }
+                }
                 _ => State::Data,
             },
 
@@ -453,7 +635,8 @@ impl HeadOpenTagLocator {
                     };
                 }
                 if !is_whitespace_reference(&name[..length], byte == b';') {
-                    State::PastHead
+                    self.head_closes(self.markup_start, false)
+                        .unwrap_or(State::PastHead)
                 } else if byte == b';' {
                     State::Data
                 } else {
@@ -470,7 +653,13 @@ impl HeadOpenTagLocator {
                     && !matches!(byte, b'!' | b'/' | b'?')
                     && !byte.is_ascii_alphabetic() =>
             {
-                State::PastHead
+                match (self.body_mode, byte) {
+                    (true, b'<') => self.open_markup(offset),
+                    (true, _) => State::Data,
+                    (false, _) => self
+                        .head_closes(self.markup_start, false)
+                        .unwrap_or(State::PastHead),
+                }
             }
 
             State::TagOpen => match byte {
@@ -503,83 +692,44 @@ impl HeadOpenTagLocator {
                 _ => State::BogusComment,
             },
 
-            State::Tag { closing, position } => {
-                match self.step_tag(position, byte) {
-                    Some(next) => {
-                        // The name is complete once the tag moves past it, and only then.
-                        let name_done = position == TagPosition::TagName && next != position;
-                        if !closing && name_done {
-                            self.complete_name();
-                            if self.template_depth == 0 && !self.may_precede_head() {
-                                self.state = State::PastHead;
-                                return false;
+            State::Tag { closing, position } => match self.step_tag(position, byte) {
+                Some(next) => {
+                    if !closing && position == TagPosition::TagName && !self.name_checked {
+                        // The name is complete once the tag moves past it, and it is told apart
+                        // as soon as it outgrows every name that matters.
+                        if next != position || self.name_overflow {
+                            if let Some(state) = self.start_tag_named() {
+                                self.state = state;
+                                return state == State::Found;
                             }
                         }
-                        State::Tag {
-                            closing,
-                            position: next,
-                        }
                     }
-                    // The tag ends at this `>`.
-                    None if closing && self.name_is(b"template") => {
-                        self.template_depth = self.template_depth.saturating_sub(1);
-                        State::Data
+                    if !closing && self.name_is(b"html") && self.template_depth == 0 {
+                        self.read_html_attribute(position, next, byte);
                     }
-                    // Within a template, no end tag closes the head.
-                    None if closing && self.template_depth > 0 => State::Data,
-                    None if closing => match self.target {
-                        Target::HeadStart => State::Data,
-                        Target::HeadEnd if self.name_is(b"head") => {
-                            self.state = State::Found;
-                            return true;
-                        }
-                        // These close the head as well, implicitly: no `</head>` that follows
-                        // closes it.
-                        Target::HeadEnd
-                            if [b"body".as_slice(), b"html", b"br"]
-                                .iter()
-                                .any(|name| return self.name_is(name)) =>
-                        {
-                            State::PastHead
-                        }
-                        Target::HeadEnd => State::Data,
-                    },
-                    None => {
-                        self.complete_name();
-                        if self.name_is(b"template") {
-                            self.template_depth += 1;
-                            return {
-                                self.state = State::Data;
-                                false
-                            };
-                        }
-                        // Within a template, a start tag neither is the head nor ends it.
-                        if self.template_depth > 0 {
-                            return {
-                                self.state = self.state_after_start_tag();
-                                false
-                            };
-                        }
-                        if self.name_is(b"head") {
-                            if self.target == Target::HeadEnd {
-                                // Its own content is markup: carry on to its end tag.
-                                self.state = State::Data;
-                                return false;
-                            }
-                            self.state = State::Found;
-                            return true;
-                        }
-                        if !self.may_precede_head() {
-                            self.state = State::PastHead;
-                            return false;
-                        }
-                        self.state_after_start_tag()
+                    State::Tag {
+                        closing,
+                        position: next,
                     }
                 }
-            }
+                // The tag ends at this `>`.
+                None if closing => self.end_tag_ends(),
+                None => {
+                    if position == TagPosition::AttributeName && self.name_is(b"html") {
+                        self.end_html_attribute();
+                    }
+                    if !self.name_checked {
+                        if let Some(state) = self.start_tag_named() {
+                            self.state = state;
+                            return state == State::Found;
+                        }
+                    }
+                    self.start_tag_ends(position == TagPosition::SelfClosing, offset)
+                }
+            },
 
             State::MarkupDeclarationOpen { dashes } => match (dashes, byte) {
-                (0, b'[') => State::CdataSectionOpen { matched: 1 },
+                (0, b'[') if self.foreign_depth > 0 => State::CdataSectionOpen { matched: 1 },
                 (0, b'-') => State::MarkupDeclarationOpen { dashes: 1 },
                 (_, b'-') => State::Comment {
                     run: 2,
@@ -629,7 +779,9 @@ impl HeadOpenTagLocator {
 
             State::CdataSectionOpen { matched } => {
                 match (CDATA_SECTION_OPEN[matched] == byte, byte) {
-                    (true, _) if matched + 1 == CDATA_SECTION_OPEN.len() => State::CdataSection,
+                    (true, _) if matched + 1 == CDATA_SECTION_OPEN.len() => {
+                        State::CdataSection { brackets: 0 }
+                    }
                     (true, _) => State::CdataSectionOpen {
                         matched: matched + 1,
                     },
@@ -639,10 +791,26 @@ impl HeadOpenTagLocator {
                 }
             }
 
+            State::CdataSection { brackets } => match byte {
+                b']' => State::CdataSection {
+                    brackets: (brackets + 1).min(2),
+                },
+                b'>' if brackets == 2 => State::Data,
+                _ => State::CdataSection { brackets: 0 },
+            },
+
             State::BogusComment => match byte {
                 b'>' => {
-                    if self.is_html_doctype() && self.significant_html_evidence.is_none() {
-                        self.significant_html_evidence = Some(self.markup_start - self.free);
+                    if self.is_html_doctype() {
+                        if self.significant_html_evidence.is_none() {
+                            self.significant_html_evidence = Some(self.markup_start - self.free);
+                        }
+                        if self.template_depth == 0 {
+                            self.strong_evidence = true;
+                            if self.prologue_open {
+                                self.prologue_end = offset + 1;
+                            }
+                        }
                     }
                     self.end_free_markup(offset)
                 }
@@ -654,7 +822,160 @@ impl HeadOpenTagLocator {
 
             State::RawText { script } => self.step_raw_text(script, byte),
         };
-        return false;
+        return self.state == State::Found;
+    }
+
+    /// Tells apart the start tag being read by its name, complete or too long to matter. Returns
+    /// the state that follows when the tag ends the search, `None` when it carries on being read.
+    fn start_tag_named(&mut self) -> Option<State> {
+        self.name_checked = true;
+        self.complete_name();
+        if self.template_depth > 0 {
+            return None;
+        }
+        let names = |names: &[&[u8]]| return names.iter().any(|name| return self.name_is(name));
+        if self.body_mode {
+            if names(&[b"html", b"body"]) {
+                self.found_start = self.markup_start;
+                self.found_breaks = true;
+                return Some(State::Found);
+            }
+            // Foreign content is not followed.
+            if names(&[b"svg", b"math"]) {
+                return Some(State::PastHead);
+            }
+            return None;
+        }
+        if names(&[b"html", b"head"]) {
+            self.strong_evidence = true;
+        }
+        if self.may_precede_head() {
+            if !self.name_is(b"html") {
+                self.prologue_open = false;
+            }
+            return None;
+        }
+        // A `<body>` tag is evidence of its own.
+        if self.name_is(b"body") {
+            self.strong_evidence = true;
+            if self.significant_html_evidence.is_none() {
+                self.significant_html_evidence = Some(self.markup_start - self.free);
+            }
+        }
+        return self.head_closes(self.markup_start, true);
+    }
+
+    /// The state following the `>` of a start tag, self-closing when `self_closing`, at `offset`.
+    fn start_tag_ends(&mut self, self_closing: bool, offset: usize) -> State {
+        if self.foreign_depth > 0 {
+            if !self_closing {
+                self.foreign_depth += 1;
+            }
+            return State::Data;
+        }
+        if self.name_is(b"template") {
+            self.template_depth += 1;
+            return State::Data;
+        }
+        if self.template_depth > 0 {
+            if !self_closing && (self.name_is(b"svg") || self.name_is(b"math")) {
+                self.foreign_depth = 1;
+                return State::Data;
+            }
+            return self.state_after_start_tag();
+        }
+        if self.name_is(b"html") && !self.body_mode {
+            if self.amp {
+                return State::PastHead;
+            }
+            if self.prologue_open {
+                self.prologue_end = offset + 1;
+            }
+        }
+        if self.name_is(b"head") && self.target == Target::HeadStart && !self.body_mode {
+            self.found_start = self.markup_start;
+            self.found_breaks = false;
+            return State::Found;
+        }
+        return self.state_after_start_tag();
+    }
+
+    /// The state following the `>` of an end tag.
+    fn end_tag_ends(&mut self) -> State {
+        if self.name_is(b"template") && self.foreign_depth == 0 {
+            self.template_depth = self.template_depth.saturating_sub(1);
+            return State::Data;
+        }
+        if self.template_depth > 0 {
+            // Within foreign content, an HTML `</template>` still closes the template.
+            if self.name_is(b"template") {
+                self.foreign_depth = 0;
+                self.template_depth -= 1;
+            } else {
+                self.foreign_depth = self.foreign_depth.saturating_sub(1);
+            }
+            return State::Data;
+        }
+        if self.body_mode || !CLOSES_HEAD.iter().any(|name| return self.name_is(name)) {
+            return State::Data;
+        }
+        if self.target == Target::HeadEnd && self.name_is(b"head") {
+            // The end tag is evidence of its own.
+            if self.significant_head_start.is_none() {
+                self.significant_head_start = Some(self.markup_start - self.free);
+            }
+            self.found_start = self.markup_start;
+            self.found_breaks = false;
+            return State::Found;
+        }
+        return self
+            .head_closes(self.markup_start, true)
+            .unwrap_or(State::Data);
+    }
+
+    /// Reads an attribute name of the `<html>` tag, moving from `position` to `next` on `byte`.
+    fn read_html_attribute(&mut self, position: TagPosition, next: TagPosition, byte: u8) {
+        let whitespace = matches!(byte, b'\t' | b'\n' | b'\x0C' | b'\r' | b' ');
+        match (position, next) {
+            (TagPosition::AttributeName, TagPosition::AttributeName) if whitespace => {
+                self.attribute_ended = true;
+            }
+            (TagPosition::AttributeName, TagPosition::AttributeName) if !self.attribute_ended => {
+                self.push_attribute(byte);
+            }
+            // Past whitespace, a byte that is no `=` starts another attribute.
+            (TagPosition::AttributeName, TagPosition::AttributeName) => {
+                self.end_html_attribute();
+                self.push_attribute(byte);
+            }
+            (_, TagPosition::AttributeName) => {
+                self.attribute_length = 0;
+                self.attribute_overflow = false;
+                self.attribute_ended = false;
+                self.push_attribute(byte);
+            }
+            (TagPosition::AttributeName, _) => self.end_html_attribute(),
+            _ => {}
+        }
+    }
+
+    fn push_attribute(&mut self, byte: u8) {
+        if self.attribute_length < MAX_ATTRIBUTE {
+            self.attribute[self.attribute_length] = byte.to_ascii_lowercase();
+            self.attribute_length += 1;
+        } else {
+            self.attribute_overflow = true;
+        }
+    }
+
+    fn end_html_attribute(&mut self) {
+        let attribute = &self.attribute[..self.attribute_length];
+        if !self.attribute_overflow && AMP_ATTRIBUTES.contains(&attribute) {
+            self.amp = true;
+        }
+        self.attribute_length = 0;
+        self.attribute_overflow = false;
+        self.attribute_ended = false;
     }
 
     /// Advances through a tag, and returns `None` on the `>` closing it.
@@ -775,6 +1096,7 @@ impl HeadOpenTagLocator {
         self.markup_start = offset;
         self.name_length = 0;
         self.name_overflow = false;
+        self.name_checked = false;
         self.declaration_length = 0;
         self.declaration_open = false;
         return State::TagOpen;
@@ -904,21 +1226,22 @@ pub(super) fn is_whitespace_reference(name: &[u8], terminated: bool) -> bool {
     return matches!(number, Some(0x09 | 0x0A | 0x0C | 0x0D | 0x20));
 }
 
-/// Whether `text`, read in the data state from `position` on, holds anything but whitespace or the
-/// byte order mark starting a UTF-8 document.
-fn holds_text(text: &[u8], position: usize) -> bool {
+/// The index of the first byte of `text`, read in the data state from `position` on, that is
+/// neither whitespace nor part of the byte order mark starting a UTF-8 document, if any.
+fn text_start(text: &[u8], position: usize) -> Option<usize> {
     const BOM: &[u8] = b"\xEF\xBB\xBF";
-    let mut text = text;
+    let mut skipped = 0;
     if let Some(mark) = BOM.get(position..) {
         // The part of the mark this text may hold, from where the document is.
         let common = text.len().min(mark.len());
         if text[..common] == mark[..common] {
-            text = &text[common..];
+            skipped = common;
         }
     }
-    return text
+    return text[skipped..]
         .iter()
-        .any(|&byte| return !matches!(byte, b'\t' | b'\n' | b'\x0C' | b'\r' | b' '));
+        .position(|&byte| return !matches!(byte, b'\t' | b'\n' | b'\x0C' | b'\r' | b' '))
+        .map(|index| return skipped + index);
 }
 
 #[cfg(test)]
@@ -933,7 +1256,8 @@ mod tests {
         let mut offset = 0;
         for chunk in chunks {
             if let Some(head) = locator.scan(chunk) {
-                return Some((head.start, offset + head.end));
+                // Where the head closes without a `<head>` tag is checked by `locate_break`.
+                return (!head.breaks).then_some((head.start, offset + head.end));
             }
             offset += chunk.len();
         }
@@ -965,7 +1289,9 @@ mod tests {
     #[test]
     fn other_tags() {
         assert_eq!(find("<header><heads><hea><h ead>"), None);
-        assert_eq!(find("</head><head>"), Some((7, 13)));
+        // The `before head` insertion mode opens the head on a `</head>` tag, which then closes
+        // it: no `<head>` tag counts past it.
+        assert_eq!(find("</head><head>"), None);
         // A stray `<` is text, which starts the body.
         assert_eq!(find("< head><head>"), None);
         assert_eq!(find("<<head>"), None);
@@ -1007,9 +1333,10 @@ mod tests {
         assert_eq!(find("<!x <head>"), None);
         assert_eq!(find("</3 <head>"), None);
         assert_eq!(find("</><head>"), Some((3, 9)));
-        // A CDATA section ends the search, whatever follows it.
+        // Out of foreign content, a CDATA section is a bogus comment, which the first `>` ends:
+        // what follows it is text here, which starts the body.
         assert_eq!(find("<![CDATA[<head>]]>"), None);
-        assert_eq!(find("<![CDATA[x]]><head>"), None);
+        assert_eq!(find("<![CDATA[x]]><head>"), Some((13, 19)));
         assert_eq!(
             find("<svg><text><![CDATA[><head>x]]></text></svg><head>"),
             None
@@ -1093,7 +1420,14 @@ mod tests {
         assert_eq!(locator.pending_tag_start(), Some(2));
         locator.scan(b" a='>");
         assert_eq!(locator.pending_tag_start(), Some(2));
-        assert_eq!(locator.scan(b"'>x"), Some(HeadOpenTag { start: 2, end: 2 }));
+        assert_eq!(
+            locator.scan(b"'>x"),
+            Some(HeadOpenTag {
+                start: 2,
+                end: 2,
+                breaks: false
+            })
+        );
         // Only the first one is ever returned.
         assert_eq!(locator.scan(b"<head>"), None);
 
@@ -1102,5 +1436,91 @@ mod tests {
         assert_eq!(locator.pending_tag_start(), Some(0));
         locator.scan(b" ");
         assert_eq!(locator.pending_tag_start(), None);
+    }
+
+    /// Scans `input` whole, one byte at a time and split in two everywhere, looking for `target`,
+    /// and returns where the head closes without it, if that is what is found.
+    fn locate_break(target: Target, input: &str) -> Option<usize> {
+        let scan = |chunks: &[&[u8]]| {
+            let mut locator = HeadOpenTagLocator::with_target(target);
+            for chunk in chunks {
+                if let Some(head) = locator.scan(chunk) {
+                    return head.breaks.then_some(head.start);
+                }
+            }
+            return None;
+        };
+        let input = input.as_bytes();
+        let expected = scan(&[input]);
+        for split in 0..=input.len() {
+            let (first, second) = input.split_at(split);
+            assert_eq!(scan(&[first, second]), expected, "split at {}", split);
+        }
+        let bytes: Vec<&[u8]> = input.chunks(1).collect();
+        assert_eq!(scan(&bytes), expected, "one byte at a time");
+        return expected;
+    }
+
+    #[test]
+    fn where_the_head_closes() {
+        for target in [Target::HeadStart, Target::HeadEnd] {
+            // Body content, text and these end tags, once the document looks like one.
+            assert_eq!(locate_break(target, "<html><img src=a>"), Some(6));
+            assert_eq!(locate_break(target, "<!DOCTYPE html>\n x"), Some(17));
+            assert_eq!(locate_break(target, "<html>&nbsp;"), Some(6));
+            assert_eq!(locate_break(target, "<html></body>"), Some(6));
+            assert_eq!(
+                locate_break(target, "<html><averyveryverylongname>"),
+                Some(6)
+            );
+            // Not in a fragment, nor before a lone `<meta>`.
+            assert_eq!(locate_break(target, "<div>x</div>"), None);
+            assert_eq!(locate_break(target, "<meta name=a><div>"), None);
+            // Within the body, before an `<html>` or `<body>` tag, and not past foreign content.
+            assert_eq!(locate_break(target, "<br>Notice<br><html>"), Some(14));
+            assert_eq!(locate_break(target, "<br><head><body>"), Some(10));
+            assert_eq!(locate_break(target, "<br><svg><html>"), None);
+            assert_eq!(
+                locate_break(target, "<br><textarea><html></textarea>"),
+                None
+            );
+            // Never in an AMP document.
+            assert_eq!(locate_break(target, "<html amp><img>"), None);
+            assert_eq!(locate_break(target, "<html \u{26a1}4email><img>"), None);
+            assert_eq!(locate_break(target, "<html ampx><img>"), Some(11));
+        }
+        // A `</head>` tag closes the head the `before head` mode opens.
+        assert_eq!(
+            locate_break(Target::HeadStart, "<html></head><head>"),
+            Some(6)
+        );
+        assert_eq!(locate_break(Target::HeadEnd, "<html></head>"), None);
+    }
+
+    #[test]
+    fn foreign_content_within_a_template() {
+        for target in [Target::HeadStart, Target::HeadEnd] {
+            // A `<title>` in SVG holds no raw text, and closes itself: the template ends.
+            assert_eq!(
+                locate_break(
+                    target,
+                    "<html><template><svg><title/></svg></template><img>"
+                ),
+                Some(46)
+            );
+            // A CDATA section in foreign content runs to its `]]>`.
+            assert_eq!(
+                locate_break(
+                    target,
+                    "<html><template><svg><![CDATA[</template>]]></svg></template><img>"
+                ),
+                Some(61)
+            );
+            // An HTML `</template>` closes it from within foreign content.
+            assert_eq!(
+                locate_break(target, "<html><template><math><mi></template><img>"),
+                Some(37)
+            );
+        }
     }
 }

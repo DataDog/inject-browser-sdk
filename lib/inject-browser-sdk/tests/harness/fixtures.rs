@@ -171,8 +171,9 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
             "attribute-with-greater-than",
             "<!DOCTYPE html><html data-x=\"<head>\"><head data-y='a > b'>{{SNIPPET}}<meta name=\"description\" content=\"1 > 0 && <meta>\"><title>t</title></head><body></body></html>",
         ),
-        // No `<head>` in the first kilobyte: an `<html>` or a `<meta>` tag there lets the snippet
-        // go after the `<head>` tag that follows, and nothing else does.
+        // No `<head>` in the first kilobyte: an `<html>` or a `<meta>` tag or a `<!DOCTYPE html>`
+        // lets the snippet go after the `<head>` tag that follows, comments not counting towards
+        // where it has to be, and nothing else does.
         Fixture::new(
             "long-preamble-with-html",
             format!("<!DOCTYPE html>\n<html lang=\"en\">\n<!--\n{license}-->\n<head>{MARK}\n<meta charset=\"utf-8\">\n<title>Preamble</title>\n</head>\n<body>hi</body>\n</html>\n"),
@@ -185,8 +186,12 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
             ),
         ),
         Fixture::new(
+            "long-preamble-with-doctype",
+            format!("<!DOCTYPE html>\n<!--\n{license}-->\n<head>{MARK}\n<title>Preamble</title>\n</head>\n<body>hi</body>\n"),
+        ),
+        Fixture::new(
             "long-preamble-without-evidence",
-            format!("<!DOCTYPE html>\n<!--\n{license}-->\n<head>\n<title>Preamble</title>\n</head>\n<body>hi</body>\n"),
+            format!("<!--\n{license}-->\n<head>\n<title>Preamble</title>\n</head>\n<body>hi</body>\n"),
         ),
         Fixture::new(
             "no-head",

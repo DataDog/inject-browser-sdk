@@ -200,6 +200,7 @@ pub fn check_oracle_chunking(document: &[u8], points: &[usize]) {
             return oracle::Observed {
                 text: Vec::new(),
                 data_text: Vec::new(),
+                blank_data: Vec::new(),
                 ..observed
             };
         });

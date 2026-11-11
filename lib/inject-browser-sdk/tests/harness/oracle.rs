@@ -14,10 +14,14 @@ use std::rc::Rc;
 
 use inject_browser_sdk::injector::InjectionStrategy;
 use lol_html::html_content::{Element, TextChunk, TextType};
-use lol_html::{doc_text, element, end_tag, HtmlRewriter, Settings};
+use lol_html::{doc_comments, doc_text, doctype, element, end_tag, HtmlRewriter, Settings};
 
 /// The head window of the injector, `DOCUMENT_CHARSET_SCAN_LIMIT`.
 pub const WINDOW: usize = 1024;
+
+/// How far the injector looks for HTML evidence, comments, doctypes and whitespace not counted,
+/// `EVIDENCE_LIMIT`.
+pub const EVIDENCE_LIMIT: usize = 10 * 1024;
 
 /// How far the injector walks a head that is a run of `<meta>` and `<title>` tags, `WALK_LIMIT`.
 pub const WALK_LIMIT: usize = 10 * 1024;
@@ -57,6 +61,13 @@ pub struct Observed {
     /// The ones of them in the data state, outside raw text, RCDATA and CDATA, a byte order mark
     /// starting the document aside: the browser closes the head on one.
     pub data_text: Vec<Range<usize>>,
+    /// Text nodes in the data state holding nothing but whitespace (a byte order mark starting the
+    /// document included), outside templates.
+    pub blank_data: Vec<Range<usize>>,
+    /// Every comment, bogus ones included, and every doctype.
+    pub comments: Vec<Range<usize>>,
+    /// Start of the first doctype naming `html`.
+    pub doctype_html: Option<usize>,
     /// Start of the first `<html>` or `<meta>` start tag.
     pub html_evidence: Option<usize>,
     /// Every `<template>` element, from its start tag to the start of its end tag, if it has one.
@@ -171,7 +182,12 @@ pub fn observe<T: AsRef<[u8]>>(chunks: &[T]) -> Option<Observed> {
     rewriter.end().ok()?;
 
     let mut observed = observed.borrow().clone();
-    (observed.text, observed.data_text) = text_nodes(chunks);
+    let nodes = text_nodes(chunks);
+    observed.text = nodes.text;
+    observed.data_text = nodes.data_text;
+    observed.blank_data = nodes.blank_data;
+    observed.comments = nodes.comments;
+    observed.doctype_html = nodes.doctype_html;
     return Some(observed);
 }
 
@@ -179,13 +195,25 @@ pub fn observe<T: AsRef<[u8]>>(chunks: &[T]) -> Option<Observed> {
 /// with a text handler, lol_html tokenizes everything rather than scan for tags, and the two ways
 /// disagree on some malformed documents, so the text handler must not change what the element
 /// handlers see.
-fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+/// What [`text_nodes`] gathers from its run of lol_html.
+#[derive(Default)]
+struct TextNodes {
+    text: Vec<Range<usize>>,
+    data_text: Vec<Range<usize>>,
+    blank_data: Vec<Range<usize>>,
+    comments: Vec<Range<usize>>,
+    doctype_html: Option<usize>,
+}
+
+fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> TextNodes {
     // Text nodes come in chunks, which the ones of the input decide: joined up, so that what is
-    // observed does not depend on them.
+    // observed does not depend on them. Comments and doctypes come from the same run, which
+    // tokenizes everything.
     let nodes: Rc<RefCell<Vec<TextNode>>> = Rc::default();
-    let text = nodes.clone();
-    let settings =
-        Settings::new().append_document_content_handler(doc_text!(move |chunk: &mut TextChunk| {
+    let markup: Rc<RefCell<TextNodes>> = Rc::default();
+    let (text, comments, doctypes) = (nodes.clone(), markup.clone(), markup.clone());
+    let settings = Settings::new()
+        .append_document_content_handler(doc_text!(move |chunk: &mut TextChunk| {
             let range = chunk.source_location().bytes();
             let data = chunk.text_type() == TextType::Data;
             let mut nodes = text.borrow_mut();
@@ -197,37 +225,60 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> (Vec<Range<usize>>, Vec<Range<usi
                 _ => nodes.push((range, String::from(chunk.as_str()), data)),
             }
             return Ok(());
+        }))
+        .append_document_content_handler(doc_comments!(move |comment| {
+            comments
+                .borrow_mut()
+                .comments
+                .push(comment.source_location().bytes());
+            return Ok(());
+        }))
+        .append_document_content_handler(doctype!(move |doctype| {
+            let location = doctype.source_location().bytes();
+            let mut markup = doctypes.borrow_mut();
+            let html = doctype
+                .name()
+                .is_some_and(|name| return name.eq_ignore_ascii_case("html"));
+            if html && markup.doctype_html.is_none() {
+                markup.doctype_html = Some(location.start);
+            }
+            markup.comments.push(location);
+            return Ok(());
         }));
     let mut rewriter = HtmlRewriter::new(settings, |_: &[u8]| {});
     for chunk in chunks {
         if rewriter.write(chunk.as_ref()).is_err() {
-            return (Vec::new(), Vec::new());
+            return TextNodes::default();
         }
     }
     if rewriter.end().is_err() {
-        return (Vec::new(), Vec::new());
+        return TextNodes::default();
     }
     let blank = |content: &str| return content.bytes().all(|b| return b.is_ascii_whitespace());
-    let nodes = nodes.borrow();
-    let text = nodes
-        .iter()
-        .filter(|(range, content, _)| return !range.is_empty() && !blank(content))
-        .map(|(range, _, _)| return range.clone())
-        .collect();
-    let data_text = nodes
-        .iter()
-        .filter(|(range, content, data)| {
-            // A chunk split within the byte order mark may move where its text starts by a byte or
-            // two. Character references are decoded, as whitespace ones keep the head open.
-            let content = match range.start < 3 {
-                true => content.strip_prefix('\u{feff}').unwrap_or(content),
-                false => content.as_str(),
-            };
-            return *data && !range.is_empty() && !blank(&decode_references(content));
-        })
-        .map(|(range, _, _)| return range.clone())
-        .collect();
-    return (text, data_text);
+    // A chunk split within the byte order mark may move where its text starts by a byte or two.
+    let without_mark = |range: &Range<usize>, content: &'_ str| -> String {
+        return match range.start < 3 {
+            true => String::from(content.strip_prefix('\u{feff}').unwrap_or(content)),
+            false => String::from(content),
+        };
+    };
+    let mut gathered = std::mem::take(&mut *markup.borrow_mut());
+    for (range, content, data) in nodes.borrow().iter() {
+        if range.is_empty() {
+            continue;
+        }
+        if !blank(content) {
+            gathered.text.push(range.clone());
+        }
+        if *data {
+            // Character references are decoded, as whitespace ones keep the head open.
+            match blank(&decode_references(&without_mark(range, content))) {
+                true => gathered.blank_data.push(range.clone()),
+                false => gathered.data_text.push(range.clone()),
+            }
+        }
+    }
+    return gathered;
 }
 
 /// `text` with its numeric character references (the `;` optional) and `&Tab;` / `&NewLine;`
@@ -296,6 +347,29 @@ pub fn injection_point(strategy: InjectionStrategy, observed: &Observed) -> Opti
     };
 }
 
+/// `position`, counting only the bytes that tell whether the document is HTML: comments,
+/// doctypes and blank text before it are not counted, as the injector does not count them.
+fn significant(observed: &Observed, position: usize) -> usize {
+    let free: usize = observed
+        .comments
+        .iter()
+        .chain(
+            observed
+                .blank_data
+                .iter()
+                .filter(|text| return !in_template(observed, text.start)),
+        )
+        .filter(|range| return range.end <= position)
+        .map(|range| return range.len())
+        .sum();
+    return position - free;
+}
+
+/// Whether `start`, where some HTML evidence starts, is within the limit.
+fn within_evidence_limit(observed: &Observed, start: usize) -> bool {
+    return significant(observed, start) < EVIDENCE_LIMIT;
+}
+
 /// Whether `position` is within the content of a `<template>`, which is inert.
 fn in_template(observed: &Observed, position: usize) -> bool {
     return observed.templates.iter().any(|&(start, end)| {
@@ -338,10 +412,20 @@ fn text_before(observed: &Observed, position: usize) -> bool {
 fn head_close_point(observed: &Observed) -> Option<usize> {
     let head = first_head(observed)?;
     let end = head_end(observed, head)?;
-    let evidence = observed
-        .html_evidence
-        .map_or(head.start, |start| return start.min(head.start));
-    if evidence >= WINDOW {
+    // The first `<head>` start tag counts as evidence wherever it is, as the injector reads it.
+    let any_head = observed
+        .heads
+        .first()
+        .map_or(head.start, |first| return first.start);
+    let evidence = [
+        observed.html_evidence,
+        observed.doctype_html,
+        Some(any_head),
+    ]
+    .into_iter()
+    .flatten()
+    .min()?;
+    if !within_evidence_limit(observed, evidence) {
         return None;
     }
     if observed
@@ -368,9 +452,11 @@ fn head_open_point(observed: &Observed) -> Option<usize> {
         return None;
     }
     if head.start >= WINDOW
-        && !observed
-            .html_evidence
-            .is_some_and(|start| return start < WINDOW)
+        && ![observed.html_evidence, observed.doctype_html]
+            .into_iter()
+            .flatten()
+            .min()
+            .is_some_and(|start| return within_evidence_limit(observed, start))
     {
         return None;
     }

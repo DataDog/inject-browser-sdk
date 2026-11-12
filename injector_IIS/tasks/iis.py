@@ -23,6 +23,15 @@ installer_proj_file = os.path.join(
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
+# PowerShell scripts shipped by the MSI and the OCI package. Signed in place,
+# so the MSI and the OCI package get the same signed files.
+SCRIPTS = [
+    os.path.join(".", "resources", "RUMTools.ps1"),
+    os.path.join(".", "resources", "modules", "Datadog.RUM.psm1"),
+    os.path.join(".", "resources", "modules", "Datadog.RUM.psd1"),
+]
+SCHEMA = os.path.join(".", "resources", "RUM_schema.xml")
+
 
 @task
 def build(ctx, out_dir="../build_out", debug=False, vstudio_root=None, test_dir=None):
@@ -107,8 +116,8 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
 
     env, fullver, vs_env_bat = do_get_build_env(ctx, vstudio_root=vstudio_root)
 
-    sign_binary(ctx, os.path.join(".", "resources", "modules", "Datadog.RUM.psm1"))
-    sign_binary(ctx, os.path.join(".", "resources", "modules", "Datadog.RUM.psd1"))
+    for script in SCRIPTS:
+        sign_binary(ctx, script)
 
     # copy the dll
     dllpath = os.path.join(out_dir, "injector_IIS.dll")
@@ -159,9 +168,7 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
     sign_binary(ctx, msipath)
     if os.environ.get("SIGN_WINDOWS_DD_WCS"):
         # Fail the release build rather than publish anything left unsigned.
-        signed = [dllpath, msipath] + [
-            os.path.join(".", "resources", "modules", name) for name in ("Datadog.RUM.psm1", "Datadog.RUM.psd1")
-        ]
+        signed = [dllpath, msipath] + SCRIPTS
         checker = os.path.join(PROJECT_DIR, "scripts", "Assert-IISSignature.ps1")
         paths = " ".join(f'"{path}"' for path in signed)
         ctx.run(f'powershell -NoProfile -ExecutionPolicy Bypass -File "{checker}" {paths}', hide=False, pty=False)
@@ -169,6 +176,10 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
     ## copy the newly built file into the target directory
     target_filename = "injector_IIS_installer.msi"
     shutil.copy2(msipath, os.path.join(out_dir, target_filename))
+
+    # The OCI package is built on Linux, which cannot sign: ship the files signed above.
+    for path in SCRIPTS + [SCHEMA]:
+        shutil.copy2(path, out_dir)
 
 
 def sign_binary(ctx, path):

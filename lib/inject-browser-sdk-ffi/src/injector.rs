@@ -241,6 +241,42 @@ pub unsafe extern "C" fn injector_extend_content_length(
     };
 }
 
+/// Hand back everything the [`Injector`] holds back, for a server that has to send what it has
+/// now, such as a page streamed in pieces that waits on more data, which would otherwise stall until
+/// the first 1024 bytes are in, or more for a head that is a long run of `<meta>` tags. Never
+/// injects; once the snippet is placed, or the head window holds no `<head>` tag, there is nothing
+/// to hand back.
+///
+/// The head window is given up in exchange: a `<head>` tag in what is handed back, or starting later
+/// within the first 1024 bytes, is not injected after anymore. One starting past them still is, if
+/// those bytes look like an HTML document.
+///
+/// This function should not be called while another [`InjectorResult`] from the same `Injector` is
+/// still being processed. See [`InjectorResult`] for the memory ownership of the result.
+#[no_mangle]
+pub unsafe extern "C" fn injector_flush(injector: *mut Injector) -> InjectorResult {
+    if injector.is_null() {
+        return InjectorResult::empty();
+    }
+    let injector = &mut *injector;
+    return InjectorResult::new(injector.inner.flush(), &mut injector.slices_memory_storage);
+}
+
+/// Whether the [`Injector`] may still inject the snippet into data yet to be written: it has
+/// neither injected nor given up. Passing `NULL` returns false.
+///
+/// Once the head window is decided on, a pending injector holds nothing back
+/// ([`injector_held_back_length`] is 0), so a server that sends a document in several parts can
+/// let each part go out as soon as it is written, and keep writing the next ones to the same
+/// injector: the snippet goes into whichever part holds the `<head>` tag.
+#[no_mangle]
+pub unsafe extern "C" fn injector_is_pending(injector: *const Injector) -> bool {
+    if injector.is_null() {
+        return false;
+    }
+    return (*injector).inner.is_pending();
+}
+
 /// Notify the [`Injector`] that the full HTML document has been written.
 ///
 /// If the injection did not happen yet, a slice of the same size as the snippet containing only
@@ -602,6 +638,35 @@ mod tests {
 
         unsafe { injector_cleanup(injector) };
         unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn injector_flush_hands_the_head_window_back() {
+        assert_eq!(unsafe { injector_flush(null_mut()) }.slices_length, 0);
+
+        let snippet = test_snippet();
+        let injector =
+            unsafe { injector_create_with_strategy(snippet, InjectionStrategy::HeadOpenTag) };
+        let head = b"<html><head>";
+        unsafe { injector_write(injector, head.as_ptr(), head.len() as u32) };
+        let result = unsafe { injector_flush(injector) };
+        assert!(!result.injected);
+        assert_eq!(result.slices_length, 1);
+        let slice = unsafe { &*result.slices };
+        assert!(!slice.from_incoming_chunk);
+        assert_eq!(
+            unsafe { slice::from_raw_parts(slice.start, slice.length as usize) },
+            head
+        );
+        assert_eq!(unsafe { injector_held_back_length(injector) }, 0);
+
+        unsafe { injector_cleanup(injector) };
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn injector_is_pending_null_injector_returns_false() {
+        assert!(!unsafe { injector_is_pending(null()) });
     }
 
     #[test]

@@ -222,11 +222,13 @@ LATE_HEAD_CLOSE_HTML = (
     reason="IIS gets a large response in several parts",
 )
 @pytest.mark.parametrize("chunked", [False, True])
-def test_head_close_tag_past_the_first_part_is_served_untouched(upstream_server, chunked):
+def test_head_close_tag_past_the_first_part_is_injected(upstream_server, chunked):
     """
-    Verify a proxied page whose </head> lies past the first part IIS gets
-    is served whole and untouched: the snippet can only go within the first
-    part, and the announced length must not change.
+    Verify a proxied page whose </head> lies past the first part IIS gets is
+    injected in the later part that holds it, right before </head>, and
+    served whole. The headers went out with the first part, before the
+    snippet went in: they carry no injection header, and the length they
+    announce counts the snippet already.
     """
 
     async def upstream_handler(request):
@@ -241,15 +243,17 @@ def test_head_close_tag_past_the_first_part_is_served_untouched(upstream_server,
         await response.write_eof()
         return response
 
-    path = "/late-head-close-chunked" if chunked else "/late-head-close"
+    path = "/late-head-chunked" if chunked else "/late-head"
     upstream_server.add_route(path, upstream_handler)
 
     status, headers, body = __fetch(path)
 
     assert status == 200
     assert "x-datadog-rum-injected" not in headers
-    assert body == LATE_HEAD_CLOSE_HTML
     assert ("content-length" in headers) != chunked
+    __assert_injected_once(
+        LATE_HEAD_CLOSE_HTML, body, at=LATE_HEAD_CLOSE_HTML.index(b"</head>")
+    )
 
 
 def test_injection_only_for_html_content(upstream_server):

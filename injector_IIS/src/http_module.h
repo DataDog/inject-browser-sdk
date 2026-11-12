@@ -40,6 +40,11 @@ class HttpModule : public CHttpModule {
   REQUEST_NOTIFICATION_STATUS PerformInjection(IHttpContext& pHttpContext,
                                                IHttpResponse& pHttpResponse, ModuleContext& ctx,
                                                Send send);
+
+  // Writes a part after the first to the injector the first part left, if any, and pads the last
+  // part if the snippet its announced length counts never went in.
+  REQUEST_NOTIFICATION_STATUS ContinueInjection(IHttpContext& pHttpContext,
+                                                IHttpResponse& pHttpResponse, bool more_data);
 };
 
 class HttpModuleFactory : public IHttpModuleFactory {

@@ -53,24 +53,23 @@ impl Stats {
     }
 }
 
-/// Runs every check on `document`, under every strategy, and returns the run of
-/// [`InjectionStrategy::HeadOpenTag`], the one the fixtures are written for. `exhaustive` adds every
-/// split into two chunks, for documents short enough for that to stay cheap.
-fn check(document: &[u8], rng: &mut StdRng, exhaustive: bool, stats: &mut Stats) -> Run {
-    check_strategy(
-        InjectionStrategy::HeadCloseTag,
-        document,
-        rng,
-        exhaustive,
-        stats,
-    );
-    return check_strategy(
-        InjectionStrategy::HeadOpenTag,
-        document,
-        rng,
-        exhaustive,
-        stats,
-    );
+/// Runs every check on `document`, under every strategy, and returns the run of each. `exhaustive`
+/// adds every split into two chunks, for documents short enough for that to stay cheap.
+fn check(
+    document: &[u8],
+    rng: &mut StdRng,
+    exhaustive: bool,
+    stats: &mut Stats,
+) -> Vec<(InjectionStrategy, Run)> {
+    return input::STRATEGIES
+        .iter()
+        .map(|&strategy| {
+            return (
+                strategy,
+                check_strategy(strategy, document, rng, exhaustive, stats),
+            );
+        })
+        .collect();
 }
 
 fn check_strategy(
@@ -139,24 +138,27 @@ fn wrappings(input: &str) -> Vec<String> {
     ];
 }
 
-/// Real-world shaped documents, each written as the output it must produce.
+/// Real-world shaped documents, each written as the output it must produce under every strategy:
+/// the oracle's exceptions let some mismatches through, the fixtures none.
 #[test]
 fn fixtures() {
     check_fixtures(&harness::fixtures::fixtures(), "fixtures");
 }
 
-/// Runs every check on each of `fixtures`, which must produce its template.
+/// Runs every check on each of `fixtures`, which must produce its expected output under every
+/// strategy.
 fn check_fixtures(fixtures: &[harness::fixtures::Fixture], name: &str) {
     let mut rng = StdRng::seed_from_u64(seed());
     let mut stats = Stats::default();
     for fixture in fixtures {
-        let run = check(&fixture.document(), &mut rng, true, &mut stats);
-        assert_eq!(
-            String::from_utf8_lossy(&run.output),
-            String::from_utf8_lossy(&fixture.template),
-            "{}",
-            fixture.name
-        );
+        for (strategy, run) in check(&fixture.document(), &mut rng, true, &mut stats) {
+            assert_eq!(
+                String::from_utf8_lossy(&run.output),
+                String::from_utf8_lossy(&fixture.expected(strategy)),
+                "{} under {strategy:?}",
+                fixture.name
+            );
+        }
     }
     stats.report(name);
 }
@@ -167,8 +169,8 @@ fn regressions() {
     check_fixtures(&harness::fixtures::regressions(), "regressions");
 }
 
-/// Writes every fixture and regression, one `.html` file each, to the directory `FUZZ_SEEDS_DIR`
-/// names, for the fuzz targets to start from; does nothing without it:
+/// Writes every fixture and regression, one `.html` file for each strategy, to the directory
+/// `FUZZ_SEEDS_DIR` names, for the fuzz targets to start from; does nothing without it:
 ///
 /// ```text
 /// FUZZ_SEEDS_DIR=fuzz/seeds cargo test -p inject-browser-sdk --test injection write_fuzz_seeds
@@ -181,9 +183,13 @@ fn write_fuzz_seeds() {
     fs::create_dir_all(&dir).unwrap();
     let fixtures = harness::fixtures::fixtures();
     let regressions = harness::fixtures::regressions();
+    // Every target spends the first byte of its input on how it runs, and 0 and 1 leave the
+    // document whole under each strategy: one seed for each, the document after it.
     for fixture in fixtures.iter().chain(&regressions) {
-        let path = std::path::Path::new(&dir).join(format!("{}.html", fixture.name));
-        fs::write(path, fixture.document()).unwrap();
+        for selector in [0u8, 1] {
+            let path = std::path::Path::new(&dir).join(format!("{}-{selector}.html", fixture.name));
+            fs::write(path, [[selector].as_slice(), &fixture.document()].concat()).unwrap();
+        }
     }
 }
 
@@ -403,6 +409,16 @@ fn oracle_exceptions() {
     let (ours, expected, exception) = check("<head></head><body><meta charset=utf-8>");
     assert_eq!((ours, expected), (None, Some(6)));
     assert_eq!(exception, Some(Exception::EncodingDeclaration));
+
+    // An empty unquoted attribute value on a raw text element, which lol_html reads past.
+    let (ours, expected, exception) = close("<html><head><script c=><script </script>x</head>");
+    assert_eq!((ours, expected), (Some(40), Some(41)));
+    assert_eq!(exception, Some(Exception::EmptyAttributeValue));
+    // A `</head>` tag longer than the injector holds back.
+    let long = format!("<html><head></head {}>", "a".repeat(1024));
+    let (ours, expected, exception) = close(&long);
+    assert_eq!((ours, expected), (None, Some(12)));
+    assert_eq!(exception, Some(Exception::LongEndTag));
 
     assert_eq!(
         oracle::observe(&[b"<select><xmp><script>x</script></select>"]),

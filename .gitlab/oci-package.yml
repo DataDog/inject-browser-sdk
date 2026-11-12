@@ -33,3 +33,20 @@ requirements_json_test:
 deploy_to_reliability_env:
   rules:
     - when: never
+
+# Only iis-X.Y.Z tag pipelines sign. Never promote an unsigned package.
+.iis_release_promote:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^iis-[0-9]+\.[0-9]+\.[0-9]+$/
+      when: manual
+      allow_failure: true
+    - when: never
+
+promote-oci-to-staging:
+  rules: !reference [.iis_release_promote, rules]
+
+promote-oci-to-prod-beta:
+  rules: !reference [.iis_release_promote, rules]
+
+promote-oci-to-prod:
+  rules: !reference [.iis_release_promote, rules]

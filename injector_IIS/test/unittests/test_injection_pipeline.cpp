@@ -972,6 +972,7 @@ TEST(InjectionPipeline, DisabledRumDoesNothing) {
   EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(_), _, _, _)).Times(0);
   EXPECT_CALL(httpResp, DeleteHeader(Matcher<PCSTR>(_))).Times(0);
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
+  EXPECT_CALL(httpResp, DisableKernelCache(_)).Times(0);
 
   const auto send = [&](const std::vector<std::string>& bodies, BOOL headers, DWORD flags) {
     PreparedChunkedResponse pr;
@@ -1146,6 +1147,8 @@ static void setupStaticFileResponse(ModuleUnderTest& module, const StaticFile& f
 static void serveStaticFile(ModuleUnderTest& module, const StaticFile& file,
                             PreparedChunkedResponse& pr) {
   setupStaticFileResponse(module, file, pr);
+  // An injected file cached by http.sys would keep its snippet past a configuration change.
+  EXPECT_CALL(module.httpResp, DisableKernelCache(_));
   EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
   EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr),
             RQ_NOTIFICATION_FINISH_REQUEST);

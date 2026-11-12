@@ -23,7 +23,7 @@ $ScriptDir = Split-Path $MyInvocation.MyCommand.Path -Parent
 $RepoRoot  = Split-Path (Split-Path $ScriptDir -Parent) -Parent
 
 # Activate xfail markers that account for IIS-specific behaviour
-# (e.g. IIS does not inject into static files served directly from disk)
+# (e.g. IIS hands a large proxied response to the module in several parts)
 [System.Environment]::SetEnvironmentVariable("WEBSERVER-FLAVOR", "iis", "Process")
 
 Write-Host "Running integration tests (upstream server started automatically by conftest.py)..."

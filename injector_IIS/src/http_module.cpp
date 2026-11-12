@@ -803,6 +803,11 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
   assert(ctx.logger != nullptr);
   auto& logger = *ctx.logger;
 
+  // http.sys would serve the response from its cache without the module: with the snippet the
+  // configuration had then, after RUM is turned off, and without a look at the request, which a
+  // downstream injector changes. Whether injected or not, the response is left out of it.
+  pHttpResponse.DisableKernelCache();
+
   // Not const: splice_injection rebuilds its entity chunk list.
   HTTP_RESPONSE* pResponseStruct = pHttpResponse.GetRawHttpResponse();
   if (!pResponseStruct) {

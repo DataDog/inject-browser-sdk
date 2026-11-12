@@ -1154,6 +1154,19 @@ mod tests {
     }
 
     #[test]
+    fn an_equals_sign_starting_an_attribute_name_is_part_of_it() {
+        // The `"` after it is part of the name too: the attributes that follow are attributes.
+        test_injector(
+            "<html><head><meta charset=utf-8><meta /=\"  x http-equiv=X-UA-Compatible content=IE=edge>\"></head>",
+            "<html><head><meta charset=utf-8><meta /=\"  x http-equiv=X-UA-Compatible content=IE=edge>{{SNIPPET}}\"></head>",
+        );
+        test_injector(
+            "<html><head><meta /=\"  charset=utf-8>\"></head>",
+            "<html><head><meta /=\"  charset=utf-8>{{SNIPPET}}\"></head>",
+        );
+    }
+
+    #[test]
     fn a_quote_in_an_end_tag_name_does_not_quote_anything() {
         test_injector(
             "<html><head><template></a=\"b><meta charset=utf-8></template><meta charset=utf-8>\"</head>",

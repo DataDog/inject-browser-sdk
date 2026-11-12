@@ -356,6 +356,11 @@ fn parse_attribute(tag: &[u8], index: usize) -> (&[u8], &[u8], usize) {
         start += 1;
     }
     let mut i = start;
+    // An `=` starting a name is part of it, for the tokenizer and the prescan alike: `/="…` is an
+    // attribute named `="…`, not an empty name with a quoted value.
+    if i < tag.len() && tag[i] == b'=' {
+        i += 1;
+    }
     // A name ends at a `/` too.
     while i < tag.len() && !tag[i].is_ascii_whitespace() && !matches!(tag[i], b'=' | b'>' | b'/') {
         i += 1;

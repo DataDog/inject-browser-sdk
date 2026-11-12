@@ -126,17 +126,19 @@ def _payloads() -> list[Payload]:
         "head in a later part, without HTML evidence",
         '{"data": "' + "x" * 600_000 + '", "html": "<html><head></head></html>"}',
     )
-    add("no head", "<html><body>" + "<p>no head here</p>" * 500 + "</body></html>")
+    # Without a `<head>` tag, the head the browser opens closes at `<body>`: right before it.
+    add("no head", "<html>", "<body>" + "<p>no head here</p>" * 500 + "</body></html>")
     add("fragment", "<div class='x'>" + "<span>fragment</span>" * 200 + "</div>")
     add(
         "json",
         '{"data": "' + "x" * 3000 + '", "html": "<head><meta charset=utf-8></head>"}',
     )
     add("plain text", "Lorem ipsum dolor sit amet.\n" * 200 + "<head></head>\n")
+    # The snippet would push the charset declaration that follows it out of the first kilobyte,
+    # where the browser's prescan reads it: not injected.
     add(
         "charset out of the head",
-        "<html><head>",
-        "</head><body><meta charset='utf-8'>" + "<p>x</p>" * 300 + "</body></html>",
+        "<html><head></head><body><meta charset='utf-8'>" + "<p>x</p>" * 300 + "</body></html>",
     )
     return payloads
 

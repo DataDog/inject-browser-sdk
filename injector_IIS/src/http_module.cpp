@@ -286,20 +286,21 @@ bool read_file_chunk(IHttpContext& http_context, IHttpResponse& http_response,
 // back out, and what is trimmed off the queued chunks in its place.
 //
 // A file chunk, a static file served by IIS, is read into memory as the scan reaches it, a part at
-// a time, up to k_file_read_limit bytes: what the scan does not reach goes out from the file as it
-// would have. A chunk that cannot be read, one IIS streams for instance, ends the scan, and is
+// a time, up to k_file_read_limit bytes, unless `read_files` is off (`injectStaticFiles`): what the
+// scan does not reach goes out from the file as it would have. A chunk that cannot be read, a file
+// chunk with `read_files` off or one IIS streams for instance, ends the scan, and is
 // served as it is past an injection point found before it. And when more of the response
 // follows in later sends (`more_data`), the end of these chunks is not the end of the document:
 // the injector is not ended, so it never injects on the strength of a document cut short.
 std::optional<Injection> write_response(IHttpContext& http_context, IHttpResponse& http_response,
-                                        Injector& injector, HTTP_RESPONSE& response,
-                                        bool more_data) {
+                                        Injector& injector, HTTP_RESPONSE& response, bool more_data,
+                                        bool read_files) {
   uint64_t file_read = 0;
   // Reading a file chunk rewrites the chunk list: the count is read on every turn.
   for (int i = 0; i < response.EntityChunkCount; i++) {
     // Read only while the snippet may still go in.
     if (response.pEntityChunks[i].DataChunkType == HttpDataChunkFromFileHandle &&
-        (!injector_is_pending(&injector) ||
+        (!read_files || !injector_is_pending(&injector) ||
          !read_file_chunk(http_context, http_response, response, i, file_read))) {
       return std::nullopt;
     }
@@ -803,11 +804,6 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
   assert(ctx.logger != nullptr);
   auto& logger = *ctx.logger;
 
-  // http.sys would serve the response from its cache without the module: with the snippet the
-  // configuration had then, after RUM is turned off, and without a look at the request, which a
-  // downstream injector changes. Whether injected or not, the response is left out of it.
-  pHttpResponse.DisableKernelCache();
-
   // Not const: splice_injection rebuilds its entity chunk list.
   HTTP_RESPONSE* pResponseStruct = pHttpResponse.GetRawHttpResponse();
   if (!pResponseStruct) {
@@ -840,8 +836,9 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
   }
 
   bool injected = false;
-  if (const auto injection = write_response(pHttpContext, pHttpResponse, *injector,
-                                            *pResponseStruct, send.more_data)) {
+  if (const auto injection =
+          write_response(pHttpContext, pHttpResponse, *injector, *pResponseStruct, send.more_data,
+                         ctx.inject_static_files)) {
     if (const char* error = apply_injection(pHttpContext, pHttpResponse, *pResponseStruct,
                                             *injection, *injector, send.headers_gone, logger)) {
       logger.error(error);

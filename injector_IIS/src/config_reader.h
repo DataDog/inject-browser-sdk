@@ -24,6 +24,8 @@ struct RumConfig {  // NOLINT(bugprone-exception-escape)
   // Where the snippet is injected. Configures the module rather than the Browser SDK, so it is
   // read as its own attribute instead of going through the `option` collection.
   InjectionStrategy injection_strategy = InjectionStrategy::HeadCloseTag;
+  // Whether static files are read to be injected, the `injectStaticFiles` attribute.
+  bool inject_static_files = true;
 };
 
 enum class ReadConfStatus {

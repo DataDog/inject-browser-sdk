@@ -17,8 +17,9 @@
 #include "mocks.h"
 #include "gtest/gtest.h"
 
-#include <map>
 #include <array>
+#include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -181,6 +182,7 @@ class MockRumConfigElement : public IAppHostElement {
   // Unset by default, so the case every other test exercises really does go through the
   // "attribute missing" path.
   std::optional<MockAppHostProperty> injection_strategy_prop_;
+  std::optional<MockAppHostProperty> inject_static_files_prop_;
   std::vector<MockOptionElement> options_;
   MockElementCollection collection_;
   HRESULT collection_result_ = S_OK;
@@ -215,6 +217,10 @@ class MockRumConfigElement : public IAppHostElement {
     injection_strategy_prop_.emplace(L"injectionStrategy", int_variant(static_cast<int>(strategy)));
   }
 
+  void SetInjectStaticFiles(bool inject) {
+    inject_static_files_prop_.emplace(L"injectStaticFiles", bool_variant(inject));
+  }
+
   HRESULT STDMETHODCALLTYPE get_Name(BSTR*) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE get_Collection(IAppHostElementCollection** ppCol) override {
     if (FAILED(collection_result_)) {
@@ -247,6 +253,10 @@ class MockRumConfigElement : public IAppHostElement {
     }
     if (injection_strategy_prop_ && _wcsicmp(bstrName, L"injectionStrategy") == 0) {
       *ppProperty = &*injection_strategy_prop_;
+      return S_OK;
+    }
+    if (inject_static_files_prop_ && _wcsicmp(bstrName, L"injectStaticFiles") == 0) {
+      *ppProperty = &*inject_static_files_prop_;
       return S_OK;
     }
     *ppProperty = nullptr;
@@ -972,7 +982,6 @@ TEST(InjectionPipeline, DisabledRumDoesNothing) {
   EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(_), _, _, _)).Times(0);
   EXPECT_CALL(httpResp, DeleteHeader(Matcher<PCSTR>(_))).Times(0);
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
-  EXPECT_CALL(httpResp, DisableKernelCache(_)).Times(0);
 
   const auto send = [&](const std::vector<std::string>& bodies, BOOL headers, DWORD flags) {
     PreparedChunkedResponse pr;
@@ -1005,7 +1014,11 @@ class ModuleUnderTest {
   MockHttpResponse httpResp;
   MockMetadataInfo metadata{L"MACHINE/WEBROOT/APPHOST/Default Web Site"};
 
-  ModuleUnderTest() {
+  // `configure` sets the `datadogRum` section up before the module reads it.
+  explicit ModuleUnderTest(const std::function<void(MockRumConfigElement&)>& configure = {}) {
+    if (configure) {
+      configure(rumConfig);
+    }
     EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
     mod = registerModule(mockServer);
     MockAppStartProvider appStart(app);
@@ -1147,8 +1160,6 @@ static void setupStaticFileResponse(ModuleUnderTest& module, const StaticFile& f
 static void serveStaticFile(ModuleUnderTest& module, const StaticFile& file,
                             PreparedChunkedResponse& pr) {
   setupStaticFileResponse(module, file, pr);
-  // An injected file cached by http.sys would keep its snippet past a configuration change.
-  EXPECT_CALL(module.httpResp, DisableKernelCache(_));
   EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
   EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr),
             RQ_NOTIFICATION_FINISH_REQUEST);
@@ -1212,6 +1223,37 @@ TEST(InjectionPipeline, StaticFileNotInjectedIsReadOnlyAsFarAsNeeded) {
   EXPECT_EQ(file.body(pr.raw), file.content());
   ASSERT_EQ(pr.raw.EntityChunkCount, 2);
   EXPECT_EQ(pr.raw.pEntityChunks[1].FromFileHandle.ByteRange.StartingOffset.QuadPart, 16 * 1024);
+}
+
+// With `injectStaticFiles` off, a static file is not read, and goes out from the file untouched.
+// Explicitly on, it is injected as by default.
+TEST(InjectionPipeline, InjectStaticFilesFromConfig) {
+  const std::string html =
+      "<!DOCTYPE html><html><head><title>t</title></head><body>x</body></html>";
+  {
+    SCOPED_TRACE("off");
+    ModuleUnderTest module(
+        [](MockRumConfigElement& config) { config.SetInjectStaticFiles(false); });
+    const StaticFile file(html);
+    PreparedChunkedResponse pr;
+    setupStaticFileResponse(module, file, pr);
+    EXPECT_CALL(module.httpResp, SetHeader(Matcher<PCSTR>(_), _, _, _)).Times(0);
+    EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+    EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr),
+              RQ_NOTIFICATION_FINISH_REQUEST);
+
+    ASSERT_EQ(pr.raw.EntityChunkCount, 1);
+    EXPECT_EQ(pr.raw.pEntityChunks[0].DataChunkType, HttpDataChunkFromFileHandle);
+    EXPECT_EQ(file.body(pr.raw), html);
+  }
+  {
+    SCOPED_TRACE("on");
+    ModuleUnderTest module([](MockRumConfigElement& config) { config.SetInjectStaticFiles(true); });
+    const StaticFile file(html);
+    PreparedChunkedResponse pr;
+    serveStaticFile(module, file, pr);
+    EXPECT_NE(file.body(pr.raw).find("DD_RUM"), std::string::npos);
+  }
 }
 
 // A 206 carries a range of the document, which the snippet would corrupt: it is left alone.

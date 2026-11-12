@@ -21,6 +21,9 @@
       <enum name="headOpenTag"  value="1" />
     </attribute>
 
+    <!-- Whether static files IIS serves from disk are injected, read for it. -->
+    <attribute name="injectStaticFiles" type="bool" defaultValue="true" />
+
     <collection addElement="option" removeElement="remove" clearElement="clear" allowDuplicates="false">
       <attribute name="name" type="string" isUniqueKey="true" required="true" validationType="nonEmptyString" />
       <attribute name="value" type="string" required="true" validationType="nonEmptyString" />

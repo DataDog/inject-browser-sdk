@@ -17,8 +17,9 @@
 #include "mocks.h"
 #include "gtest/gtest.h"
 
-#include <map>
 #include <array>
+#include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -181,6 +182,7 @@ class MockRumConfigElement : public IAppHostElement {
   // Unset by default, so the case every other test exercises really does go through the
   // "attribute missing" path.
   std::optional<MockAppHostProperty> injection_strategy_prop_;
+  std::optional<MockAppHostProperty> inject_static_files_prop_;
   std::vector<MockOptionElement> options_;
   MockElementCollection collection_;
   HRESULT collection_result_ = S_OK;
@@ -215,6 +217,10 @@ class MockRumConfigElement : public IAppHostElement {
     injection_strategy_prop_.emplace(L"injectionStrategy", int_variant(static_cast<int>(strategy)));
   }
 
+  void SetInjectStaticFiles(bool inject) {
+    inject_static_files_prop_.emplace(L"injectStaticFiles", bool_variant(inject));
+  }
+
   HRESULT STDMETHODCALLTYPE get_Name(BSTR*) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE get_Collection(IAppHostElementCollection** ppCol) override {
     if (FAILED(collection_result_)) {
@@ -247,6 +253,10 @@ class MockRumConfigElement : public IAppHostElement {
     }
     if (injection_strategy_prop_ && _wcsicmp(bstrName, L"injectionStrategy") == 0) {
       *ppProperty = &*injection_strategy_prop_;
+      return S_OK;
+    }
+    if (inject_static_files_prop_ && _wcsicmp(bstrName, L"injectStaticFiles") == 0) {
+      *ppProperty = &*inject_static_files_prop_;
       return S_OK;
     }
     *ppProperty = nullptr;
@@ -1004,7 +1014,11 @@ class ModuleUnderTest {
   MockHttpResponse httpResp;
   MockMetadataInfo metadata{L"MACHINE/WEBROOT/APPHOST/Default Web Site"};
 
-  ModuleUnderTest() {
+  // `configure` sets the `datadogRum` section up before the module reads it.
+  explicit ModuleUnderTest(const std::function<void(MockRumConfigElement&)>& configure = {}) {
+    if (configure) {
+      configure(rumConfig);
+    }
     EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
     mod = registerModule(mockServer);
     MockAppStartProvider appStart(app);
@@ -1063,6 +1077,200 @@ TEST(InjectionPipeline, ChunksNotInMemory) {
       EXPECT_TRUE(served.ends_with(head.substr(head.size() - 100))) << served;
     }
   }
+}
+
+// A static file as IIS serves one: a single chunk with the whole file as its range, through a
+// handle opened for overlapped I/O.
+class StaticFile {
+ public:
+  explicit StaticFile(std::string content) : content_(std::move(content)) {
+    wchar_t dir[MAX_PATH];
+    wchar_t path[MAX_PATH];
+    EXPECT_NE(GetTempPathW(MAX_PATH, dir), 0U);
+    EXPECT_NE(GetTempFileNameW(dir, L"rum", 0, path), 0U);
+    path_ = path;
+    HANDLE writer =
+        CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    DWORD written = 0;
+    EXPECT_TRUE(
+        WriteFile(writer, content_.data(), static_cast<DWORD>(content_.size()), &written, nullptr));
+    CloseHandle(writer);
+    handle_ = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                          FILE_FLAG_OVERLAPPED, nullptr);
+    EXPECT_NE(handle_, INVALID_HANDLE_VALUE);
+  }
+  StaticFile(const StaticFile&) = delete;
+  StaticFile& operator=(const StaticFile&) = delete;
+  ~StaticFile() {
+    CloseHandle(handle_);
+    DeleteFileW(path_.c_str());
+  }
+
+  HTTP_DATA_CHUNK chunk() const {
+    HTTP_DATA_CHUNK chunk{};
+    chunk.DataChunkType = HttpDataChunkFromFileHandle;
+    chunk.FromFileHandle.FileHandle = handle_;
+    chunk.FromFileHandle.ByteRange.StartingOffset.QuadPart = 0;
+    chunk.FromFileHandle.ByteRange.Length.QuadPart = HTTP_BYTE_RANGE_TO_EOF;
+    return chunk;
+  }
+
+  // The body IIS would send, the ranges of this file it holds read from it.
+  std::string body(const HTTP_RESPONSE& raw) const {
+    std::string body;
+    for (USHORT i = 0; i < raw.EntityChunkCount; i++) {
+      const auto& chunk = raw.pEntityChunks[i];
+      if (chunk.DataChunkType == HttpDataChunkFromFileHandle) {
+        EXPECT_EQ(chunk.FromFileHandle.FileHandle, handle_);
+        const auto& range = chunk.FromFileHandle.ByteRange;
+        body += content_.substr(range.StartingOffset.QuadPart,
+                                range.Length.QuadPart == HTTP_BYTE_RANGE_TO_EOF
+                                    ? std::string::npos
+                                    : range.Length.QuadPart);
+        continue;
+      }
+      body.append(static_cast<const char*>(chunk.FromMemory.pBuffer),
+                  chunk.FromMemory.BufferLength);
+    }
+    return body;
+  }
+
+  const std::string& content() const { return content_; }
+
+ private:
+  std::string content_;
+  std::wstring path_;
+  HANDLE handle_ = INVALID_HANDLE_VALUE;
+};
+
+// A response serving `file`, with room in IIS's chunk array for every read of it and the splice.
+static void setupStaticFileResponse(ModuleUnderTest& module, const StaticFile& file,
+                                    PreparedChunkedResponse& pr) {
+  setupHtmlResponseMetadata(module.httpCtx, module.httpResp, &module.app, &module.metadata);
+  pr.chunks.assign(16, HTTP_DATA_CHUNK{});
+  pr.chunks[0] = file.chunk();
+  pr.raw = {};
+  pr.raw.EntityChunkCount = 1;
+  pr.raw.pEntityChunks = pr.chunks.data();
+  EXPECT_CALL(module.httpResp, GetRawHttpResponse()).WillRepeatedly(Return(&pr.raw));
+  emulateEntityChunkWrites(module.httpResp, pr.raw, pr.chunks.size());
+}
+
+// Serves `file` through the module, which leaves the response in `pr`.
+static void serveStaticFile(ModuleUnderTest& module, const StaticFile& file,
+                            PreparedChunkedResponse& pr) {
+  setupStaticFileResponse(module, file, pr);
+  EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+  EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr),
+            RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_TRUE(module.httpCtx.AllocationGuardIntact()) << "wrote past the end of request memory";
+}
+
+// A static file is read as the scan reaches it, and only that far: the snippet goes before its
+// `</head>`, the rest of the file still going out from it.
+TEST(InjectionPipeline, StaticFiles) {
+  const std::string body(size_t{100} * 1024, 'x');
+  const std::string inline_script = "<script>" + std::string(size_t{40} * 1024, 'x') + "</script>";
+  struct Case {
+    const char* name;
+    std::string content;
+    // Where the part of the file still served from it starts, or nullopt for none.
+    std::optional<uint64_t> rest_from;
+  };
+  const std::vector<Case> cases = {
+      {"read whole", "<!DOCTYPE html><html><head><title>t</title></head><body>x</body></html>",
+       std::nullopt},
+      {"first read", "<!DOCTYPE html><html><head><title>t</title></head><body>" + body, 16 * 1024},
+      // 16 KiB, as much again, then 32 KiB: the `</head>` is within the first 64 KiB.
+      {"head past the first read",
+       "<!DOCTYPE html><html><head>" + inline_script + "</head><body>" + body, 64 * 1024},
+  };
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    ModuleUnderTest module;
+    const StaticFile file(test_case.content);
+    PreparedChunkedResponse pr;
+    serveStaticFile(module, file, pr);
+
+    const std::string served = file.body(pr.raw);
+    const size_t head_end = file.content().find("</head>");
+    ASSERT_GT(served.size(), file.content().size());
+    const size_t snippet_length = served.size() - file.content().size();
+    EXPECT_EQ(served.substr(0, head_end), file.content().substr(0, head_end));
+    EXPECT_NE(served.substr(head_end, snippet_length).find("DD_RUM"), std::string::npos);
+    EXPECT_EQ(served.substr(head_end + snippet_length), file.content().substr(head_end));
+
+    const auto& last = pr.raw.pEntityChunks[pr.raw.EntityChunkCount - 1];
+    if (test_case.rest_from) {
+      ASSERT_EQ(last.DataChunkType, HttpDataChunkFromFileHandle);
+      EXPECT_EQ(last.FromFileHandle.ByteRange.StartingOffset.QuadPart, *test_case.rest_from);
+      EXPECT_EQ(last.FromFileHandle.ByteRange.Length.QuadPart,
+                file.content().size() - *test_case.rest_from);
+    } else {
+      EXPECT_EQ(last.DataChunkType, HttpDataChunkFromMemory);
+    }
+  }
+}
+
+// A static file the snippet never goes into is read no further than it takes to tell, and served
+// as it is.
+TEST(InjectionPipeline, StaticFileNotInjectedIsReadOnlyAsFarAsNeeded) {
+  ModuleUnderTest module;
+  const StaticFile file("{\"page\": \"" + std::string(size_t{100} * 1024, 'x') + "\"}");
+  PreparedChunkedResponse pr;
+  serveStaticFile(module, file, pr);
+
+  EXPECT_EQ(file.body(pr.raw), file.content());
+  ASSERT_EQ(pr.raw.EntityChunkCount, 2);
+  EXPECT_EQ(pr.raw.pEntityChunks[1].FromFileHandle.ByteRange.StartingOffset.QuadPart, 16 * 1024);
+}
+
+// With `injectStaticFiles` off, a static file is not read, and goes out from the file untouched.
+// Explicitly on, it is injected as by default.
+TEST(InjectionPipeline, InjectStaticFilesFromConfig) {
+  const std::string html =
+      "<!DOCTYPE html><html><head><title>t</title></head><body>x</body></html>";
+  {
+    SCOPED_TRACE("off");
+    ModuleUnderTest module(
+        [](MockRumConfigElement& config) { config.SetInjectStaticFiles(false); });
+    const StaticFile file(html);
+    PreparedChunkedResponse pr;
+    setupStaticFileResponse(module, file, pr);
+    EXPECT_CALL(module.httpResp, SetHeader(Matcher<PCSTR>(_), _, _, _)).Times(0);
+    EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+    EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr),
+              RQ_NOTIFICATION_FINISH_REQUEST);
+
+    ASSERT_EQ(pr.raw.EntityChunkCount, 1);
+    EXPECT_EQ(pr.raw.pEntityChunks[0].DataChunkType, HttpDataChunkFromFileHandle);
+    EXPECT_EQ(file.body(pr.raw), html);
+  }
+  {
+    SCOPED_TRACE("on");
+    ModuleUnderTest module([](MockRumConfigElement& config) { config.SetInjectStaticFiles(true); });
+    const StaticFile file(html);
+    PreparedChunkedResponse pr;
+    serveStaticFile(module, file, pr);
+    EXPECT_NE(file.body(pr.raw).find("DD_RUM"), std::string::npos);
+  }
+}
+
+// A 206 carries a range of the document, which the snippet would corrupt: it is left alone.
+TEST(InjectionPipeline, PartialContentIsNotInjected) {
+  ModuleUnderTest module;
+  const StaticFile file("<!DOCTYPE html><html><head><title>t</title></head><body>x</body></html>");
+  PreparedChunkedResponse pr;
+  setupStaticFileResponse(module, file, pr);
+  EXPECT_CALL(module.httpResp, GetStatus(_, _, _, _, _, _, _, _, _))
+      .WillRepeatedly(DoAll(Invoke([](_Out_ USHORT* pCode, _Out_ USHORT*, PCSTR*, _Out_ USHORT*,
+                                      _Out_ HRESULT*, PCWSTR*, _Out_ DWORD*,
+                                      IAppHostConfigException**, _Out_ BOOL*) { *pCode = 206; }),
+                            Return()));
+  EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
+
+  ASSERT_EQ(pr.raw.EntityChunkCount, 1);
+  EXPECT_EQ(pr.raw.pEntityChunks[0].DataChunkType, HttpDataChunkFromFileHandle);
 }
 
 // IIS refusing a chunk of the rebuilt body has the original one written back: the response is

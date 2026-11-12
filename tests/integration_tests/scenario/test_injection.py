@@ -99,7 +99,6 @@ def __assert_injected_once(page, body, at=None):
         assert earliest <= at <= prefix, f"injected at {earliest}..{prefix}, expected {at}"
 
 
-@pytest.mark.xfail(IIS, reason="IIS serves static file directly")
 @pytest.mark.parametrize("path", ["/index.html", "/large.html"])
 def test_injection_static_html_file(path):
     """

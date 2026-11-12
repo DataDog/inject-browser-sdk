@@ -135,6 +135,28 @@ Enum read_enum_property(IAppHostElement& element, std::wstring_view name, Enum f
   return static_cast<Enum>(raw);
 }
 
+// Reads a `bool`-typed attribute. Returns `fallback` when the attribute is missing or of an
+// unexpected type, as read_enum_property does.
+bool read_bool_property(IAppHostElement& element, std::wstring_view name, bool fallback,
+                        Logger& logger) {
+  auto* property = get_property(element, name);
+  if (property == nullptr) {
+    return fallback;
+  }
+  const auto defer_property = defer([&] { property->Release(); });
+
+  auto value = get_property_value(*property);
+  const auto defer_value = defer([&] { VariantClear(&value); });
+  if (value.vt != VT_BOOL) {
+    if (value.vt != VT_EMPTY) {
+      logger.info(std::format("Unexpected '{}' type (vt={}), using the default",
+                              wstring_to_utf8(std::wstring(name)), value.vt));
+    }
+    return fallback;
+  }
+  return value.boolVal != VARIANT_FALSE;
+}
+
 }  // namespace
 
 std::string wstring_to_utf8(const std::wstring& wstr) {
@@ -254,6 +276,8 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
   auto const injection_strategy =
       read_enum_property(*cfg_root_elem, L"injectionStrategy", InjectionStrategy::HeadCloseTag,
                          static_cast<int>(InjectionStrategy::HeadOpenTag), logger);
+  bool const inject_static_files =
+      read_bool_property(*cfg_root_elem, L"injectStaticFiles", true, logger);
 
   // Iterate on the SDK configuration
   std::unordered_map<std::string, std::string> rum_sdk_opts;
@@ -338,7 +362,8 @@ ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& log
     }
   }
 
-  return ReadConfResult::ok(RumConfig{cfg_version, std::move(rum_sdk_opts), injection_strategy});
+  return ReadConfResult::ok(
+      RumConfig{cfg_version, std::move(rum_sdk_opts), injection_strategy, inject_static_files});
 }
 
 void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR config_path,
@@ -356,6 +381,7 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
     ctx.application_id_tag.clear();
     ctx.remote_config_tag.clear();
     ctx.injection_strategy = InjectionStrategy::HeadCloseTag;
+    ctx.inject_static_files = true;
     return;
   }
 
@@ -397,6 +423,7 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
   // Only updated alongside the snippet: on a failed read the previous setting stays in force, for
   // the same reason the previous snippet does.
   ctx.injection_strategy = config.injection_strategy;
+  ctx.inject_static_files = config.inject_static_files;
 
   ctx.application_id_tag.clear();
   if (const auto appIdIt = config.sdk_options.find("applicationId");

@@ -27,6 +27,9 @@ struct ModuleContext final : public IHttpStoredContext {
   // Where the snippet is injected, resolved from the `datadogRum` section and applied when the
   // injector is created. The default matches `injector_create`'s.
   InjectionStrategy injection_strategy = InjectionStrategy::HeadCloseTag;
+  // Whether a file chunk, a static file IIS serves from disk, is read for the injector to scan, or
+  // ends the scan as a chunk that cannot be read does. From the `injectStaticFiles` attribute.
+  bool inject_static_files = true;
 
   ~ModuleContext() {
     if (snippet != nullptr) {

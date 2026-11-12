@@ -5,7 +5,7 @@ A Native-Code module for IIS 7.0 and above, designed to inject the RUM Browser S
 ## How it works?
 [IIS module](https://learn.microsoft.com/en-us/iis/get-started/introduction-to-iis/iis-modules-overview) that
 intercepts responses and injects the Datadog RUM SDK in the response body for responses that meet all conditions:
-* Response code is `2xx` `4xx` or `5xx`
+* Response code is `2xx` (but `206 Partial Content`) `4xx` or `5xx`
 * HTTP Content-Type header begins with `text/html`
 * HTTP `x-datadog-rum-injected` header is not present
 * Body looks like an HTML document (see below)
@@ -37,6 +37,27 @@ the `datadogRum` section:
 ```
 
 Either way, a response that does not look like an HTML document is served untouched.
+
+Static `.html` files are injected too. IIS serves one from the file rather than from memory, so the
+module reads the start of the file, 16 KiB first, then as much again as it read so far, up to 1 MiB,
+and only while the injection point may still be ahead. The rest of the file is still sent from it.
+The `injectStaticFiles` attribute turns this off, static files then going out untouched:
+
+```xml
+<datadogRum enabled="true" injectStaticFiles="false">
+```
+
+IIS caches static files in http.sys, the kernel cache, which serves them without the module. An
+injected page cached there keeps the snippet it had for as long as it stays cached: after a change to
+the `datadogRum` section, RUM turned off included, until the entry is evicted. Where that matters,
+turn the kernel cache off for the site or the `<location>`, which costs every static file the
+kernel-mode fast path:
+
+```xml
+<system.webServer>
+  <caching enableKernelCache="false" />
+</system.webServer>
+```
 
 ## Build/installation steps
 1. Configure the project

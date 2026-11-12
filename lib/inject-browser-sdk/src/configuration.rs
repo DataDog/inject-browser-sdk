@@ -260,8 +260,14 @@ const DD_FIELDS: &[(&str, Setter)] = &[
         c.rum.version = Some(r.into());
         return Ok(());
     }),
+    // Deprecated alias of DD_RUM_TRACK_USER_INTERACTION. Must stay before it,
+    // so the documented name wins when both are set.
     ("DD_RUM_TRACK_USER_INTERACTIONS", |c, r| {
         c.rum.track_user_interactions = Some(parse_bool(r, "DD_RUM_TRACK_USER_INTERACTIONS")?);
+        return Ok(());
+    }),
+    ("DD_RUM_TRACK_USER_INTERACTION", |c, r| {
+        c.rum.track_user_interactions = Some(parse_bool(r, "DD_RUM_TRACK_USER_INTERACTION")?);
         return Ok(());
     }),
     ("DD_RUM_TRACK_RESOURCES", |c, r| {
@@ -570,6 +576,29 @@ mod test {
     }
 
     #[test]
+    fn configuration_from_lookup_track_user_interaction_alias() {
+        let alias = BTreeMap::from([(
+            String::from("DD_RUM_TRACK_USER_INTERACTIONS"),
+            String::from("true"),
+        )]);
+        let config = Configuration::from_lookup(lookup_from_map(&alias)).unwrap();
+        assert_eq!(config.rum.track_user_interactions, Some(true));
+
+        let both = BTreeMap::from([
+            (
+                String::from("DD_RUM_TRACK_USER_INTERACTION"),
+                String::from("false"),
+            ),
+            (
+                String::from("DD_RUM_TRACK_USER_INTERACTIONS"),
+                String::from("true"),
+            ),
+        ]);
+        let config = Configuration::from_lookup(lookup_from_map(&both)).unwrap();
+        assert_eq!(config.rum.track_user_interactions, Some(false));
+    }
+
+    #[test]
     fn configuration_from_lookup_full() {
         let map = BTreeMap::from([
             (String::from("DD_RUM_APPLICATION_ID"), String::from("app-1")),
@@ -579,7 +608,7 @@ mod test {
             (String::from("DD_RUM_ENVIRONMENT"), String::from("prod")),
             (String::from("DD_RUM_VERSION"), String::from("1.0")),
             (
-                String::from("DD_RUM_TRACK_USER_INTERACTIONS"),
+                String::from("DD_RUM_TRACK_USER_INTERACTION"),
                 String::from("true"),
             ),
             (

@@ -52,10 +52,19 @@ verify_public "$key" "$sha"
 # Never move latest back to an older release (retried or out-of-order tags).
 # The job's resource_group serializes publishers.
 marker="iis/latest/$arch/injector_IIS.version"
+# Without ListBucket, S3 reports a missing marker as 403, just like a denied
+# read. Bootstrap legacy releases with an empty marker using the write access
+# publishing already needs. A conditional put cannot replace an existing
+# version; after it, every read error remains fatal.
+: > "$tmp/unversioned"
+if put "$marker" "$tmp/unversioned" --if-none-match '*' --content-type text/plain 2> "$tmp/err"; then
+  echo "Initialized previously unversioned iis/latest"
+elif ! grep -q PreconditionFailed "$tmp/err"; then
+  cat "$tmp/err" >&2
+  die "could not initialize s3://$bucket/$marker"
+fi
 if aws_ s3 cp --only-show-errors "s3://$bucket/$marker" "$tmp/latest" 2> "$tmp/err"; then
   latest="$(tr -d '\r\n' < "$tmp/latest")"
-elif grep -q -E '\(404\)|NoSuchKey|does not exist' "$tmp/err"; then
-  latest="" # releases before this script did not record their version
 else
   cat "$tmp/err" >&2
   die "could not read s3://$bucket/$marker"

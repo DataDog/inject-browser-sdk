@@ -42,6 +42,7 @@ EOF
 # aws --region R s3api put-object --bucket B --key K --body F [--if-none-match '*'] ...
 # aws --region R s3 cp [--only-show-errors] s3://B/K FILE
 # FAKE_AWS_ERROR makes every call fail like an S3 permission error.
+# Missing objects return 403, matching a publisher without ListBucket.
 cat > "$WORK/bin/aws" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -61,6 +62,11 @@ if [ "$1" = s3api ]; then
       *) shift 2 ;;
     esac
   done
+  if [ "$key" = iis/latest/x64/injector_IIS.version ] && [ -n "${create:-}" ] \
+    && [ -n "${FAKE_AWS_MARKER_INIT_ERROR:-}" ]; then
+    echo "An error occurred ($FAKE_AWS_MARKER_INIT_ERROR) when calling the PutObject operation" >&2
+    exit 254
+  fi
   if [ -n "${create:-}" ] && [ -f "$FAKE/s3/$key" ]; then
     echo "An error occurred (PreconditionFailed) when calling the PutObject operation" >&2
     exit 254
@@ -70,9 +76,14 @@ if [ "$1" = s3api ]; then
   exit
 fi
 src="${*: -2:1}"; dst="${*: -1}"
+if [ "$src" = "s3://$S3_BUCKET/iis/latest/x64/injector_IIS.version" ] \
+  && [ -n "${FAKE_AWS_MARKER_READ_ERROR:-}" ]; then
+  echo "fatal error: An error occurred ($FAKE_AWS_MARKER_READ_ERROR) when calling the HeadObject operation: Forbidden" >&2
+  exit 1
+fi
 src="$FAKE/s3/${src#s3://*/}"
 if [ ! -f "$src" ]; then
-  echo "fatal error: An error occurred (404) when calling the HeadObject operation: Key does not exist" >&2
+  echo "fatal error: An error occurred (403) when calling the HeadObject operation: Forbidden" >&2
   exit 1
 fi
 cp "$src" "$dst"
@@ -197,7 +208,9 @@ check "SHA256SUMS verifies" bash -c "cd '$WORK/dist' && sha256sum -c --quiet SHA
 
 expect_fail "S3 errors fail closed" "could not publish" env FAKE_AWS_ERROR=AccessDenied "$SCRIPTS/publish-s3.sh" "$WORK/dist"
 check "nothing was written on error" test ! -e "$FAKE/s3/iis"
-run "publish to S3" "$SCRIPTS/publish-s3.sh" "$WORK/dist"
+mkdir -p "$FAKE/s3/iis/latest/x64"
+echo "legacy msi without a version marker" > "$FAKE/s3/iis/latest/x64/injector_IIS.msi"
+run "publish over a legacy release without ListBucket access" "$SCRIPTS/publish-s3.sh" "$WORK/dist"
 check "versioned copy" cmp -s "$FAKE/s3/iis/1.3.1/x64/injector_IIS.msi" "$WORK/dist/injector_IIS.msi"
 check "latest copy" cmp -s "$FAKE/s3/iis/latest/x64/injector_IIS.msi" "$WORK/dist/injector_IIS.msi"
 check "latest records its version" grep -qx 1.3.1 "$FAKE/s3/iis/latest/x64/injector_IIS.version"
@@ -211,6 +224,14 @@ cp "$WORK/good.msi" "$FAKE/s3/iis/1.3.1/x64/injector_IIS.msi"
 
 echo 1.4.0 > "$FAKE/s3/iis/latest/x64/injector_IIS.version"
 echo "1.4.0 msi" > "$FAKE/s3/iis/latest/x64/injector_IIS.msi"
+expect_fail "marker initialization permission errors fail closed" "could not initialize" \
+  env FAKE_AWS_MARKER_INIT_ERROR=AccessDenied "$SCRIPTS/publish-s3.sh" "$WORK/dist"
+check "failed initialization preserves the marker" grep -qx 1.4.0 "$FAKE/s3/iis/latest/x64/injector_IIS.version"
+check "failed initialization preserves latest" grep -qx "1.4.0 msi" "$FAKE/s3/iis/latest/x64/injector_IIS.msi"
+expect_fail "a forbidden marker read is never treated as an absent version" "could not read" \
+  env FAKE_AWS_MARKER_READ_ERROR=403 "$SCRIPTS/publish-s3.sh" "$WORK/dist"
+check "a forbidden read preserves the marker" grep -qx 1.4.0 "$FAKE/s3/iis/latest/x64/injector_IIS.version"
+check "a forbidden read preserves latest" grep -qx "1.4.0 msi" "$FAKE/s3/iis/latest/x64/injector_IIS.msi"
 run "an older release does not move latest back" "$SCRIPTS/publish-s3.sh" "$WORK/dist"
 check "latest still holds 1.4.0" grep -qx "1.4.0 msi" "$FAKE/s3/iis/latest/x64/injector_IIS.msi"
 echo 1.3.0 > "$FAKE/s3/iis/latest/x64/injector_IIS.version"

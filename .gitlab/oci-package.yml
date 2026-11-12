@@ -1,8 +1,9 @@
 ---
 # Child pipeline started by injector_IIS_oci (.gitlab/oci.yml).
 include:
-  # TODO: pin a libdatadog-build release once DataDog/libdatadog-build#298 ships.
-  - remote: https://gitlab-templates.ddbuild.io/libdatadog/include-wip/luc/lib-injection-image-toggle/one-pipeline.yml
+  # The libdatadog-build campaign updates this file. It points to the WIP
+  # template of DataDog/libdatadog-build#298 until that PR ships.
+  - local: .gitlab/one-pipeline.locked.yml
 
 variables:
   OCI_PACKAGE_NAME: datadog-apm-library-iis-rum

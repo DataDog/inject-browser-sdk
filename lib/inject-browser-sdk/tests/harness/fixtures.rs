@@ -374,6 +374,19 @@ pub fn regressions() -> Vec<Fixture> {
                 "<html><head><template><template></div></template><meta charset=utf-8></template>{XUA}{MARK}</head>"
             ),
         ),
+        // So does a `</head>` in one: the inner `</template>` closes the inner one, and the outer
+        // one holds the rest of the document, the last `</head>` included. Anything inserted there
+        // would be inert, so nothing is.
+        Fixture::new(
+            "head-end-tag-in-nested-template",
+            format!("<html><head>{OPEN}<template><head><template></head></template>{XUA}</head>"),
+        ),
+        // The text in the outer one is inert, and its own `</template>` closes it: the head closes
+        // with the document.
+        Fixture::new(
+            "head-end-tag-in-nested-template-closed",
+            format!("<html><head>{OPEN}<template><head><template></head></template>x</template>{CLOSE}"),
+        ),
         // An empty unquoted attribute value on a raw text element, which lol_html 3.0 once
         // tokenized wrongly: the element ends at its end tag all the same.
         Fixture::new(
@@ -428,6 +441,14 @@ pub fn regressions() -> Vec<Fixture> {
             format!(
                 "<html><head>{OPEN}<title>t</title></head {}>{XUA}",
                 "a".repeat(1024)
+            ),
+        ),
+        // Its length counts up to its `>`, past any a quoted value holds.
+        Fixture::new(
+            "long-head-end-tag-with-quoted-greater-than",
+            format!(
+                "<html><head>{OPEN}<title>t</title></head a=\"{}\">{XUA}",
+                ">".repeat(1024)
             ),
         ),
         // A no-break space is no whitespace to strip from an `http-equiv` value: this one is no

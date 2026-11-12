@@ -62,6 +62,8 @@ pub struct Observed {
     pub first_head_end: Option<usize>,
     /// Where the end tag of every `<head>` starts, for those that have one.
     pub head_ends: Vec<usize>,
+    /// Every `</head>` end tag, from its `<` to its `>`.
+    pub head_end_tags: Vec<Range<usize>>,
     /// Every start tag directly within a `<head>`.
     pub head_children: Vec<HeadChild>,
     /// Every text node holding more than whitespace, wherever it is.
@@ -185,6 +187,7 @@ impl Observed {
             heads: ranges(self.heads),
             first_head_end: self.first_head_end.map(map),
             head_ends: positions(self.head_ends),
+            head_end_tags: ranges(self.head_end_tags),
             head_children: self
                 .head_children
                 .into_iter()
@@ -235,9 +238,11 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
             let end = heads.clone();
             // A `<head/>` is still a start tag, which can have content.
             let _ = el.on_end_tag(end_tag!(move |tag| {
-                let start = tag.source_location().bytes().start;
+                let location = tag.source_location().bytes();
+                let start = location.start;
                 let mut observed = end.borrow_mut();
                 observed.head_ends.push(start);
+                observed.head_end_tags.push(location);
                 if first {
                     observed.first_head_end = Some(start);
                 }
@@ -881,11 +886,11 @@ pub fn exception(
     oracle: Option<usize>,
 ) -> Option<Exception> {
     let lower = document.to_ascii_lowercase();
-    if let Some(end) = oracle.filter(|&end| return lower[end..].starts_with(b"</head")) {
-        let length = lower[end..].iter().position(|&b| return b == b'>');
-        if length.is_some_and(|length| return length + 1 > MAX_PENDING_END_TAG) {
-            return Some(Exception::LongEndTag);
-        }
+    // As long as lol_html's tokenizer has it, quoted values hiding any `>` they hold.
+    if observed.head_end_tags.iter().any(|tag| {
+        return oracle == Some(tag.start) && tag.len() > MAX_PENDING_END_TAG;
+    }) {
+        return Some(Exception::LongEndTag);
     }
     let last = [ours, oracle].into_iter().flatten().max().unwrap_or(0);
     if empty_attribute_value_on_raw_text(&lower[..last.min(lower.len())]) {
@@ -1026,6 +1031,18 @@ fn head_close_exception(
                 .templates
                 .iter()
                 .any(|&(_, template_end)| return template_end == Some(end)) =>
+        {
+            return Some(Exception::StrayEndTag);
+        }
+        // lol_html closed a template at a `</head>` within it, which the browser, and the
+        // injector, ignore: the template it took the next `</template>` for still holds what
+        // follows, until the one after.
+        (_, Some(end))
+            if observed.templates.iter().any(|&(_, template_end)| {
+                return template_end.is_some_and(|template_end| {
+                    return template_end < end && lower[template_end..].starts_with(b"</head");
+                });
+            }) =>
         {
             return Some(Exception::StrayEndTag);
         }

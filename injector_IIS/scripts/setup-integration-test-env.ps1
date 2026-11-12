@@ -12,9 +12,14 @@
     Idempotent setup script that:
       1. Installs uv (Python package manager) if absent
       2. Installs IIS features, URL Rewrite, and ARR
-      3. Registers the injector: either by installing the MSI (-MsiPath) or by
-         staging the raw DLL (-DllPath)
+      3. Removes any injector a previous run left, whichever way it was
+         registered, then registers this one: either by installing the MSI
+         (-MsiPath) or by staging the raw DLL (-DllPath)
       4. Creates test IIS sites with reverse proxy rules and RUM configuration
+
+    CI runs both modes on the same reused Windows hosts, so neither may assume
+    the host is clean: an MSI install fails on a module registered by hand, and
+    an MSI uninstall fails on a module unregistered by hand.
 
     Run this once per machine (or after rebuilding the DLL/MSI).
     To run the tests use run-integration-tests.ps1.
@@ -170,7 +175,43 @@ function Install-IisPrerequisites {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Register the IIS module (replaces what the MSI does, no installer needed)
+# 3. Remove any injector already on the host, MSI-installed or registered by hand
+# ---------------------------------------------------------------------------
+function Remove-Injector {
+    $appcmd     = "$env:windir\System32\inetsrv\appcmd.exe"
+    $moduleName = "DDRumModule"
+
+    # The MSI's uninstall custom actions (appcmd uninstall module) need IIS
+    # running, and a run that failed after stopping it leaves it stopped.
+    iisreset /start | Out-Null
+    Assert-LastExitCode
+
+    $uninstallPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    $installed = Get-ItemProperty $uninstallPaths -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -like 'Datadog RUM *' }
+    foreach ($product in $installed) {
+        Write-Host "Uninstalling existing Datadog RUM v$($product.DisplayVersion) ..."
+        $unProc = Start-Process msiexec -ArgumentList "/x `"$($product.PSChildName)`" /qn IISRESTART=true" -Wait -PassThru -NoNewWindow
+        if ($unProc.ExitCode -ne 0) {
+            throw "MSI uninstall of Datadog RUM v$($product.DisplayVersion) failed with exit code $($unProc.ExitCode)"
+        }
+        Write-Host "Uninstalled."
+    }
+
+    # Left registered by hand (-DllPath), which no MSI uninstall removes.
+    $existing = & $appcmd list module "/name:$moduleName" 2>&1
+    if ($LASTEXITCODE -eq 0 -and $existing) {
+        Write-Host "Unregistering module '$moduleName' left by a previous run..."
+        & $appcmd uninstall module $moduleName
+        Assert-LastExitCode
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 4. Register the IIS module (replaces what the MSI does, no installer needed)
 # ---------------------------------------------------------------------------
 function Register-IisModule {
     $schemaDir  = "$env:windir\System32\inetsrv\config\schema"
@@ -215,14 +256,7 @@ function Register-IisModule {
 
     $xml.Save($configFile)
 
-    # 3c. Register global module (idempotent: uninstall first if already present)
-    $existing = & $appcmd list module "/name:$moduleName" 2>&1
-    if ($LASTEXITCODE -eq 0 -and $existing) {
-        Write-Host "Module '$moduleName' already registered -- reinstalling with updated path..."
-        & $appcmd uninstall module $moduleName
-        Assert-LastExitCode
-    }
-    # 3d. Copy DLL to a system directory that IIS worker processes can read.
+    # 3c. Copy DLL to a system directory that IIS worker processes can read.
     # ApplicationPoolIdentity accounts cannot access paths under C:\Users\,
     # so we stage the DLL under C:\inetpub where IIS_IUSRS already has access.
     $stageDir = "C:\inetpub\DDRum"
@@ -237,7 +271,7 @@ function Register-IisModule {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Create test IIS sites
+# 5. Create test IIS sites
 # ---------------------------------------------------------------------------
 function Add-RewriteProxyRule {
     param([string]$SiteName)
@@ -335,7 +369,7 @@ function New-TestSites {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Install the module via MSI (alternative to Register-IisModule)
+# 6. Install the module via MSI (alternative to Register-IisModule)
 # ---------------------------------------------------------------------------
 function Install-InjectorMsi {
     Write-Host "Installing MSI: $MsiPath ..."
@@ -356,27 +390,11 @@ function Install-InjectorMsi {
 Ensure-Uv
 Install-IisPrerequisites
 
+Remove-Injector
+
 if ($MsiPath) {
     # MSI mode: the installer handles DLL staging, schema, appcmd, and
     # applicationHost.config section declarations.
-    # Uninstall any existing version BEFORE stopping IIS -- the MSI's uninstall
-    # custom actions (appcmd uninstall module) require IIS to be running.
-    $uninstallPaths = @(
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
-    )
-    $existing = Get-ItemProperty $uninstallPaths -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName -like 'Datadog RUM *' } |
-        Select-Object -First 1
-    if ($existing) {
-        $productCode = $existing.PSChildName
-        Write-Host "Uninstalling existing Datadog RUM v$($existing.DisplayVersion) ..."
-        $unProc = Start-Process msiexec -ArgumentList "/x `"$productCode`" /qn IISRESTART=true" -Wait -PassThru -NoNewWindow
-        if ($unProc.ExitCode -ne 0) {
-            throw "MSI uninstall failed with exit code $($unProc.ExitCode)"
-        }
-        Write-Host "Uninstalled."
-    }
     Write-Host "Stopping IIS before MSI installation..."
     iisreset /stop | Out-Null
     Assert-LastExitCode

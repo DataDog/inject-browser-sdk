@@ -1,0 +1,34 @@
+---
+# Child pipeline started by injector_IIS_oci (.gitlab/oci.yml).
+include:
+  # TODO: pin a libdatadog-build release once DataDog/libdatadog-build#298 ships.
+  - remote: https://gitlab-templates.ddbuild.io/libdatadog/include-wip/luc/lib-injection-image-toggle/one-pipeline.yml
+
+variables:
+  OCI_PACKAGE_NAME: datadog-apm-library-iis-rum
+  OCI_AGENT_REGISTRY_PACKAGE_NAME: apm-library-iis-rum-package
+  AGENT_REPO_PRODUCT_NAME: auto_inject-iis-rum
+  LIB_INJECTION_NAME: dd-lib-iis-rum-init
+  # The lib-init image is built from Linux packages. IIS is Windows only.
+  LIB_INJECTION_IMAGE_ENABLED: "false"
+  # system-tests has no IIS RUM scenario yet.
+  DANGEROUSLY_SKIP_SHARED_PIPELINE_TESTS: "true"
+
+stages:
+  - shared-pipeline-build
+  - shared-pipeline-test
+  - shared-pipeline-publish
+
+package-oci:
+  needs:
+    - pipeline: $PARENT_PIPELINE_ID
+      job: injector_IIS_build
+
+# No requirements.json: the package is not for Linux SSI.
+requirements_json_test:
+  rules:
+    - when: never
+
+deploy_to_reliability_env:
+  rules:
+    - when: never

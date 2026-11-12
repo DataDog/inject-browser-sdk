@@ -1,0 +1,21 @@
+---
+# Publish the IIS injector as an OCI package with libdatadog-build one-pipeline.
+# The shared jobs run in a child pipeline (.gitlab/oci-package.yml), so they
+# only exist when the IIS injector is built.
+injector_IIS_oci:
+  stage: release
+  extends: .IIS_build_when
+  needs:
+    - injector_IIS_build
+    - job: injector_IIS_unit_test
+      artifacts: false
+    - job: injector_IIS_integration_test
+      artifacts: false
+  # Only pass what the child needs; one-pipeline sets its own variables.
+  inherit:
+    variables: false
+  variables:
+    PARENT_PIPELINE_ID: $CI_PIPELINE_ID
+  trigger:
+    include: .gitlab/oci-package.yml
+    strategy: depend

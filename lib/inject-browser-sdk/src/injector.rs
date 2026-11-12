@@ -732,17 +732,19 @@ impl<'snippet> Injector<'snippet> {
             self.injector_state = InjectorState::PassingThrough;
         }
         // Hold back from where the snippet may go, unless that outgrows any valid end tag, or
-        // starts in what a flush handed back already: the snippet cannot go before it anymore.
+        // starts in what a flush handed back already: the snippet cannot go before it anymore,
+        // and nothing is held back, but the search goes on, the tag may turn out to be another.
         let pending = self
             .head_locator
             .pending_point_start()
             .filter(|_| return may_find);
         if let Some(start) = pending.filter(|&start| {
-            return start >= held_start && chunk_start + chunk.len() - start <= MAX_PENDING_END_TAG;
+            return chunk_start + chunk.len() - start <= MAX_PENDING_END_TAG;
         }) {
-            return self.hold_from(start, held_start, chunk_start, chunk);
-        }
-        if pending.is_some() {
+            if start >= held_start {
+                return self.hold_from(start, held_start, chunk_start, chunk);
+            }
+        } else if pending.is_some() {
             self.injector_state = InjectorState::PassingThrough;
         }
         return self.create_result(&[
@@ -2719,13 +2721,23 @@ mod tests {
             assert_eq!(injector.held_back(), 0);
             assert!(!injector.write(b"d>").injected);
 
-            // Should it turn out to be another tag, the search goes on.
-            let mut injector = Injector::new(b"{{SNIPPET}}");
-            injector.write(b"<html><head><meta charset=utf-8></he");
-            injector.flush();
-            injector.write(b"ader>");
-            assert!(injector.is_pending());
-            assert!(injector.write(b"</head>").injected);
+            // Should it turn out to be another tag, the search goes on, however the rest of its
+            // name comes.
+            for rest in [
+                &[&b"ader>"[..]][..],
+                &[b"a", b"der>"],
+                &[b"a", b"d", b"er>"],
+            ] {
+                let mut injector = Injector::new(b"{{SNIPPET}}");
+                injector.write(b"<html><head><meta charset=utf-8></he");
+                injector.flush();
+                for part in rest {
+                    assert!(!injector.write(part).injected);
+                    assert_eq!(injector.held_back(), 0);
+                }
+                assert!(injector.is_pending());
+                assert!(injector.write(b"</head>").injected);
+            }
         }
 
         #[test]

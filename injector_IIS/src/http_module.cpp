@@ -381,6 +381,7 @@ struct Streamed {
   const char* error;  // nullptr, or the response is left as it was
   bool injected;      // the snippet went into this part
   bool pending;       // the injector may still inject into a later part
+  bool ended;         // the injector ended the document, padded as asked if it did not inject
 };
 
 // Rebuilds a part after the first out of what the carried `injector` hands back for it: the bytes
@@ -389,7 +390,9 @@ struct Streamed {
 // part, padded to the announced length (`padded`) if the snippet never went in.
 //
 // A chunk not in memory, which the injector cannot read, ends the scan: what it holds back goes out
-// ahead of that chunk, which goes out as it is with the ones after it.
+// ahead of that chunk, which goes out as it is with the ones after it. The injector is not ended
+// then, even with the document: where the head closes lies in bytes it never read, and the snippet
+// would go after them, out of the head. Padding the response is left to the caller.
 Streamed stream_part(IHttpContext& http_context, IHttpResponse& http_response,
                      HTTP_RESPONSE& response, Injector& injector, bool end, bool padded) {
   std::vector<HTTP_DATA_CHUNK> rebuilt;
@@ -432,23 +435,25 @@ Streamed stream_part(IHttpContext& http_context, IHttpResponse& http_response,
                                          chunk.FromMemory.BufferLength))
                  : append(injector_flush(&injector));
     if (!appended) {
-      return {"Failed to allocate memory for injection", false, false};
+      return {"Failed to allocate memory for injection", false, false, false};
     }
     if (!readable) {
       rebuilt.insert(rebuilt.end(), response.pEntityChunks + i, response.pEntityChunks + count);
     }
   }
-  if (end && !append(padded ? injector_end(&injector) : injector_end_without_padding(&injector))) {
-    return {"Failed to allocate memory for injection", false, false};
+  const bool ended = end && readable;
+  if (ended &&
+      !append(padded ? injector_end(&injector) : injector_end_without_padding(&injector))) {
+    return {"Failed to allocate memory for injection", false, false, false};
   }
   // IIS takes at most 65535 chunks.
   if (rebuilt.size() > (std::numeric_limits<USHORT>::max)()) {
-    return {"Response has too many entity chunks to rewrite for injection", false, false};
+    return {"Response has too many entity chunks to rewrite for injection", false, false, false};
   }
   if (!rewrite_body(http_response, response, std::move(rebuilt))) {
-    return {"IIS refused an entity chunk, skipping injection", false, false};
+    return {"IIS refused an entity chunk, skipping injection", false, false, false};
   }
-  return {nullptr, injected, readable && !end && injector_is_pending(&injector)};
+  return {nullptr, injected, readable && !end && injector_is_pending(&injector), ended};
 }
 
 // Counts an injection that succeeded or failed, for telemetry.
@@ -815,7 +820,7 @@ HttpModule::ContinueInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRe
       // What the injector held back from earlier parts is lost with it: a failed allocation or
       // write, after which the response is unlikely to go out whole anyway.
       log_error(streamed.error);
-    } else if (streamed.injected || !more_data) {
+    } else if (streamed.injected || streamed.ended) {
       // In, or padded by the end of the document in its place.
       state->padded = false;
     }

@@ -1331,6 +1331,33 @@ TEST(InjectionPipeline, CarriedInjectionPadsTheLastPart) {
   }
 }
 
+// A last part the injector cannot read all of, a file chunk in it: the head may close in bytes it
+// never read, so the document is not ended on what it did read, which would put the snippet after
+// the file, out of the head. The response is padded to the length it announced instead.
+TEST(InjectionPipeline, UnreadableLastPartIsNotInjectedAtItsEnd) {
+  for (const bool announced : {true, false}) {
+    SCOPED_TRACE(announced ? "with a Content-Length" : "chunked");
+    PartedResponse response;
+    response.strategy = InjectionStrategy::HeadCloseTag;
+    if (announced) {
+      response.content_length = "100000";
+    }
+    response.start();
+    EXPECT_CALL(response.httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+        .Times(0);
+
+    const std::string head =
+        "<html><head><meta charset=utf-8><script>" + std::string(3000, 'x') + "</script>";
+    const Part first{head, TRUE, true};
+    const Part last{"<title>t</title>", FALSE, false, true};
+
+    EXPECT_EQ(response.send(first), head);
+    const std::string padding = announced ? std::string(response.snippet_length(), ' ') : "";
+    EXPECT_EQ(response.send(last), last.body + "[file]" + padding);
+    response.stop();
+  }
+}
+
 // The headers flushed alone before the body: the first send with a body carries the injector over
 // like any first part, and a `<head>` in a later one is injected after, all without touching the
 // headers that are gone. Chunked: a length they announced would have ruled the injection out.

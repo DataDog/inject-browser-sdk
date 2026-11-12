@@ -40,6 +40,9 @@ class Payload:
     # Whether the response says it was injected. One injected in a later part cannot: its
     # headers went out with the first part.
     announces_injection: bool = True
+    # Never injected, but carried past the first part: a response announcing its length counted
+    # the snippet in it already, and is padded with spaces to it.
+    padded: bool = False
 
 
 LARGE = Payload(
@@ -55,6 +58,9 @@ LARGE = Payload(
 
 def _payloads() -> list[Payload]:
     payloads = []
+
+    def add_padded(name, body):
+        payloads.append(Payload(name, body.encode(), None, padded=True))
 
     def add(name, before, after=None, announces_injection=True):
         """`before` then `after` is the document; the snippet goes between them, unless `after`
@@ -127,6 +133,17 @@ def _payloads() -> list[Payload]:
         '{"data": "' + "x" * 600_000 + '", "html": "<html><head></head></html>"}',
     )
     # Without a `<head>` tag, the head the browser opens closes at `<body>`: right before it.
+    # The default strategy carries the injector past the first part while the head is open: the
+    # head closes at `<body>` in a later one...
+    style = "<style>" + ".rule { color: red; }\n" * 15_000
+    add(
+        "head closed by <body> in a later part",
+        "<html><head>" + style + "</style>",
+        "<body>hi</body></html>",
+        announces_injection=False,
+    )
+    # ...or never, the document ending within the `<style>`.
+    add_padded("head open until the end, in several parts", "<html><head>" + style)
     add("no head", "<html>", "<body>" + "<p>no head here</p>" * 500 + "</body></html>")
     add("fragment", "<div class='x'>" + "<span>fragment</span>" * 200 + "</div>")
     add(
@@ -188,6 +205,23 @@ def _check(payload: Payload, response: requests.Response) -> Optional[str]:
     body = response.content
     injected = response.headers.get("x-datadog-rum-injected") == "1"
 
+    content_length = response.headers.get("content-length")
+    if payload.padded:
+        padding = body[len(payload.body) :]
+        if injected or not body.startswith(payload.body) or padding.strip(b" "):
+            return (
+                f"expected the body padded with spaces, got injected={injected}, "
+                f"{len(body)} bytes"
+            )
+        if content_length is None and padding:
+            return f"padded with {len(padding)} spaces without an announced length"
+        if content_length is not None and (not padding or int(content_length) != len(body)):
+            return (
+                f"content-length {content_length} for a {len(body)} byte body, "
+                f"{len(padding)} padded"
+            )
+        return None
+
     if payload.injected_at is None:
         if injected or body != payload.body:
             return f"expected untouched body, got injected={injected}, {len(body)} bytes"
@@ -202,7 +236,6 @@ def _check(payload: Payload, response: requests.Response) -> Optional[str]:
     snippet = body[len(before) : len(body) - len(after)]
     if b"datadog-rum" not in snippet:
         return "inserted bytes are not the snippet"
-    content_length = response.headers.get("content-length")
     if content_length is not None and int(content_length) != len(body):
         return f"content-length {content_length} for a {len(body)} byte body"
     return None

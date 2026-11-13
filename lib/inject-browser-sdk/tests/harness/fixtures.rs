@@ -2,7 +2,7 @@
 // under the Apache 2.0 License. This product includes software developed at
 // Datadog (https://www.datadoghq.com/).
 //
-// Copyright 2024-Present Datadog, Inc.
+// Copyright 2025-Present Datadog, Inc.
 
 //! Real-world shaped documents, each written as the output it must produce under every strategy:
 //! [`MARK`] marks where the snippet goes under both, [`OPEN`] and [`CLOSE`] where it goes under one

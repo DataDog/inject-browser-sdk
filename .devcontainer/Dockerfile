@@ -2,7 +2,7 @@
 # under the Apache 2.0 License. This product includes software developed at
 # Datadog (https://www.datadoghq.com/).
 #
-# Copyright 2024-Present Datadog, Inc.
+# Copyright 2025-Present Datadog, Inc.
 
 FROM registry.ddbuild.io/images/base/gbi-ubuntu_2404:release@sha256:dbefeb23e617b836dd872f7f470c44cb2909dccbffa790e14a4e469305275424 AS gbi
 USER root

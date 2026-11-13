@@ -2,7 +2,7 @@
 // under the Apache 2.0 License. This product includes software developed at
 // Datadog (https://www.datadoghq.com/).
 //
-// Copyright 2024-Present Datadog, Inc.
+// Copyright 2025-Present Datadog, Inc.
 
 //! Runs a document through the injector the way lol_html's own harness runs its cases: as a single
 //! chunk, then split into chunks, and checks every run against the single one and against the

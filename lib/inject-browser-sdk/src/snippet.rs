@@ -47,7 +47,8 @@ window.DD_RUM.onReady(function() {
     let json_string =
         serde_json::to_string(&rum_value).map_err(|e| return Error::Json(e.to_string()))?;
     for ch in json_string.chars() {
-        if ch.is_ascii() {
+        // Escape <, > and & so a value cannot close the script tag.
+        if ch.is_ascii() && !matches!(ch, '<' | '>' | '&') {
             let mut buf = [0; 4];
             output.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
         } else {
@@ -190,6 +191,39 @@ window.DD_RUM.onReady(function() {
                     major_version: 5,
                     rum: RumConfiguration {
                         application_id: Some(String::from("☺ € é")),
+                        client_token: Some(String::from("foo")),
+                        site: Some(String::from("datadoghq.com")),
+                        ..Default::default()
+                    },
+                })
+                .unwrap()
+            )
+            .unwrap(),
+            expected_snippet
+        )
+    }
+
+    #[test]
+    fn html_sensitive_values() {
+        let expected_snippet = r#"
+<script>
+(function(h,o,u,n,d) {
+  h=h[d]=h[d]||{q:[],onReady:function(c){h.q.push(c)}}
+  d=o.createElement(u);d.async=1;d.src=n
+  n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
+})(window,document,'script','https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js','DD_RUM')
+window.DD_RUM.onReady(function() {
+  window.DD_RUM.init({"applicationId":"\u003c/script\u003e\u003c!--\u0026\u003e","clientToken":"foo","site":"datadoghq.com"});
+});
+</script>
+"#;
+
+        assert_eq!(
+            core::str::from_utf8(
+                &generate_snippet(&Configuration {
+                    major_version: 5,
+                    rum: RumConfiguration {
+                        application_id: Some(String::from("</script><!--&>")),
                         client_token: Some(String::from("foo")),
                         site: Some(String::from("datadoghq.com")),
                         ..Default::default()

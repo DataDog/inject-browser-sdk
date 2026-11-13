@@ -2,7 +2,7 @@
 // under the Apache 2.0 License. This product includes software developed at
 // Datadog (https://www.datadoghq.com/).
 //
-// Copyright 2024-Present Datadog, Inc.
+// Copyright 2025-Present Datadog, Inc.
 
 //! Whether a `<meta>` tag is one the snippet has to stay behind: a declaration of the character
 //! encoding of the document, which injecting before could push out of the window the browser

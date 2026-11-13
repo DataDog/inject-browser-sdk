@@ -2,7 +2,7 @@
 # under the Apache 2.0 License. This product includes software developed at
 # Datadog (https://www.datadoghq.com/).
 #
-# Copyright 2024-Present Datadog, Inc.
+# Copyright 2025-Present Datadog, Inc.
 
 FROM registry.ddbuild.io/images/base/gbi-ubuntu_2404:release@sha256:dbefeb23e617b836dd872f7f470c44cb2909dccbffa790e14a4e469305275424 AS gbi
 USER root
@@ -24,7 +24,7 @@ RUN set -eux; \
 
 FROM gbi AS xwin-install
 
-ARG XWIN_VERSION=0.6.5
+ARG XWIN_VERSION=0.10.0
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.3@sha256:90bbb3c16635e9627f49eec6539f956d70746c409209041800a0280b93152823 /uv /usr/local/bin/uv
 COPY --from=repo scripts/install-xwin-toolchain.py /tmp/install-xwin-toolchain.py

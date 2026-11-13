@@ -2,7 +2,7 @@
 // under the Apache 2.0 License. This product includes software developed at
 // Datadog (https://www.datadoghq.com/).
 //
-// Copyright 2024-Present Datadog, Inc.
+// Copyright 2025-Present Datadog, Inc.
 
 //! Corpus tests of the injector, after lol_html's own (cloudflare/lol-html `tests/`): every
 //! document runs as a single chunk and as random chunkings, each run checked against the single

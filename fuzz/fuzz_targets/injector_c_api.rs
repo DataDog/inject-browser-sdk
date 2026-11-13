@@ -3,7 +3,7 @@
 // under the Apache 2.0 License. This product includes software developed at
 // Datadog (https://www.datadoghq.com/).
 //
-// Copyright 2024-Present Datadog, Inc.
+// Copyright 2025-Present Datadog, Inc.
 
 //! Drives the injector through the C API, as lol_html's `fuzz_c_api` does for its own: whatever
 //! the document and its chunking, every byte comes out once, plus the snippet or the padding, and

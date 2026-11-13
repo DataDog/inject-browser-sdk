@@ -24,7 +24,7 @@ RUN set -eux; \
 
 FROM gbi AS xwin-install
 
-ARG XWIN_VERSION=0.6.5
+ARG XWIN_VERSION=0.10.0
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.3@sha256:90bbb3c16635e9627f49eec6539f956d70746c409209041800a0280b93152823 /uv /usr/local/bin/uv
 COPY --from=repo scripts/install-xwin-toolchain.py /tmp/install-xwin-toolchain.py

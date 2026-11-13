@@ -23,7 +23,7 @@ import shutil
 import hashlib
 from pathlib import Path
 
-XWIN_VERSION = "0.6.5"
+XWIN_VERSION = "0.10.0"
 
 
 def download_file(url: str, destination: Path) -> Path:

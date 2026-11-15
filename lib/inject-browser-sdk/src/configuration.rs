@@ -28,7 +28,7 @@ pub struct Configuration {
 /// into it on deserialization and flattened back into the generated
 /// `DD_RUM.init({...})` JSON on serialization, so new Browser SDK init
 /// options pass through without a code change here.
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 #[allow(missing_docs)]
@@ -83,7 +83,7 @@ pub struct RumConfiguration {
 ///   overlay. This is the forward-compat path for new Browser SDK init
 ///   options; the trade-off is that typos inside `rum` are silently passed
 ///   through rather than rejected.
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 #[allow(missing_docs)]
@@ -106,7 +106,9 @@ impl ConfigurationOverlay {
             "DD_RUM_SERVICE" => self.rum.service.is_some(),
             "DD_RUM_ENVIRONMENT" => self.rum.env.is_some(),
             "DD_RUM_VERSION" => self.rum.version.is_some(),
-            "DD_RUM_TRACK_USER_INTERACTIONS" => self.rum.track_user_interactions.is_some(),
+            "DD_RUM_TRACK_USER_INTERACTIONS" | "DD_RUM_TRACK_USER_INTERACTION" => {
+                self.rum.track_user_interactions.is_some()
+            }
             "DD_RUM_TRACK_RESOURCES" => self.rum.track_resources.is_some(),
             "DD_RUM_TRACK_LONG_TASKS" => self.rum.track_long_tasks.is_some(),
             "DD_RUM_DEFAULT_PRIVACY_LEVEL" => self.rum.default_privacy_level.is_some(),
@@ -115,6 +117,76 @@ impl ConfigurationOverlay {
             "DD_RUM_REMOTE_CONFIGURATION_ID" => self.rum.remote_configuration_id.is_some(),
             _ => false,
         };
+    }
+}
+
+/// Browser SDK options whose text form is a comma-separated list.
+const LIST_OPTIONS: &[&str] = &["allowedTracingUrls"];
+
+impl ConfigurationOverlay {
+    /// Set one setting by name, with the same reach as the JSON overlay:
+    /// `enabled` and `majorVersion` are top-level, every other name is a
+    /// Browser SDK init option, typed when known and passed through otherwise.
+    /// A value of the wrong type for a known name is rejected and leaves the
+    /// overlay unchanged.
+    pub fn set(&mut self, name: &str, value: Value) -> Result<(), Error> {
+        let mut entry = serde_json::Map::new();
+        entry.insert(String::from(name), value);
+        let entry = Value::Object(entry);
+        let partial = if name == "enabled" || name == "majorVersion" {
+            entry
+        } else {
+            serde_json::json!({ "rum": entry })
+        };
+        let partial: ConfigurationOverlay = serde_json::from_value(partial)
+            .map_err(|e| return Error::Json(format!("setting '{name}': {e}")))?;
+        overlay_field(&mut self.major_version, partial.major_version);
+        overlay_field(&mut self.enabled, partial.enabled);
+        self.rum.merge(partial.rum);
+        return Ok(());
+    }
+
+    /// Set a setting from its text form, as configuration files hold it: the
+    /// text is read as whatever type `name` takes (string, boolean or number),
+    /// and list options are split on commas.
+    pub fn set_text(&mut self, name: &str, text: &str) -> Result<(), Error> {
+        if LIST_OPTIONS.contains(&name) {
+            let items: alloc::vec::Vec<Value> = text
+                .split(',')
+                .map(str::trim)
+                .filter(|item| return !item.is_empty())
+                .map(Value::from)
+                .collect();
+            if items.is_empty() {
+                return Err(Error::Json(format!("setting '{name}': empty list")));
+            }
+            return self.set(name, Value::Array(items));
+        }
+        let typed = [
+            Some(Value::from(text)),
+            parse_bool(text, name).ok().map(Value::from),
+            text.parse::<u64>().ok().map(Value::from),
+            parse_f64(text, name).ok().map(Value::from),
+        ];
+        for value in typed.into_iter().flatten() {
+            if self.set(name, value).is_ok() {
+                return Ok(());
+            }
+        }
+        return Err(Error::Json(format!(
+            "setting '{name}': invalid value '{text}'"
+        )));
+    }
+
+    /// Append to a list option, creating it when absent.
+    pub fn append(&mut self, name: &str, value: Value) -> Result<(), Error> {
+        let mut items = match self.rum.other.get(name) {
+            Some(Value::Array(items)) => items.clone(),
+            Some(_) => return Err(Error::Json(format!("setting '{name}' is not a list"))),
+            None => alloc::vec::Vec::new(),
+        };
+        items.push(value);
+        return self.set(name, Value::Array(items));
     }
 }
 
@@ -284,8 +356,14 @@ const DD_FIELDS: &[(&str, Setter)] = &[
         c.rum.version = Some(r.into());
         return Ok(());
     }),
+    // Deprecated alias of DD_RUM_TRACK_USER_INTERACTION. Must stay before it,
+    // so the documented name wins when both are set.
     ("DD_RUM_TRACK_USER_INTERACTIONS", |c, r| {
         c.rum.track_user_interactions = Some(parse_bool(r, "DD_RUM_TRACK_USER_INTERACTIONS")?);
+        return Ok(());
+    }),
+    ("DD_RUM_TRACK_USER_INTERACTION", |c, r| {
+        c.rum.track_user_interactions = Some(parse_bool(r, "DD_RUM_TRACK_USER_INTERACTION")?);
         return Ok(());
     }),
     ("DD_RUM_TRACK_RESOURCES", |c, r| {
@@ -319,8 +397,9 @@ const DD_FIELDS: &[(&str, Setter)] = &[
 ];
 
 /// Whether a stable-configuration key is consumed by the RUM configuration
-/// path. `DD_RUM_ENABLED` is resolved by [`crate::stable_config::StableConfig`]
-/// rather than [`Configuration::from_lookup`].
+/// path. `DD_RUM_ENABLED` is resolved by the stable-configuration reader
+/// rather than by [`Configuration::from_lookup`].
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub(crate) fn is_rum_configuration_key(name: &str) -> bool {
     return name == "DD_RUM_ENABLED"
         || DD_FIELDS
@@ -593,6 +672,29 @@ mod test {
     }
 
     #[test]
+    fn configuration_from_lookup_track_user_interaction_alias() {
+        let alias = BTreeMap::from([(
+            String::from("DD_RUM_TRACK_USER_INTERACTIONS"),
+            String::from("true"),
+        )]);
+        let config = Configuration::from_lookup(lookup_from_map(&alias)).unwrap();
+        assert_eq!(config.rum.track_user_interactions, Some(true));
+
+        let both = BTreeMap::from([
+            (
+                String::from("DD_RUM_TRACK_USER_INTERACTION"),
+                String::from("false"),
+            ),
+            (
+                String::from("DD_RUM_TRACK_USER_INTERACTIONS"),
+                String::from("true"),
+            ),
+        ]);
+        let config = Configuration::from_lookup(lookup_from_map(&both)).unwrap();
+        assert_eq!(config.rum.track_user_interactions, Some(false));
+    }
+
+    #[test]
     fn configuration_from_lookup_full() {
         let map = BTreeMap::from([
             (String::from("DD_RUM_APPLICATION_ID"), String::from("app-1")),
@@ -602,7 +704,7 @@ mod test {
             (String::from("DD_RUM_ENVIRONMENT"), String::from("prod")),
             (String::from("DD_RUM_VERSION"), String::from("1.0")),
             (
-                String::from("DD_RUM_TRACK_USER_INTERACTIONS"),
+                String::from("DD_RUM_TRACK_USER_INTERACTION"),
                 String::from("true"),
             ),
             (

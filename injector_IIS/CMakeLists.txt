@@ -7,19 +7,7 @@
 
 cmake_minimum_required(VERSION 3.24)
 
-# IIS injector version from its own VERSION file (independent of Cargo.toml)
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" _IIS_VERSION_RAW)
-string(STRIP "${_IIS_VERSION_RAW}" _IIS_VERSION_RAW)
-if(_IIS_VERSION_RAW MATCHES "([0-9]+)\\.([0-9]+)\\.([0-9]+)(-(.+))?")
-  set(IIS_INJECTOR_VERSION_MAJ   "${CMAKE_MATCH_1}")
-  set(IIS_INJECTOR_VERSION_MIN   "${CMAKE_MATCH_2}")
-  set(IIS_INJECTOR_VERSION_PATCH "${CMAKE_MATCH_3}")
-  set(IIS_INJECTOR_VERSION_PRE   "${CMAKE_MATCH_5}")
-  set(IIS_INJECTOR_VERSION       "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
-else()
-  message(FATAL_ERROR "Could not parse version from injector_IIS/VERSION: '${_IIS_VERSION_RAW}'")
-endif()
-unset(_IIS_VERSION_RAW)
+include(cmake/version.cmake)
 
 project(iis-injector LANGUAGES CXX VERSION ${IIS_INJECTOR_VERSION})
 
@@ -75,21 +63,6 @@ FetchContent_Declare(
 # Set any global configuration variables such as `Rust_TOOLCHAIN` before this line!
 FetchContent_MakeAvailable(Corrosion)
 
-# rapidjson
-FetchContent_Declare(
-  rapidjson
-  GIT_REPOSITORY https://github.com/Tencent/rapidjson.git
-  GIT_TAG        ab1842a2dae061284c0a62dca1cc6d5e7e37e346
-)
-
-FetchContent_GetProperties(rapidjson)
-if(NOT rapidjson_POPULATED)
-  FetchContent_Populate(rapidjson)
-endif()
-
-add_library(rapidjson INTERFACE)
-target_include_directories(rapidjson SYSTEM INTERFACE ${rapidjson_SOURCE_DIR}/include)
-
 ## dd-trace-cpp
 set(DD_TRACE_STATIC_CRT ON)
 FetchContent_Declare(
@@ -102,10 +75,20 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(dd-trace-cpp)
 
+# The worker links the no_std + alloc build: no Rust runtime, no std I/O.
 corrosion_import_crate(
   MANIFEST_PATH ${CMAKE_SOURCE_DIR}/../Cargo.toml
+  CRATES inject-browser-sdk-ffi
   CRATE_TYPES staticlib
+  NO_DEFAULT_FEATURES
+  FEATURES support_gov_domain
 )
+
+add_custom_target(inject_browser_sdk_ffi_no_std_check
+  COMMAND ${CMAKE_COMMAND} -DLIB=$<TARGET_FILE:inject_browser_sdk_ffi-static>
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_no_std.cmake
+  DEPENDS cargo-build_inject_browser_sdk_ffi
+  VERBATIM)
 
 corrosion_experimental_cbindgen(
   TARGET inject_browser_sdk_ffi
@@ -166,7 +149,7 @@ target_compile_options(iis_injector-objects
     /D_WIN32_WINNT=${win_ver}
     /DMAJ_VER=${IIS_INJECTOR_VERSION_MAJ}
     /DMIN_VER=${IIS_INJECTOR_VERSION_MIN}
-    /DPATCH_VER=${IIS_INJECTOR_VERSION_PATCH}
+    /DBUILD_VER=${IIS_INJECTOR_VERSION_BUILD}
     /DVERSION_PRE="${IIS_INJECTOR_VERSION_PRE}"
 )
 
@@ -189,12 +172,11 @@ endif ()
 
 target_link_libraries(iis_injector-objects
   PUBLIC
-  inject_browser_sdk_ffi dd-trace-cpp::static rapidjson
-  advapi32.lib
-  shlwapi.lib
+  inject_browser_sdk_ffi dd-trace-cpp::static
   ws2_32.lib
-  xmllite.lib
   oleaut32.lib)
+
+add_dependencies(iis_injector-objects inject_browser_sdk_ffi_no_std_check)
 
 ## shared lib
 add_library(iis_injector SHARED)
@@ -203,7 +185,8 @@ target_link_libraries(iis_injector iis_injector-objects)
 ## Tests
 FetchContent_Declare(
   googletest
-  URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip
+  URL https://github.com/google/googletest/archive/refs/tags/v1.18.0.zip
+  URL_HASH SHA256=63b9c77751a5b8f492486005f67533fdc58682b67476fcb91650be5958d5195a
 )
 
 set(gtest_force_shared_crt OFF CACHE BOOL "" FORCE)

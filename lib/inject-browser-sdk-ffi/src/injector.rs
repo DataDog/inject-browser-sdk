@@ -24,33 +24,38 @@ pub struct Injector {
     slices_memory_storage: [BytesSlice; 4],
 }
 
-/// Where the snippet should be injected within the HTML document, see
-/// [`injector_create_with_strategy`].
-///
-/// The trade-off is between how early the snippet runs and how much of the response has to be held
-/// back to decide where it goes. The earlier the snippet runs, the more of the page lifecycle RUM
-/// observes, but injecting early means proving that no character encoding declaration follows, which
-/// cannot be done without buffering.
+/// Where the snippet goes within the `<head>` of an HTML document, see [`injector_create_with_strategy`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InjectionStrategy {
-    /// Inject right before the `</head>` tag.
+    /// Right before the `</head>` end tag, what [`injector_create`] uses, or right before where the
+    /// browser closes the head without one: body content (`<body>`, `<div>`, an `<img>`…), text
+    /// outside tags (whitespace and a leading byte order mark aside), a `</body>`, `</html>` or
+    /// `</br>` end tag, or the end of the document.
     ///
-    /// Never holds back more than a partially matched tag, at the cost of the snippet running as
-    /// late as possible within the head. This is what [`injector_create`] uses.
+    /// Only the first real `</head>` counts (not one written in a comment, an attribute value, a
+    /// script or a style), and only in a document that looks like HTML: an `<html>`, `<meta>` or
+    /// `<head>` start tag or a `<!DOCTYPE html>` within its first 10 KiB, comments, doctypes and
+    /// whitespace not counted, or the `</head>` tag itself. Where the head closes without one, a
+    /// doctype, an `<html>`, `<head>` or `<body>` tag has to come first; past an error printed
+    /// ahead of the document, the snippet goes before its `<html>` or `<body>` tag. Never in an AMP
+    /// document. Holds back a tag a write cuts short while it may be where the snippet goes, and,
+    /// for a point within the first 1024 bytes with no encoding declaration before it, the bytes
+    /// from the point until those are complete, a declaration that follows declining injection.
     HeadCloseTag = 0,
 
-    /// Inject at the earliest valid position within the `<head>` tag: right after the open tag, or
-    /// right after a `<meta charset>` / `<meta http-equiv>` declaration. Does not inject at all if
-    /// there is no such position within the first 1024 bytes of the document.
+    /// As early as possible within the head: right after the `<head>` start tag when it is within
+    /// the first 1024 bytes, unless the head holds `<meta>` tags declaring the character encoding,
+    /// `X-UA-Compatible` or a `Content-Security-Policy`: then right after the last of them. Other
+    /// `<meta>` tags, SEO, viewport or the tracer's, do not hold the snippet back. Past those bytes,
+    /// right after a `<head>` tag if the document looks like HTML, as `HeadCloseTag` tells it.
+    /// Without a `<head>` tag, where `HeadCloseTag` says the head closes. A `<head>` tag past body
+    /// content does not count: the browser ignores it.
     ///
-    /// Holds back up to 1024 bytes, which delays the start of the response body by that much.
+    /// Holds the first 1024 bytes back until they are complete (see [`injector_held_back_length`]),
+    /// which delays the start of the response body by as much, and more, up to 10 KiB, while the
+    /// head is still a run of `<meta>` and `<title>` tags past them.
     HeadOpenTag = 1,
-
-    /// Like [`InjectionStrategy::HeadOpenTag`], but falls back to
-    /// [`InjectionStrategy::HeadCloseTag`] instead of giving up when the first 1024 bytes hold no
-    /// valid injection point.
-    HeadOpenTagWithCloseTagFallback = 2,
 }
 
 impl From<InjectionStrategy> for injector::InjectionStrategy {
@@ -58,17 +63,13 @@ impl From<InjectionStrategy> for injector::InjectionStrategy {
         return match strategy {
             InjectionStrategy::HeadCloseTag => injector::InjectionStrategy::HeadCloseTag,
             InjectionStrategy::HeadOpenTag => injector::InjectionStrategy::HeadOpenTag,
-            InjectionStrategy::HeadOpenTagWithCloseTagFallback => {
-                injector::InjectionStrategy::HeadOpenTagWithCloseTagFallback
-            }
         };
     }
 }
 
-/// Create an [`Injector`] injector based on a [`Snippet`], injecting before the `</head>` tag.
-///
-/// Equivalent to calling [`injector_create_with_strategy`] with
-/// [`InjectionStrategy::HeadCloseTag`].
+/// Create an [`Injector`] injector based on a [`Snippet`], injecting right before the `</head>`
+/// tag: [`injector_create_with_strategy`] with [`InjectionStrategy::HeadCloseTag`]. Where no
+/// injection point is found, [`injector_end`] pads the response instead.
 ///
 /// Returns `NULL` when `snippet` is `NULL` or when `snippet->error_code != 0`
 /// (the snippet failed to build and has no content to inject). Callers must
@@ -103,17 +104,8 @@ pub unsafe extern "C" fn injector_create(snippet: *const Snippet) -> *mut Inject
     return injector_create_with_strategy(snippet, InjectionStrategy::HeadCloseTag);
 }
 
-/// Create an [`Injector`] injector based on a [`Snippet`], choosing where the snippet is injected.
-///
-/// Behaves exactly like [`injector_create`] with respect to `NULL` handling, memory ownership and
-/// usage; see its documentation. `strategy` must be one of the [`InjectionStrategy`] enumerators.
-///
-/// # Example
-///
-/// ```c
-/// Injector* injector = injector_create_with_strategy(
-///     snippet, InjectionStrategy::HeadOpenTagWithCloseTagFallback);
-/// ```
+/// Create an [`Injector`] like [`injector_create`], injecting where `strategy` says. Same return
+/// value and memory ownership.
 #[no_mangle]
 pub unsafe extern "C" fn injector_create_with_strategy(
     snippet: *const Snippet,
@@ -190,6 +182,101 @@ pub unsafe extern "C" fn injector_write(
     );
 }
 
+/// How many bytes of the document written so far the [`Injector`] holds back, not returned in
+/// any [`InjectorResult`] yet.
+///
+/// They are always the end of what was written, and come back out in later results, in slices
+/// whose `from_incoming_chunk` is false. A server that queues the chunks it writes can leave them
+/// as they are until a result injects, then drop this many bytes (read before that call) from the
+/// end of the chunks already queued, and serve the result's slices in place of the chunk just
+/// written. Passing `NULL` returns 0.
+#[no_mangle]
+pub unsafe extern "C" fn injector_held_back_length(injector: *const Injector) -> u32 {
+    if injector.is_null() {
+        return 0;
+    }
+    return (*injector).inner.held_back() as u32;
+}
+
+/// Computes the `Content-Length` a response has to announce once the snippet is in it, given the
+/// `length` bytes at `value`, the `Content-Length` it announced (not NUL-terminated). The snippet is
+/// all the injection adds, and the padding [`injector_end`] emits instead is as long, so the length
+/// grows by exactly the snippet length either way.
+///
+/// Returns false, leaving `*extended` untouched, when `value` is not a valid length (a list of
+/// identical lengths is): the server should then remove the header rather than announce a wrong
+/// length. Passing `NULL` for `injector` or `extended` returns false.
+///
+/// # Example
+///
+/// ```c
+/// uint64_t extended;
+/// if (injector_extend_content_length(injector, value, value_length, &extended)) {
+///   // announce `extended`
+/// } else {
+///   // remove Content-Length
+/// }
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn injector_extend_content_length(
+    injector: *const Injector,
+    value: *const u8,
+    length: u32,
+    extended: *mut u64,
+) -> bool {
+    if injector.is_null() || extended.is_null() {
+        return false;
+    }
+    let value: &[u8] = if value.is_null() || length == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(value, length as usize)
+    };
+    return match (*injector).inner.content_length_with_snippet(value) {
+        Some(length) => {
+            *extended = length;
+            true
+        }
+        None => false,
+    };
+}
+
+/// Hand back everything the [`Injector`] holds back, for a server that has to send what it has
+/// now, such as a page streamed in pieces that waits on more data, which would otherwise stall until
+/// the first 1024 bytes are in, or more for a head that is a long run of `<meta>` tags. Never
+/// injects; once the snippet is placed, or the head window holds no `<head>` tag, there is nothing
+/// to hand back.
+///
+/// The head window is given up in exchange: a `<head>` tag in what is handed back, or starting later
+/// within the first 1024 bytes, is not injected after anymore. One starting past them still is, if
+/// those bytes look like an HTML document.
+///
+/// This function should not be called while another [`InjectorResult`] from the same `Injector` is
+/// still being processed. See [`InjectorResult`] for the memory ownership of the result.
+#[no_mangle]
+pub unsafe extern "C" fn injector_flush(injector: *mut Injector) -> InjectorResult {
+    if injector.is_null() {
+        return InjectorResult::empty();
+    }
+    let injector = &mut *injector;
+    return InjectorResult::new(injector.inner.flush(), &mut injector.slices_memory_storage);
+}
+
+/// Whether the [`Injector`] may still inject the snippet into data yet to be written: it has
+/// neither injected nor given up. Passing `NULL` returns false.
+///
+/// Once the head window is decided on, a pending injector holds nothing back
+/// ([`injector_held_back_length`] is 0), so a server that sends a document in several parts can
+/// let each part go out as soon as it is written, and keep writing the next ones to the same
+/// injector: the snippet goes into whichever part holds the `<head>` tag.
+#[no_mangle]
+pub unsafe extern "C" fn injector_is_pending(injector: *const Injector) -> bool {
+    if injector.is_null() {
+        return false;
+    }
+    return (*injector).inner.is_pending();
+}
+
 /// Notify the [`Injector`] that the full HTML document has been written.
 ///
 /// If the injection did not happen yet, a slice of the same size as the snippet containing only
@@ -224,14 +311,42 @@ pub unsafe extern "C" fn injector_end(ffi_injector: *mut Injector) -> InjectorRe
     );
 }
 
-/// The result of a call to [`injector_write`] or [`injector_end`]. It represents a list of binary
-/// slices to be written to the outgoing stream.
+/// Same as [`injector_end`], but never returns padding: when the injection did not happen, only
+/// the data still held back by the [`Injector`] is returned.
+///
+/// Use it when the response length is not announced up front (for example, when the
+/// `content-length` header is removed), so padding is not needed.
+///
+/// This function should not be called while another [`InjectorResult`] from the same `Injector` is
+/// still being processed.
+///
+/// # Memory ownership
+///
+/// See [`InjectorResult`] documentation for details about the returned value memory ownership.
+#[no_mangle]
+pub unsafe extern "C" fn injector_end_without_padding(
+    ffi_injector: *mut Injector,
+) -> InjectorResult {
+    if ffi_injector.is_null() {
+        return InjectorResult::empty();
+    }
+    let ffi_injector = &mut *ffi_injector;
+    return InjectorResult::new(
+        ffi_injector.inner.end_without_padding(),
+        &mut ffi_injector.slices_memory_storage,
+    );
+}
+
+/// The result of a call to [`injector_write`], [`injector_end`] or
+/// [`injector_end_without_padding`]. It represents a list of binary slices to be written to the
+/// outgoing stream.
 ///
 /// In its current implementation, at most 4 slices can be returned. While rare, it is possible
 /// that 0 slices are returned.
 ///
 /// [`InjectorResult`] instances (and the memory they point to) should *not* be used anymore once
-/// `injector_write` or `injector_end` are called with the same `Injector` instance.
+/// `injector_write`, `injector_end` or `injector_end_without_padding` are called with the same
+/// `Injector` instance.
 ///
 /// # Memory ownership
 ///
@@ -265,8 +380,8 @@ impl InjectorResult {
         };
     }
 
-    /// Defensive default returned when a NULL injector is passed to
-    /// [`injector_write`] or [`injector_end`]. No slices, nothing injected.
+    /// Defensive default returned when a NULL injector is passed to [`injector_write`],
+    /// [`injector_end`] or [`injector_end_without_padding`]. No slices, nothing injected.
     fn empty() -> Self {
         return Self {
             slices_length: 0,
@@ -299,7 +414,7 @@ pub struct BytesSlice {
     ///
     /// # Example (in "simplified" Rust as an illustration)
     ///
-    /// ```ignore
+    /// ```text
     /// let chunk = b"foobar";
     /// let result = injector_write(injector, chunk.as_ptr(), chunk.len());
     /// for slice in result.slices {
@@ -381,59 +496,45 @@ mod tests {
     }
 
     #[test]
-    fn injector_create_with_strategy_null_snippet_returns_null() {
-        for strategy in [
-            InjectionStrategy::HeadCloseTag,
-            InjectionStrategy::HeadOpenTag,
-            InjectionStrategy::HeadOpenTagWithCloseTagFallback,
-        ] {
-            let injector = unsafe { injector_create_with_strategy(null(), strategy) };
-            assert!(injector.is_null());
-        }
+    fn injector_end_without_padding_null_injector_returns_empty() {
+        let result = unsafe { injector_end_without_padding(null_mut()) };
+        assert_eq!(result.slices_length, 0);
+        assert!(result.slices.is_null());
+        assert!(!result.injected);
     }
 
-    /// `injector_create` must keep injecting before `</head>`, so existing consumers are unaffected
-    /// by the introduction of the other strategies.
+    /// Without padding, the end returns only the data still held back: here the whole document,
+    /// shorter than the head window and holding no `<head>`.
     #[test]
-    fn injector_create_defaults_to_head_close_tag() {
-        assert_eq!(
-            inject(None, b"<head>abc</head>def"),
-            "<head>abc<SNIPPET></head>def"
-        );
+    fn injector_end_without_padding_returns_held_data_only() {
+        assert_eq!(inject(b"abc</head>", false), "abc</head>");
     }
 
     #[test]
-    fn injector_create_with_strategy_head_open_tag() {
+    fn injector_create_injects_in_head() {
+        // Right before `</head>`, by default.
         assert_eq!(
-            inject(Some(InjectionStrategy::HeadOpenTag), b"<head>abc</head>def"),
-            "<head><SNIPPET>abc</head>def"
+            inject(
+                b"<head><meta charset=utf-8><title>t</title></head>def",
+                true
+            ),
+            "<head><meta charset=utf-8><title>t</title><SNIPPET></head>def"
         );
-        // No `<head>` to inject after, and this strategy has no fallback: the document is padded
-        // to the length it would have had, and left otherwise untouched.
+        // As early as possible, on demand.
+        assert_eq!(
+            inject_with(
+                InjectionStrategy::HeadOpenTag,
+                b"<head><meta charset=utf-8><title>t</title></head>def",
+                true
+            ),
+            "<head><meta charset=utf-8><SNIPPET><title>t</title></head>def"
+        );
+        // No `<head>` to inject after: the document is padded to the length it would have had,
+        // and left otherwise untouched.
         let html = "abc</head>def";
-        let output = inject(Some(InjectionStrategy::HeadOpenTag), html.as_bytes());
         let mut expected = String::from(html);
         expected.extend(core::iter::repeat_n(' ', snippet_len()));
-        assert_eq!(output, expected);
-    }
-
-    #[test]
-    fn injector_create_with_strategy_head_open_tag_with_fallback() {
-        assert_eq!(
-            inject(
-                Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback),
-                b"<head>abc</head>def"
-            ),
-            "<head><SNIPPET>abc</head>def"
-        );
-        // Falls back to `</head>` when there is no `<head>` to inject after.
-        assert_eq!(
-            inject(
-                Some(InjectionStrategy::HeadOpenTagWithCloseTagFallback),
-                b"abc</head>def"
-            ),
-            "abc<SNIPPET></head>def"
-        );
+        assert_eq!(inject(html.as_bytes(), true), expected);
     }
 
     /// Length of the snippet built by [`test_snippet`], used to check padding.
@@ -449,13 +550,16 @@ mod tests {
     }
 
     /// Drives a full injection through the C API and returns the concatenated output, with the
-    /// snippet itself replaced by `<SNIPPET>` so assertions stay readable.
-    fn inject(strategy: Option<InjectionStrategy>, html: &[u8]) -> String {
+    /// snippet itself replaced by `<SNIPPET>` so assertions stay readable. `padded` selects
+    /// [`injector_end`] over [`injector_end_without_padding`].
+    fn inject(html: &[u8], padded: bool) -> String {
+        return inject_with(InjectionStrategy::HeadCloseTag, html, padded);
+    }
+
+    /// [`inject`], with the injector [`injector_create_with_strategy`] creates for `strategy`.
+    fn inject_with(strategy: InjectionStrategy, html: &[u8], padded: bool) -> String {
         let snippet = test_snippet();
-        let injector = match strategy {
-            Some(strategy) => unsafe { injector_create_with_strategy(snippet, strategy) },
-            None => unsafe { injector_create(snippet) },
-        };
+        let injector = unsafe { injector_create_with_strategy(snippet, strategy) };
         assert!(!injector.is_null());
 
         let snippet_content = unsafe { SnippetInternal::borrow_public_ptr(snippet) }
@@ -475,13 +579,14 @@ mod tests {
             }
         };
         append(unsafe { injector_write(injector, html.as_ptr(), html.len() as u32) });
-        append(unsafe { injector_end(injector) });
+        append(match padded {
+            true => unsafe { injector_end(injector) },
+            false => unsafe { injector_end_without_padding(injector) },
+        });
 
         unsafe { injector_cleanup(injector) };
         unsafe { snippet_cleanup(snippet) };
 
-        // Substituted on the assembled output rather than per slice: the hoisting path emits the
-        // snippet embedded in a reordered window, not as a slice of its own.
         return output.replace(
             core::str::from_utf8(&snippet_content).expect("valid UTF-8"),
             "<SNIPPET>",
@@ -494,6 +599,115 @@ mod tests {
                 b"{\"majorVersion\":5,\"rum\":{\"applicationId\":\"a\",\"clientToken\":\"t\"}}\0",
             ))
         };
+    }
+
+    #[test]
+    fn injector_extend_content_length_adds_the_snippet() {
+        let snippet = test_snippet();
+        let injector = unsafe { injector_create(snippet) };
+        let mut extended = 0u64;
+        let value = b"1000";
+        assert!(unsafe {
+            injector_extend_content_length(
+                injector,
+                value.as_ptr(),
+                value.len() as u32,
+                &mut extended,
+            )
+        });
+        assert_eq!(extended, 1000 + snippet_len() as u64);
+
+        let mut untouched = 7u64;
+        let value = b"12x";
+        assert!(!unsafe {
+            injector_extend_content_length(
+                injector,
+                value.as_ptr(),
+                value.len() as u32,
+                &mut untouched,
+            )
+        });
+        assert_eq!(untouched, 7);
+        assert!(!unsafe { injector_extend_content_length(injector, null(), 0, &mut untouched) });
+        assert!(!unsafe {
+            injector_extend_content_length(null(), value.as_ptr(), 3, &mut untouched)
+        });
+        assert!(!unsafe {
+            injector_extend_content_length(injector, value.as_ptr(), 3, core::ptr::null_mut())
+        });
+
+        unsafe { injector_cleanup(injector) };
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn injector_flush_hands_the_head_window_back() {
+        assert_eq!(unsafe { injector_flush(null_mut()) }.slices_length, 0);
+
+        let snippet = test_snippet();
+        let injector =
+            unsafe { injector_create_with_strategy(snippet, InjectionStrategy::HeadOpenTag) };
+        let head = b"<html><head>";
+        unsafe { injector_write(injector, head.as_ptr(), head.len() as u32) };
+        let result = unsafe { injector_flush(injector) };
+        assert!(!result.injected);
+        assert_eq!(result.slices_length, 1);
+        let slice = unsafe { &*result.slices };
+        assert!(!slice.from_incoming_chunk);
+        assert_eq!(
+            unsafe { slice::from_raw_parts(slice.start, slice.length as usize) },
+            head
+        );
+        assert_eq!(unsafe { injector_held_back_length(injector) }, 0);
+
+        unsafe { injector_cleanup(injector) };
+        unsafe { snippet_cleanup(snippet) };
+    }
+
+    #[test]
+    fn injector_is_pending_null_injector_returns_false() {
+        assert!(!unsafe { injector_is_pending(null()) });
+    }
+
+    #[test]
+    fn injector_held_back_length_null_injector_returns_zero() {
+        assert_eq!(unsafe { injector_held_back_length(null()) }, 0);
+    }
+
+    /// The head window is held back until it fills, then comes back out in slices that are not
+    /// flagged as coming from the chunk just written, ahead of the snippet.
+    #[test]
+    fn injector_held_back_length_reports_the_head_window() {
+        let snippet = test_snippet();
+        let injector =
+            unsafe { injector_create_with_strategy(snippet, InjectionStrategy::HeadOpenTag) };
+        assert!(!injector.is_null());
+
+        let head = b"<html><head>";
+        let result = unsafe { injector_write(injector, head.as_ptr(), head.len() as u32) };
+        assert_eq!(result.slices_length, 0);
+        assert_eq!(
+            unsafe { injector_held_back_length(injector) },
+            head.len() as u32
+        );
+
+        let rest = [b'x'; 2048];
+        let result = unsafe { injector_write(injector, rest.as_ptr(), rest.len() as u32) };
+        assert!(result.injected);
+        let slices =
+            unsafe { core::slice::from_raw_parts(result.slices, result.slices_length as usize) };
+        assert!(
+            !slices[0].from_incoming_chunk,
+            "the held-back window is not part of this chunk"
+        );
+        assert_eq!(
+            unsafe { core::slice::from_raw_parts(slices[0].start, slices[0].length as usize) },
+            head
+        );
+        assert_eq!(unsafe { injector_held_back_length(injector) }, 0);
+
+        unsafe { injector_cleanup(injector) };
+        unsafe { snippet_cleanup(snippet) };
     }
 
     #[test]

@@ -29,8 +29,22 @@ class HttpModule : public CHttpModule {
 
   bool ShouldAttemptInjection(IHttpResponse& pHttpResponse, const ModuleContext& ctx) const;
 
+  // Where a send carrying the start of the body stands in the response, see OnSendResponse.
+  struct Send {
+    // More sends of the response follow this one.
+    bool more_data;
+    // The headers went out with an earlier send, which carried no body: they can no longer change.
+    bool headers_gone;
+  };
+
   REQUEST_NOTIFICATION_STATUS PerformInjection(IHttpContext& pHttpContext,
-                                               IHttpResponse& pHttpResponse, ModuleContext& ctx);
+                                               IHttpResponse& pHttpResponse, ModuleContext& ctx,
+                                               Send send);
+
+  // Writes a part after the first to the injector the first part left, if any, and pads the last
+  // part if the snippet its announced length counts never went in.
+  REQUEST_NOTIFICATION_STATUS ContinueInjection(IHttpContext& pHttpContext,
+                                                IHttpResponse& pHttpResponse, bool more_data);
 };
 
 class HttpModuleFactory : public IHttpModuleFactory {

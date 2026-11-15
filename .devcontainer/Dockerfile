@@ -4,7 +4,7 @@
 #
 # Copyright 2024-Present Datadog, Inc.
 
-FROM registry.ddbuild.io/images/base/gbi-ubuntu_2404:release@sha256:0250b9dbafedce1ae37464ad427666272b0c20afcb1d5daa2992ad1f25526f1e AS gbi
+FROM registry.ddbuild.io/images/base/gbi-ubuntu_2404:release@sha256:dbefeb23e617b836dd872f7f470c44cb2909dccbffa790e14a4e469305275424 AS gbi
 USER root
 
 FROM gbi AS rustup-download
@@ -36,7 +36,7 @@ COPY --from=xwin-install /xwin /xwin
 
 FROM gbi
 
-ARG LLVM_VERSION=20
+ARG LLVM_VERSION=23
 
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \

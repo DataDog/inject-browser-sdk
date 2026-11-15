@@ -7,6 +7,7 @@
 use alloc::boxed::Box;
 use alloc::ffi::CString;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::ffi::{c_char, CStr};
 use core::ptr::null;
 
@@ -150,19 +151,30 @@ struct StableConfigInternal {
     inner: Result<CoreStableConfig, Error>,
     // Owns the allocation referenced by `error_message` on the error path.
     _error_message_storage: Option<CString>,
+    // NUL-terminated copies of the matched entries, for `stable_config_get`.
+    values: Vec<(String, CString)>,
 }
 
 impl StableConfigInternal {
     fn new(result: Result<CoreStableConfig, Error>) -> Self {
         match result {
             Ok(config) => {
+                // A value holding a NUL byte cannot cross the C boundary; treat it as unset.
+                let values = config
+                    .entries()
+                    .filter_map(|(name, value)| {
+                        let value = CString::new(value).ok();
+                        return value.map(|value| return (String::from(name), value));
+                    })
+                    .collect();
                 return Self {
                     error_code: 0,
                     error_message: null(),
                     is_empty: config.is_empty(),
                     inner: Ok(config),
                     _error_message_storage: None,
-                }
+                    values,
+                };
             }
             Err(error) => {
                 let error_string = error.to_string().replace('\0', "\\0");
@@ -179,6 +191,7 @@ impl StableConfigInternal {
                     is_empty: true,
                     inner: Err(error),
                     _error_message_storage: Some(error_message),
+                    values: Vec::new(),
                 };
             }
         }
@@ -222,6 +235,11 @@ pub unsafe extern "C" fn stable_config_read(
 /// Read stable configuration with optional explicit source paths. A NULL path
 /// uses the normal platform path. IIS uses explicit paths only for isolated
 /// worker-process tests; parsing and priority remain in libdd-library-config.
+///
+/// # Safety
+///
+/// As [`stable_config_read`]; `local_path` and `fleet_path` must each be NULL
+/// or a NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn stable_config_read_with_paths(
     language: *const c_char,
@@ -284,24 +302,11 @@ pub unsafe extern "C" fn stable_config_snippet_create(
     config: *const StableConfig,
     json_overlay: *const c_char,
 ) -> *mut Snippet {
-    return stable_config_snippet_create_with_options(config, json_overlay, false);
-}
-
-/// Build from a reusable stable-config handle while optionally suppressing
-/// stable SDK option defaults. `DD_RUM_ENABLED` and `DD_RUM_MAJOR_VERSION`
-/// still participate in resolution. IIS uses this after collection clear/remove.
-#[no_mangle]
-pub unsafe extern "C" fn stable_config_snippet_create_with_options(
-    config: *const StableConfig,
-    json_overlay: *const c_char,
-    suppress_rum_defaults: bool,
-) -> *mut Snippet {
     if config.is_null() {
         return SnippetInternal::new(Err(Error::FfiNullPointer(String::from("config"))))
             .into_public_ptr();
     }
-
-    let overlay: Option<ConfigurationOverlay> = if json_overlay.is_null() {
+    let overlay = if json_overlay.is_null() {
         None
     } else {
         match parse_configuration_overlay(CStr::from_ptr(json_overlay).to_bytes()) {
@@ -309,15 +314,54 @@ pub unsafe extern "C" fn stable_config_snippet_create_with_options(
             Err(e) => return SnippetInternal::new(Err(e)).into_public_ptr(),
         }
     };
+    return build_snippet(config, overlay);
+}
 
-    let internal = StableConfigInternal::borrow_public_ptr(config);
-    let result = match &internal.inner {
-        Ok(stable_config) => {
-            stable_config.build_snippet_with_options(overlay, suppress_rum_defaults)
+/// Build from a handle, or from the overlay alone when `config` is NULL.
+pub(crate) unsafe fn build_snippet(
+    config: *const StableConfig,
+    overlay: Option<ConfigurationOverlay>,
+) -> *mut Snippet {
+    let result = if config.is_null() {
+        CoreStableConfig::empty().build_snippet(overlay)
+    } else {
+        match &StableConfigInternal::borrow_public_ptr(config).inner {
+            Ok(stable_config) => stable_config.build_snippet(overlay),
+            Err(error) => Err(error.clone()),
         }
-        Err(error) => Err(error.clone()),
     };
     return SnippetInternal::new_from_stable_config(result).into_public_ptr();
+}
+
+/// The stable-configuration value of `key` matched for this process, or NULL
+/// when unset. For host settings outside the Browser SDK configuration, such
+/// as where the snippet is injected.
+///
+/// # Memory ownership
+///
+/// The returned string belongs to `config` and stays valid until
+/// [`stable_config_cleanup`].
+///
+/// # Safety
+///
+/// `config` must be NULL or a live handle from [`stable_config_read`]; `key`
+/// must be NULL or a NUL-terminated C string. Either NULL returns NULL.
+#[no_mangle]
+pub unsafe extern "C" fn stable_config_get(
+    config: *const StableConfig,
+    key: *const c_char,
+) -> *const c_char {
+    if config.is_null() || key.is_null() {
+        return null();
+    }
+    let Ok(key) = CStr::from_ptr(key).to_str() else {
+        return null();
+    };
+    return StableConfigInternal::borrow_public_ptr(config)
+        .values
+        .iter()
+        .find(|(name, _)| return name == key)
+        .map_or(null(), |(_, value)| return value.as_ptr());
 }
 
 /// Free a [`StableConfig`] created by [`stable_config_read`]. Existing snippets

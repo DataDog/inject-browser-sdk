@@ -1,7 +1,7 @@
 ---
 variables:
   DEVCONTAINER_IMAGE_NAME: registry.ddbuild.io/ci/inject-browser-sdk/devcontainer
-  NYDUS_DD_IMAGE: registry.ddbuild.io/images/nydus:v105904890-5e6ee6b-v2.4.0-dd.3
+  NYDUS_DD_IMAGE: registry.ddbuild.io/images/nydus:v152562634-de9f215-v2.4.0-dd.3@sha256:ce137717776daf7d2e1edc0c7a62179acadb4135adfc57e242ef587b9f2023b8
 
 .not_scheduled:
   rules:

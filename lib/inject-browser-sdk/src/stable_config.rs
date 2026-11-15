@@ -37,6 +37,29 @@ pub struct StableConfig {
 }
 
 impl StableConfig {
+    /// No stable configuration: snippets are built from the overlay alone.
+    pub fn empty() -> Self {
+        return StableConfig {
+            configs: Vec::new(),
+            logs: Vec::new(),
+            empty_file_present: false,
+        };
+    }
+
+    /// The value of a stable-configuration key matched for this process,
+    /// for host settings outside the Browser SDK configuration.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        return self.lookup(key);
+    }
+
+    /// Every matched key and value, in priority order.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        return self
+            .configs
+            .iter()
+            .map(|config| return (config.name.as_str(), config.value.as_str()));
+    }
+
     fn lookup(&self, key: &str) -> Option<&str> {
         return self
             .configs
@@ -87,17 +110,6 @@ impl StableConfig {
         &self,
         overlay: Option<ConfigurationOverlay>,
     ) -> Result<StableConfigSnippet, Error> {
-        return self.build_snippet_with_options(overlay, false);
-    }
-
-    /// Build with the stable SDK option fields suppressed. The host switch and
-    /// major version still follow stable-config precedence; IIS uses this when
-    /// an inherited option collection contains `<clear>` or `<remove>`.
-    pub fn build_snippet_with_options(
-        &self,
-        overlay: Option<ConfigurationOverlay>,
-        suppress_rum_defaults: bool,
-    ) -> Result<StableConfigSnippet, Error> {
         if self.is_empty() && overlay.is_none() {
             let message = empty_config_message(&self.logs);
             if self.empty_file_present {
@@ -121,10 +133,9 @@ impl StableConfig {
         }
 
         let mut config = Configuration::from_lookup(|key| {
-            if (suppress_rum_defaults && key != "DD_RUM_MAJOR_VERSION")
-                || overlay
-                    .as_ref()
-                    .is_some_and(|value| return value.overrides_stable_key(key))
+            if overlay
+                .as_ref()
+                .is_some_and(|value| return value.overrides_stable_key(key))
             {
                 return None;
             }
@@ -287,61 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn suppress_rum_defaults_keeps_stable_switch_and_major_version() {
-        use crate::configuration::RumConfiguration;
-
-        const STABLE: &[u8] = br#"apm_configuration_default:
-  DD_RUM_ENABLED: true
-  DD_RUM_MAJOR_VERSION: 5
-  DD_RUM_APPLICATION_ID: stable-app
-  DD_RUM_CLIENT_TOKEN: stable-token
-  DD_RUM_SERVICE: stable-service
-"#;
-        let read = crate::platform::read_stable_configs_with_reader(
-            &ContentReader(Some(STABLE)),
-            "browser-sdk",
-            false,
-        )
-        .expect("stable config should parse");
-        let config = stable_config_from_read(read).expect("stable config should be usable");
-        let overlay = ConfigurationOverlay {
-            rum: RumConfiguration {
-                application_id: Some(String::from("manual-app")),
-                client_token: Some(String::from("manual-token")),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let snippet = config
-            .build_snippet_with_options(Some(overlay), true)
-            .expect("manual collection should build without stable SDK defaults");
-        assert_eq!(snippet.enabled, Some(true));
-        let text = core::str::from_utf8(&snippet.bytes).unwrap();
-        assert!(text.contains("/v5/datadog-rum.js"));
-        let init = extract_init_json(&snippet.bytes);
-        assert_eq!(init["applicationId"], Value::from("manual-app"));
-        assert_eq!(init["clientToken"], Value::from("manual-token"));
-        assert!(init.get("service").is_none());
-    }
-
-    #[test]
-    fn suppress_rum_defaults_preserves_stable_disabled_switch() {
-        let read = crate::platform::read_stable_configs_with_reader(
-            &ContentReader(Some(DISABLED_CONFIG)),
-            "browser-sdk",
-            false,
-        )
-        .expect("stable config should parse");
-        let config = stable_config_from_read(read).expect("stable config should be usable");
-        let snippet = config
-            .build_snippet_with_options(Some(ConfigurationOverlay::default()), true)
-            .expect("stable disable should resolve before SDK options");
-        assert_eq!(snippet.enabled, Some(false));
-        assert!(snippet.bytes.is_empty());
-    }
-
-    #[test]
     fn explicit_overlay_skips_malformed_lower_priority_stable_values() {
         use crate::configuration::RumConfiguration;
 
@@ -382,14 +338,8 @@ mod tests {
     struct TooLargeReader;
 
     impl ConfigRead for TooLargeReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(
-            &self,
-            _path: &str,
-        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
-        {
-            return Err(libdd_library_config::ConfigReadError::TooLarge);
+        fn read(&self, _path: &str) -> libdd_library_config::io::Result<alloc::vec::Vec<u8>> {
+            return Err(libdd_library_config::io::ErrorKind::FileTooLarge.into());
         }
     }
 
@@ -413,19 +363,13 @@ mod tests {
     struct ContentReader(Option<&'static [u8]>);
 
     impl ConfigRead for ContentReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(
-            &self,
-            path: &str,
-        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
-        {
+        fn read(&self, path: &str) -> libdd_library_config::io::Result<alloc::vec::Vec<u8>> {
             if path == libdd_library_config::Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
                 if let Some(contents) = self.0 {
                     return Ok(contents.into());
                 }
             }
-            return Err(libdd_library_config::ConfigReadError::NotFound);
+            return Err(libdd_library_config::io::ErrorKind::NotFound.into());
         }
     }
 
@@ -558,20 +502,14 @@ mod tests {
     struct LocalConfigFleetTooLargeReader;
 
     impl ConfigRead for LocalConfigFleetTooLargeReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(
-            &self,
-            path: &str,
-        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
-        {
+        fn read(&self, path: &str) -> libdd_library_config::io::Result<alloc::vec::Vec<u8>> {
             if path == libdd_library_config::Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
                 return Ok(DISABLED_CONFIG.into());
             }
             if path == libdd_library_config::Configurator::FLEET_STABLE_CONFIGURATION_PATH {
-                return Err(libdd_library_config::ConfigReadError::TooLarge);
+                return Err(libdd_library_config::io::ErrorKind::FileTooLarge.into());
             }
-            return Err(libdd_library_config::ConfigReadError::NotFound);
+            return Err(libdd_library_config::io::ErrorKind::NotFound.into());
         }
     }
 
@@ -580,13 +518,7 @@ mod tests {
     }
 
     impl ConfigRead for CountingReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(
-            &self,
-            path: &str,
-        ) -> Result<alloc::vec::Vec<u8>, libdd_library_config::ConfigReadError<Self::IoError>>
-        {
+        fn read(&self, path: &str) -> libdd_library_config::io::Result<alloc::vec::Vec<u8>> {
             self.reads.set(self.reads.get() + 1);
             return ContentReader(Some(DISABLED_CONFIG)).read(path);
         }

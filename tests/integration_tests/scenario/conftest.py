@@ -30,7 +30,7 @@ class AioHTTPServer:
         site = web.TCPSite(runner, self._host, self._port)
         self.loop.run_until_complete(site.start())
         self.loop.run_until_complete(self._stop.wait())
-        self.loop.run_until_complete(self._app.cleanup())
+        self.loop.run_until_complete(runner.cleanup())
         self.loop.close()
 
     def run(self) -> None:
@@ -39,6 +39,7 @@ class AioHTTPServer:
 
     def stop(self) -> None:
         self.loop.call_soon_threadsafe(self._stop.set)
+        self._thread.join()
 
     def get_last_request(self):
         return self._app["ctx"].get("last_request", None)

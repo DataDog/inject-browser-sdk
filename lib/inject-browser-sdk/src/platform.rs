@@ -6,12 +6,10 @@
 
 //! Platform-specific helpers for reading stable configuration files.
 
-use alloc::{format, string::String, vec, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use core::cell::Cell;
 
-use libdd_library_config::{
-    ConfigRead, ConfigReadError, Configurator, LibraryConfig, ProcessInfo, MAX_CONFIG_FILE_SIZE,
-};
+use libdd_library_config::{io, ConfigRead, Configurator, LibraryConfig, ProcessInfo};
 
 #[cfg(not(windows))]
 mod inner {
@@ -20,25 +18,29 @@ mod inner {
     pub struct PlatformConfigRead;
 
     impl ConfigRead for PlatformConfigRead {
-        type IoError = rustix::io::Errno;
-
-        fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<rustix::io::Errno>> {
+        fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+            use alloc::vec;
+            use libdd_library_config::MAX_CONFIG_FILE_SIZE;
             use rustix::fs::{fstat, open, Mode, OFlags};
             use rustix::io::read;
 
             let fd = match open(path, OFlags::RDONLY, Mode::empty()) {
                 Ok(fd) => fd,
-                Err(rustix::io::Errno::NOENT) => return Err(ConfigReadError::NotFound),
-                Err(e) => return Err(ConfigReadError::Io(e)),
+                // A missing file is an empty configuration layer.
+                Err(rustix::io::Errno::NOENT) => return Err(io::ErrorKind::NotFound.into()),
+                Err(_) => return Err(io::ErrorKind::Other.into()),
             };
 
-            let file_size = fstat(&fd).map_err(ConfigReadError::Io).and_then(|s| {
-                return usize::try_from(s.st_size)
-                    .map_err(|_| return ConfigReadError::Io(rustix::io::Errno::INVAL));
-            })?;
+            let file_size = match fstat(&fd) {
+                Ok(stats) => match usize::try_from(stats.st_size) {
+                    Ok(size) => size,
+                    Err(_) => return Err(io::Error::from(io::ErrorKind::Other)),
+                },
+                Err(_) => return Err(io::Error::from(io::ErrorKind::Other)),
+            };
 
             if file_size > MAX_CONFIG_FILE_SIZE {
-                return Err(ConfigReadError::TooLarge);
+                return Err(io::ErrorKind::FileTooLarge.into());
             }
 
             let mut buf = vec![0u8; file_size];
@@ -48,7 +50,7 @@ mod inner {
                     Ok(0) => break,
                     Ok(n) => total += n,
                     Err(rustix::io::Errno::INTR) => continue,
-                    Err(e) => return Err(ConfigReadError::Io(e)),
+                    Err(_) => return Err(io::ErrorKind::Other.into()),
                 }
             }
             buf.truncate(total);
@@ -93,21 +95,174 @@ mod inner {
 #[cfg(windows)]
 mod inner {
     use super::*;
+    use core::ptr::null_mut;
+    use libdd_library_config::MAX_CONFIG_FILE_SIZE;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GENERIC_READ,
+        INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileSizeEx, ReadFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Environment::{
+        FreeEnvironmentStringsW, GetCommandLineW, GetEnvironmentStringsW,
+    };
+    use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
 
-    // Tracked upstream: DataDog/libdatadog#73 (no_std windows-sys reader).
-    pub use libdd_library_config::StdConfigRead as PlatformConfigRead;
+    /// Reads with Win32 calls so the library stays `no_std` inside IIS workers.
+    pub struct PlatformConfigRead;
 
-    /// On Windows (IIS hosting), argv/envp aren't mutable by other entities in
-    /// the host process model, so reading them via `std::env` is safe. This is
-    /// intentionally different from the Unix branch, where /proc/self/{cmdline,
-    /// environ} can't be trusted from an injected library.
-    pub fn detect_process_info(language: &str) -> ProcessInfo {
-        ProcessInfo::detect_global(String::from(language))
+    struct Handle(windows_sys::Win32::Foundation::HANDLE);
+
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            // SAFETY: the handle came from a successful CreateFileW and is closed once.
+            unsafe { CloseHandle(self.0) };
+        }
     }
 
-    /// No-op on Windows — no stderr sink is linked in the no_std path.
-    /// `debug_logs=true` produces no output until a no_std windows-sys sink is
-    /// added (tracked upstream as DataDog/libdatadog#73).
+    fn other() -> io::Error {
+        return io::ErrorKind::Other.into();
+    }
+
+    impl ConfigRead for PlatformConfigRead {
+        fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+            let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+            // SAFETY: `wide` is NUL-terminated and outlives the call.
+            let raw = unsafe {
+                CreateFileW(
+                    wide.as_ptr(),
+                    GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    null_mut(),
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    null_mut(),
+                )
+            };
+            if raw == INVALID_HANDLE_VALUE {
+                // SAFETY: reads this thread's last-error value.
+                let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+                return Err(match code {
+                    ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => io::ErrorKind::NotFound.into(),
+                    _ => other(),
+                });
+            }
+            let file = Handle(raw);
+
+            let mut size = 0i64;
+            // SAFETY: `file` is an open handle and `size` is a valid out-pointer.
+            if unsafe { GetFileSizeEx(file.0, &mut size) } == 0 {
+                return Err(other());
+            }
+            let size = usize::try_from(size).map_err(|_| return other())?;
+            if size > MAX_CONFIG_FILE_SIZE {
+                return Err(io::ErrorKind::FileTooLarge.into());
+            }
+
+            let mut buf = alloc::vec![0u8; size];
+            let mut total = 0;
+            while total < size {
+                let chunk = u32::try_from(size - total).unwrap_or(u32::MAX);
+                let mut read = 0u32;
+                // SAFETY: the destination range lies inside `buf`.
+                let ok = unsafe {
+                    ReadFile(
+                        file.0,
+                        buf[total..].as_mut_ptr(),
+                        chunk,
+                        &mut read,
+                        null_mut(),
+                    )
+                };
+                if ok == 0 {
+                    return Err(other());
+                }
+                if read == 0 {
+                    break;
+                }
+                total += read as usize;
+            }
+            buf.truncate(total);
+            return Ok(buf);
+        }
+    }
+
+    /// Converts a NUL-terminated UTF-16 string; entries that are not valid
+    /// Unicode are skipped, as `std::env` does for `into_string()` failures.
+    ///
+    /// # Safety
+    /// `ptr` must point to a NUL-terminated UTF-16 string.
+    unsafe fn wide_to_utf8(ptr: *const u16) -> (Option<Vec<u8>>, usize) {
+        let mut len = 0;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let units = core::slice::from_raw_parts(ptr, len);
+        let text = char::decode_utf16(units.iter().copied())
+            .collect::<Result<String, _>>()
+            .ok()
+            .map(String::into_bytes);
+        return (text, len);
+    }
+
+    fn process_args() -> Vec<Vec<u8>> {
+        let mut count = 0;
+        // SAFETY: GetCommandLineW returns this process's command line; the
+        // array CommandLineToArgvW returns holds `count` strings and is freed
+        // with LocalFree.
+        unsafe {
+            let argv = CommandLineToArgvW(GetCommandLineW(), &mut count);
+            if argv.is_null() {
+                return Vec::new();
+            }
+            let count = usize::try_from(count).unwrap_or(0);
+            let args = (0..count)
+                .filter_map(|i| return wide_to_utf8(*argv.add(i)).0)
+                .collect();
+            LocalFree(argv.cast());
+            return args;
+        }
+    }
+
+    fn process_envp() -> Vec<Vec<u8>> {
+        let mut envp = Vec::new();
+        // SAFETY: the environment block is a sequence of NUL-terminated
+        // strings ending with an empty string, freed with FreeEnvironmentStringsW.
+        unsafe {
+            let block = GetEnvironmentStringsW();
+            if block.is_null() {
+                return envp;
+            }
+            let mut cursor = block.cast_const();
+            while *cursor != 0 {
+                let (entry, len) = wide_to_utf8(cursor);
+                // Entries such as `=C:=C:\` name per-drive directories, not variables.
+                if let Some(entry) = entry.filter(|entry| return !entry.starts_with(b"=")) {
+                    envp.push(entry);
+                }
+                cursor = cursor.add(len + 1);
+            }
+            FreeEnvironmentStringsW(block);
+        }
+        return envp;
+    }
+
+    /// On Windows (IIS hosting), argv/envp aren't mutable by other entities in
+    /// the host process model, so reading them is safe. This is intentionally
+    /// different from the Unix branch, where /proc/self/{cmdline,environ} can't
+    /// be trusted from an injected library.
+    pub fn detect_process_info(language: &str) -> ProcessInfo {
+        return ProcessInfo {
+            args: process_args(),
+            envp: process_envp(),
+            language: language.as_bytes().to_vec(),
+        };
+    }
+
+    /// No-op on Windows: IIS workers have no console, and hosts receive the
+    /// diagnostics in the returned error instead.
     pub fn write_stderr(_msg: &str) {}
 }
 
@@ -136,9 +291,7 @@ struct PresenceRecordingReader<'a, R> {
 }
 
 impl<R: ConfigRead> ConfigRead for PresenceRecordingReader<'_, R> {
-    type IoError = R::IoError;
-
-    fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
+    fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         let outcome = self.inner.read(path);
         match &outcome {
             Ok(bytes) => {
@@ -147,10 +300,13 @@ impl<R: ConfigRead> ConfigRead for PresenceRecordingReader<'_, R> {
                     self.empty_file_present.set(true);
                 }
             }
-            Err(ConfigReadError::NotFound) => {}
-            Err(_) => {
-                self.present.set(true);
-                self.read_failed.set(true);
+            Err(error) => {
+                // NotFound means the layer is simply not installed; every
+                // other error is a real read failure.
+                if error.kind() != io::ErrorKind::NotFound {
+                    self.present.set(true);
+                    self.read_failed.set(true);
+                }
             }
         }
         return outcome;
@@ -260,19 +416,15 @@ pub(crate) mod tests {
     struct NotFoundReader;
 
     impl ConfigRead for NotFoundReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(&self, _path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
-            return Err(ConfigReadError::NotFound);
+        fn read(&self, _path: &str) -> io::Result<Vec<u8>> {
+            return Err(io::ErrorKind::NotFound.into());
         }
     }
 
     struct MalformedReader;
 
     impl ConfigRead for MalformedReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(&self, _path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
+        fn read(&self, _path: &str) -> io::Result<Vec<u8>> {
             // Syntactically broken YAML — forces the configurator into an
             // error path so we can check that the caller-visible error is
             // non-empty.
@@ -283,9 +435,7 @@ pub(crate) mod tests {
     struct EmptyReader;
 
     impl ConfigRead for EmptyReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(&self, _path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
+        fn read(&self, _path: &str) -> io::Result<Vec<u8>> {
             return Ok(Vec::new());
         }
     }
@@ -298,9 +448,7 @@ pub(crate) mod tests {
     pub(crate) struct PopulatedReader;
 
     impl ConfigRead for PopulatedReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
+        fn read(&self, path: &str) -> io::Result<Vec<u8>> {
             if path == Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
                 return Ok(br#"
 rules:
@@ -315,7 +463,7 @@ rules:
 "#
                 .to_vec());
             } else {
-                return Err(ConfigReadError::NotFound);
+                return Err(io::ErrorKind::NotFound.into());
             }
         }
     }
@@ -378,9 +526,7 @@ rules:
     struct BothSourcesReader;
 
     impl ConfigRead for BothSourcesReader {
-        type IoError = core::convert::Infallible;
-
-        fn read(&self, path: &str) -> Result<Vec<u8>, ConfigReadError<Self::IoError>> {
+        fn read(&self, path: &str) -> io::Result<Vec<u8>> {
             if path == Configurator::LOCAL_STABLE_CONFIGURATION_PATH {
                 return Ok(br#"
 rules:
@@ -408,7 +554,7 @@ rules:
 "#
                 .to_vec());
             } else {
-                return Err(ConfigReadError::NotFound);
+                return Err(io::ErrorKind::NotFound.into());
             }
         }
     }
@@ -448,7 +594,7 @@ rules:
     mod platform_read {
         use super::PlatformConfigRead;
         use alloc::format;
-        use libdd_library_config::{ConfigRead, ConfigReadError, MAX_CONFIG_FILE_SIZE};
+        use libdd_library_config::{io, ConfigRead, MAX_CONFIG_FILE_SIZE};
         use pretty_assertions::assert_eq;
         use std::fs;
         use std::io::Write;
@@ -480,20 +626,20 @@ rules:
             let err = PlatformConfigRead
                 .read(path.to_str().unwrap())
                 .expect_err("missing path must be NotFound");
-            assert!(matches!(err, ConfigReadError::NotFound));
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
         }
 
         #[test]
         fn read_directory_surfaces_io_error() {
             // /tmp is a directory; opening it O_RDONLY succeeds but reading
             // from a directory fd returns an error on Linux/macOS. Either
-            // path must surface as ConfigReadError::Io, not a panic.
+            // path must surface as an I/O error, not a panic.
             let dir = std::env::temp_dir();
             let result = PlatformConfigRead.read(dir.to_str().unwrap());
             assert!(
-                matches!(result, Err(ConfigReadError::Io(_))),
-                "expected Io error, got {:?}",
-                result.as_ref().err().map(core::mem::discriminant),
+                matches!(&result, Err(e) if e.kind() != io::ErrorKind::NotFound),
+                "expected an I/O error, got {:?}",
+                result.as_ref().err().map(|e| return e.kind()),
             );
         }
 
@@ -517,9 +663,9 @@ rules:
             let result = PlatformConfigRead.read(path.to_str().unwrap());
             let _ = fs::remove_file(&path);
             assert!(
-                matches!(result, Err(ConfigReadError::TooLarge)),
-                "expected TooLarge, got {:?}",
-                result.as_ref().err().map(core::mem::discriminant),
+                matches!(&result, Err(e) if e.kind() == io::ErrorKind::FileTooLarge),
+                "expected FileTooLarge, got {:?}",
+                result.as_ref().err().map(|e| return e.kind()),
             );
         }
     }
@@ -528,7 +674,7 @@ rules:
     mod platform_read_windows {
         use super::PlatformConfigRead;
         use alloc::format;
-        use libdd_library_config::{ConfigRead, ConfigReadError};
+        use libdd_library_config::{io, ConfigRead};
         use pretty_assertions::assert_eq;
         use std::fs;
         use std::path::PathBuf;
@@ -561,7 +707,7 @@ rules:
             let err = PlatformConfigRead
                 .read(path.to_str().unwrap())
                 .expect_err("missing path must be NotFound");
-            assert!(matches!(err, ConfigReadError::NotFound));
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
         }
     }
 }

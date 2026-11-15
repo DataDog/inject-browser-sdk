@@ -14,7 +14,7 @@ This project enables automatic injection of the Datadog RUM Browser SDK into HTM
 
 The project consists of several components:
 
-1. **[Core Injection Library](lib/)**: Written in Rust, handling the HTML parsing and determining appropriate injection location
+1. **[Core Injection Library](lib/)**: Written in Rust, handling the HTML parsing and determining appropriate injection location. It builds for native targets and for `wasm32-unknown-unknown`, so it can be embedded in Wasm guests (the filesystem-backed stable-configuration surface is native-only; hosts pass resolved configuration in through the ordinary API)
 2. **Web Server Module**: Native module for IIS (Other proxies/web servers may live in different repos)
 3. **Installer Scripts**: For easy deployment and configuration
 

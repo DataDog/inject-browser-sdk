@@ -68,7 +68,9 @@
 //!            HTTP response chunk to the outgoing stream.
 //!
 //!     7. If [`InjectorResult::injected`] was never `true`, call [`injector_end`] and write the
-//!        returned slices to the outgoing stream.
+//!        returned slices to the outgoing stream. If the `content-length` header was removed
+//!        instead of updated, call [`injector_end_without_padding`]: it returns the same slices
+//!        without the padding.
 //!
 //!     8. Call [`injector_cleanup`] to free the `Injector` instance.
 //!
@@ -92,7 +94,7 @@ mod no_std_support {
     #[global_allocator]
     static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", windows)))]
     #[panic_handler]
     fn panic(info: &core::panic::PanicInfo) -> ! {
         unsafe {
@@ -102,6 +104,20 @@ mod no_std_support {
             );
         }
         loop {}
+    }
+
+    /// Fail fast with FAST_FAIL_FATAL_APP_EXIT, as `std::process::abort` does
+    /// on Windows: an IIS worker must not keep running after a panic.
+    #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+    #[panic_handler]
+    fn panic(_info: &core::panic::PanicInfo) -> ! {
+        unsafe { core::arch::asm!("int 0x29", in("ecx") 7, options(noreturn, nostack)) }
+    }
+
+    #[cfg(all(windows, target_arch = "aarch64"))]
+    #[panic_handler]
+    fn panic(_info: &core::panic::PanicInfo) -> ! {
+        unsafe { core::arch::asm!("brk 0xf003", in("x0") 7, options(noreturn, nostack)) }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -117,10 +133,12 @@ mod no_std_support {
 
 mod injector;
 mod snippet;
+mod snippet_config;
 mod stable_config;
 
 pub use injector::*;
 pub use snippet::*;
+pub use snippet_config::*;
 pub use stable_config::*;
 
 #[cfg(test)]

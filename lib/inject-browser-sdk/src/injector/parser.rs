@@ -4,103 +4,356 @@
 //
 // Copyright 2024-Present Datadog, Inc.
 
-//! Tokenizer-level scan of the head of an HTML document, looking for the earliest position the
-//! snippet can be injected at. See [`InjectionPointLocator`].
+//! Tokenizer-level scan of the head of an HTML document, looking for where within it the snippet
+//! goes. See [`find_injection_point`].
 
-use super::encoding::has_encoding_attributes;
+use memchr::{memchr, memchr2};
 
-/// Stateless helper used to locate the "injection point", in other words where we should inject the
-/// snippet in an HTML document.
+use super::encoding::{has_encoding_attributes, meta_kind, MetaKind};
+use super::head_open_tag::is_whitespace_reference;
+use super::{DOCUMENT_CHARSET_SCAN_LIMIT, WALK_LIMIT};
+
+/// Where [`find_injection_point`] says the snippet goes.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(super) enum Placement {
+    /// At this index of the window.
+    At(usize),
+    /// The window ends before the walk can tell, and more data may still come: the same call on a
+    /// longer window will. Never returned for a window of [`WALK_LIMIT`] bytes or more.
+    NeedMore,
+    /// Nowhere: any point would push a character encoding declaration further into the document.
+    Decline,
+}
+
+/// Returns where to inject the snippet within `window`, the first bytes of the document, given
+/// `head_end`, the index just past the `<head>` start tag. `complete` tells whether `window` is the
+/// whole document; when it is not, it must hold at least [`DOCUMENT_CHARSET_SCAN_LIMIT`] bytes.
 ///
-/// The current implementation looks for the earliest valid position within the `<head>` tag:
-/// * right after the open `<head>` tag,
-/// * or right after a character encoding declaration (`<meta charset=...>` or
-///   `<meta http-equiv="content-type" content="...; charset=...">`), as the snippet must not push
-///   such a declaration further into the document,
-/// * or right after a raw text element (`<script>`, `<title>`) or an inert one (`<noscript>`,
-///   `<template>`) holding such a declaration, since the snippet can go within neither, while the
-///   prescan honours a declaration written there all the same.
+/// The snippet goes right after the `<head>` tag, unless the head holds a `<meta>` tag the snippet
+/// has to stay behind: then right after the last of them. Those are the ones declaring the character
+/// encoding, the `http-equiv="X-UA-Compatible"` ones and the `http-equiv="Content-Security-Policy"`
+/// ones (see [`meta_kind`]). Every other `<meta>` tag, SEO, Open Graph, viewport or the tracer's
+/// `dd-trace-id`, is left behind the snippet.
 ///
-/// The character encoding declaration is the only thing the snippet is kept behind. In particular,
-/// the snippet is deliberately injected *before* a `<meta http-equiv="content-security-policy">`
-/// element that follows the encoding declaration: injecting as early as possible is the point of
-/// this locator, and a meta-delivered policy only governs what the parser sees after it.
+/// The tags of the head are walked from the `<head>` tag on, and the walk stops at:
+/// * the `</head>` tag, or a `</body>`, `</html>` or `</br>` one, which close the head as well,
+/// * a start tag the head cannot hold (anything but `base`, `basefont`, `bgsound`, `link`, `meta`,
+///   `noframes`, `noscript`, `script`, `style`, `template` and `title`), where the browser closes the
+///   head,
+/// * a `<![CDATA[` section, whose end cannot be told without tracking foreign content,
+/// * a tag starting past the first [`DOCUMENT_CHARSET_SCAN_LIMIT`] bytes, unless every start tag
+///   since the `<head>` one is a `<meta>` or a `<title>`, with nothing but whitespace and comments
+///   between them: only within such a run can an `X-UA-Compatible` declaration still be honoured,
+/// * the first [`WALK_LIMIT`] bytes, past which nothing is looked at: the snippet goes at the best
+///   point found within them.
 ///
-/// A meta-delivered policy written *before* the encoding declaration does govern the snippet, and a
-/// strict `script-src` blocks it outright. Nothing here works around that: a policy delivered by
-/// response header applies regardless of position and is the common case, so the fix belongs in
-/// nonce or hash support rather than in where the snippet is placed.
-pub(super) struct InjectionPointLocator;
+/// When the window ends before one of those, while more data may come, [`Placement::NeedMore`] is
+/// returned: within the run of `<meta>` and `<title>` tags, or within a `<meta>` tag starting in the
+/// first [`DOCUMENT_CHARSET_SCAN_LIMIT`] bytes, which could turn out to be one to stay behind. The
+/// outcome therefore never depends on where the window ends: called on any longer window of the same
+/// document, the walk would give the same answer.
+///
+/// The character encoding declaration is also what keeps the snippet behind a raw text element
+/// (`<script>`, `<title>`…) or an inert one (`<noscript>`, `<template>`) holding one within the first
+/// [`DOCUMENT_CHARSET_SCAN_LIMIT`] bytes: the encoding prescan reads the raw bytes and honours a
+/// declaration written there, while the snippet can go within neither. And should the first
+/// declaration within those bytes follow the point where the walk stops, out of the head, or within
+/// a tag or an element that does not end within the window, there is no point to inject at that
+/// would not push it further into the document: injection is declined.
+///
+/// The snippet goes *after* a `<meta http-equiv="content-security-policy">` the walk reaches: a
+/// meta-delivered policy only governs what the parser sees after it, so injecting ahead of one
+/// would exempt the snippet from a control the site wrote. This is opportunistic: nothing more is
+/// held back to look for one, and one past where the walk stops is not seen. A policy delivered by
+/// response header applies regardless of position and is the common case.
+pub(super) fn find_injection_point(window: &[u8], head_end: usize, complete: bool) -> Placement {
+    let window = &window[..window.len().min(WALK_LIMIT)];
+    // What follows the window may change the outcome only if it can come, and be walked.
+    let more = !complete && window.len() < WALK_LIMIT;
+    debug_assert!(complete || window.len() >= DOCUMENT_CHARSET_SCAN_LIMIT);
+    let charset_window = &window[..window.len().min(DOCUMENT_CHARSET_SCAN_LIMIT)];
+    // A declaration the prescan honours, within the given range of the window: only the first
+    // DOCUMENT_CHARSET_SCAN_LIMIT bytes count.
+    let declares_within = |start: usize, end: usize| {
+        let end = end.min(charset_window.len());
+        return contains_encoding_declaration(&charset_window[start.min(end)..end]);
+    };
 
-impl InjectionPointLocator {
-    /// Returns the index at which the snippet should be inserted, or `None` if no valid injection
-    /// point was found within `buffer`.
-    pub(super) fn find(buffer: &[u8]) -> Option<usize> {
-        let mut head_tag_point: Option<usize> = None;
-        let mut offset = 0;
+    let mut point = head_end;
+    // The prescan stops at the first declaration it resolves, so once one lies behind the point the
+    // ones that follow no longer matter.
+    let mut declared = contains_encoding_declaration(&window[..head_end]);
+    // Whether every start tag since the `<head>` one is a `<meta>` or a `<title>`, with no text but
+    // whitespace between them.
+    let mut leading = true;
+    let mut offset = head_end;
 
-        while let Some((tag_name, tag_start, tag_end)) = find_open_tag(buffer, offset) {
-            match tag_name {
-                TagName::Head if head_tag_point.is_none() => {
-                    head_tag_point = Some(tag_end);
+    let stop = loop {
+        let markup = next_markup(window, offset);
+        // Text closes the head: the walk ends at any but whitespace.
+        let text_end = match markup {
+            Markup::None => window.len(),
+            Markup::Unfinished(start) | Markup::CdataSection(start) => start,
+            Markup::Tag { start, .. } => start,
+        };
+        if holds_text(&window[offset..text_end]) {
+            break offset;
+        }
+        let (closing, name, tag_start, tag_end) = match markup {
+            Markup::None if more && leading => return Placement::NeedMore,
+            Markup::None => break window.len(),
+            Markup::Unfinished(start) => {
+                let walked = leading || start < DOCUMENT_CHARSET_SCAN_LIMIT;
+                if more && walked && (leading || could_be_meta(&window[start + 1..])) {
+                    return Placement::NeedMore;
                 }
-                TagName::Meta if has_encoding_attributes(&buffer[tag_start..tag_end]) => {
-                    return Some(tag_end);
-                }
-                TagName::RawText(name) | TagName::Inert(name) => {
-                    // The snippet can go within neither: in a raw text element it would be text
-                    // rather than markup, and in an inert one it would never run. The encoding
-                    // prescan runs over the raw bytes and knows neither state, so it honours a
-                    // declaration written in either, and such a declaration keeps the snippet behind
-                    // the element as a whole.
-                    let element_end = match find_element_end(buffer, tag_end, name) {
-                        Some(element_end) => element_end,
-                        None => {
-                            // The closing tag is not in `buffer`: either the element is never
-                            // closed, in which case everything that follows is its content too, or
-                            // it closes past the end of the buffer. Either way there is no point past
-                            // it to inject at, so fall back to the `<head>` point — unless the part
-                            // we can see already holds an encoding declaration, which that fallback
-                            // would push further into the document.
-                            if contains_encoding_declaration(&buffer[tag_end..]) {
-                                return None;
-                            }
-                            break;
-                        }
-                    };
-                    if contains_encoding_declaration(&buffer[tag_end..element_end]) {
-                        return Some(element_end);
-                    }
-                    offset = element_end;
-                    continue;
-                }
-                // Nothing past these can be injected at: `plaintext` switches the tokenizer to a
-                // state it never leaves, so what follows is text; a `frameset` puts the tree builder
-                // in insertion modes that ignore a script start tag, within the frameset and after
-                // it alike; and where a CDATA section ends cannot be told at all. Fall back to the
-                // `<head>` point, unless what follows holds a declaration the prescan would honour,
-                // which that fallback would push further into the document.
-                TagName::Plaintext | TagName::Frameset | TagName::CdataSection => {
-                    if contains_encoding_declaration(&buffer[tag_end..]) {
-                        return None;
-                    }
-                    break;
-                }
-                _ => {
-                    // Skip unknown tags, continue scanning
-                }
+                break start;
             }
-            offset = tag_end;
+            Markup::CdataSection(start) => break start,
+            Markup::Tag {
+                closing,
+                name,
+                start,
+                end,
+            } => (closing, name, start, end),
+        };
+
+        if tag_start >= DOCUMENT_CHARSET_SCAN_LIMIT && !leading {
+            break tag_start;
         }
 
-        return head_tag_point;
+        if closing {
+            // The `in head` insertion mode closes the head on these end tags, and ignores the others.
+            if [b"head".as_slice(), b"body", b"html", b"br"]
+                .iter()
+                .any(|closes_head| return compare_case_insensitive(name, closes_head))
+            {
+                break tag_start;
+            }
+            offset = tag_end;
+            continue;
+        }
+
+        // The `in head` insertion mode ignores a `<head>` start tag, and merges an `<html>` one into
+        // the root element: neither ends the head.
+        if compare_case_insensitive(name, b"head") || compare_case_insensitive(name, b"html") {
+            offset = tag_end;
+            continue;
+        }
+
+        let tag_name = parse_tag_name(name);
+        if !matches!(tag_name, Some(TagName::Meta | TagName::RawText(b"title"))) {
+            leading = false;
+            if tag_start >= DOCUMENT_CHARSET_SCAN_LIMIT {
+                break tag_start;
+            }
+        }
+
+        match tag_name {
+            Some(TagName::Meta) => {
+                let kind = meta_kind(&window[tag_start..tag_end]);
+                declared |= kind == MetaKind::Encoding;
+                if kind != MetaKind::Other {
+                    point = tag_end;
+                }
+                offset = tag_end;
+            }
+            Some(TagName::RawText(element) | TagName::Inert(element))
+                if is_allowed_in_head(element) =>
+            {
+                // The snippet can go within neither: in a raw text element it would be text rather
+                // than markup, and in an inert one it would never run.
+                let Some(element_end) = find_element_end(window, tag_end, element) else {
+                    // Where it ends matters if it is a `<title>` within the run, or if the content
+                    // seen so far holds a declaration: the point would move past the element.
+                    if more && (leading || declares_within(tag_end, window.len())) {
+                        return Placement::NeedMore;
+                    }
+                    break tag_start;
+                };
+                if declares_within(tag_end, element_end) {
+                    declared = true;
+                    point = element_end;
+                }
+                offset = element_end;
+            }
+            _ if is_allowed_in_head(name) => offset = tag_end,
+            _ => break tag_start,
+        }
+    };
+
+    if !declared && declares_within(stop, charset_window.len()) {
+        return Placement::Decline;
     }
+    return Placement::At(point);
+}
+
+/// Returns whether `input`, what [`next_markup`] skipped on its way to the next tag, holds text other
+/// than whitespace, rather than only comments, doctypes and bogus comments.
+fn holds_text(input: &[u8]) -> bool {
+    let mut i = 0;
+    loop {
+        while i < input.len() && input[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i == input.len() {
+            return false;
+        }
+        // Whatever `next_markup` skipped ends within `input`.
+        let end = match input[i] {
+            b'<' if input[i..].starts_with(b"<!--") => find_comment_end(input, i),
+            b'<' if ends_at_first_greater_than(&input[i + 1..]) => find_bogus_comment_end(input, i),
+            // A character reference to whitespace is whitespace. One the input ends within is
+            // not text yet: more of it may tell.
+            b'&' => {
+                let name = &input[i + 1..];
+                let length = name
+                    .iter()
+                    .enumerate()
+                    .take_while(|&(index, &byte)| {
+                        return byte.is_ascii_alphanumeric() || (index == 0 && byte == b'#');
+                    })
+                    .count();
+                if i + 1 + length == input.len() {
+                    return false;
+                }
+                let terminated = name[length] == b';';
+                if !is_whitespace_reference(&name[..length], terminated) {
+                    return true;
+                }
+                Some(i + 1 + length + usize::from(terminated))
+            }
+            // A stray `<` is text as well.
+            _ => return true,
+        };
+        match end {
+            Some(end) => i = end,
+            None => return false,
+        }
+    }
+}
+
+/// Returns whether `rest`, the bytes just after the `<` of markup the window ends within, may be the
+/// start of a `<meta>` tag.
+fn could_be_meta(rest: &[u8]) -> bool {
+    if rest.len() <= b"meta".len() {
+        return compare_case_insensitive(rest, &b"meta"[..rest.len()]);
+    }
+    return is_tag_named(rest, false, b"meta");
+}
+
+/// Returns whether the start tag named `name` is one the head can hold. Any other closes the head,
+/// as the tree builder does in the `in head` insertion mode.
+fn is_allowed_in_head(name: &[u8]) -> bool {
+    return [
+        b"base".as_slice(),
+        b"basefont",
+        b"bgsound",
+        b"link",
+        b"meta",
+        b"noframes",
+        b"noscript",
+        b"script",
+        b"style",
+        b"template",
+        b"title",
+    ]
+    .iter()
+    .any(|allowed| return compare_case_insensitive(name, allowed));
+}
+
+/// The next piece of markup [`next_markup`] finds. Comments, doctypes and bogus comments are
+/// skipped rather than reported.
+enum Markup<'a> {
+    /// There is no markup left.
+    None,
+    /// Markup that starts at the index, but does not end within the input.
+    Unfinished(usize),
+    /// A `<![CDATA[` section starting at the index.
+    CdataSection(usize),
+    /// A start or end tag, from its `<` at `start` to just past its `>` at `end`.
+    Tag {
+        closing: bool,
+        name: &'a [u8],
+        start: usize,
+        end: usize,
+    },
+}
+
+/// Returns the next tag starting at or after `offset` in `input`, skipping text, comments, doctypes
+/// and bogus comments.
+fn next_markup(input: &[u8], offset: usize) -> Markup<'_> {
+    let mut i = offset;
+
+    while i < input.len() {
+        match memchr(b'<', &input[i..]) {
+            Some(text) => i += text,
+            None => return Markup::None,
+        }
+
+        // The content of a comment is not markup either, and the encoding prescan skips it too.
+        if input[i..].starts_with(b"<!--") {
+            match find_comment_end(input, i) {
+                Some(end) => i = end,
+                None => return Markup::Unfinished(i),
+            }
+            continue;
+        }
+
+        // A `<![CDATA[` section runs to `]]>` within `svg` or `math` content and is a bogus comment
+        // ending at the first `>` anywhere else. Telling the two apart means tracking foreign
+        // content, and guessing wrong would either inject into CDATA text, where the snippet would
+        // never run, or skip real markup. Hand it to the caller, which stops there.
+        if input[i..].starts_with(b"<![CDATA[") {
+            return Markup::CdataSection(i);
+        }
+
+        let tag_start = i;
+        let rest = &input[tag_start + 1..];
+
+        // A `<` ending the input may start a tag as much as text: what follows tells.
+        if rest.is_empty() {
+            return Markup::Unfinished(tag_start);
+        }
+
+        // A doctype or a bogus comment holds no attribute value a `>` could hide in, so it ends at
+        // the very next `>` rather than at the one `find_tag_close` looks for.
+        if ends_at_first_greater_than(rest) {
+            match find_bogus_comment_end(input, tag_start) {
+                Some(end) => i = end,
+                None => return Markup::Unfinished(tag_start),
+            }
+            continue;
+        }
+
+        if !starts_markup(rest) {
+            // A stray `<`, as in `a < b`, is text rather than the start of a tag.
+            i += 1;
+            continue;
+        }
+
+        let Some(tag_close) = find_tag_close(rest) else {
+            return Markup::Unfinished(tag_start);
+        };
+        let closing = rest[0] == b'/';
+        let name = &rest[usize::from(closing)..];
+        // The tag is closed, so its name ends at the latest at the `>`.
+        let name_end = find_tag_name_end(name).unwrap_or(name.len());
+
+        return Markup::Tag {
+            closing,
+            name: &name[..name_end],
+            start: tag_start,
+            end: tag_start + tag_close + 2,
+        };
+    }
+
+    return Markup::None;
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum TagName {
     Meta,
-    Head,
     /// An element whose content is text rather than markup (`script`, `style`, `title`,
     /// `textarea`, `iframe`, `xmp`), holding its lower case name. The snippet cannot go within such
     /// content, while the encoding prescan still honours a declaration written there.
@@ -112,69 +365,6 @@ enum TagName {
     /// `plaintext`, which switches the tokenizer to a state it never leaves: everything that follows
     /// the tag is text, and no closing tag can end it.
     Plaintext,
-    /// `frameset`, which puts the tree builder in the `in frameset` insertion mode, and then in
-    /// `after frameset`: both ignore a script start tag, so nothing past the tag can run either.
-    Frameset,
-    /// A `<![CDATA[` section, whose end cannot be located without tracking foreign content: it runs
-    /// to `]]>` within `svg` or `math` and ends at the first `>` anywhere else. Not a tag, but
-    /// reported as one so the scan can stop where it starts, holding the index just past the opener.
-    CdataSection,
-}
-
-fn find_open_tag(input: &[u8], offset: usize) -> Option<(TagName, usize, usize)> {
-    let mut i = offset;
-
-    while i < input.len() {
-        // find open tag
-        if input[i] != b'<' {
-            i += 1;
-            continue;
-        }
-
-        // The content of a comment is not markup either, and the encoding prescan skips it too.
-        if input[i..].starts_with(b"<!--") {
-            i = find_comment_end(input, i)?;
-            continue;
-        }
-
-        // A `<![CDATA[` section runs to `]]>` within `svg` or `math` content and is a bogus comment
-        // ending at the first `>` anywhere else. Telling the two apart means tracking foreign
-        // content, and guessing wrong would either inject into CDATA text, where the snippet would
-        // never run, or skip real markup. Hand it to the caller, which stops the scan there.
-        if input[i..].starts_with(b"<![CDATA[") {
-            return Some((TagName::CdataSection, i, i + b"<![CDATA[".len()));
-        }
-
-        let tag_start = i;
-        let rest = &input[tag_start + 1..];
-
-        // A doctype or a bogus comment holds no attribute value a `>` could hide in, so it ends at
-        // the very next `>` rather than at the one `find_tag_close` looks for.
-        if ends_at_first_greater_than(rest) {
-            i = find_bogus_comment_end(input, tag_start)?;
-            continue;
-        }
-
-        if !starts_markup(rest) {
-            // A stray `<`, as in `a < b`, is text rather than the start of a tag.
-            i += 1;
-            continue;
-        }
-
-        // find end of tag
-        let tag_close: usize = find_tag_close(rest)?;
-        let tag_end = tag_start + tag_close + 2;
-
-        // extract tag name
-        let name_end = find_tag_name_end(rest)?;
-
-        match parse_tag_name(&rest[..name_end]) {
-            Some(relevant_tag_name) => return Some((relevant_tag_name, tag_start, tag_end)),
-            None => i = tag_end,
-        }
-    }
-
-    return None;
 }
 
 /// The state script content can be in. A `<!--` written in a script opens the escaped state, a
@@ -215,7 +405,13 @@ fn find_raw_text_end(input: &[u8], content_start: usize, name: &[u8]) -> Option<
         }
 
         if input[i] != b'<' {
-            i += 1;
+            // Only a `<` matters past here, and in a script a `-` as well, which the checks above
+            // look at.
+            let next = match script {
+                true => memchr2(b'<', b'-', &input[i + 1..]),
+                false => memchr(b'<', &input[i + 1..]),
+            };
+            i = next.map_or(input.len(), |next| return i + 1 + next);
             continue;
         }
 
@@ -258,10 +454,7 @@ fn find_element_end(input: &[u8], content_start: usize, name: &[u8]) -> Option<u
     let mut i = content_start;
 
     while i < input.len() {
-        if input[i] != b'<' {
-            i += 1;
-            continue;
-        }
+        i += memchr(b'<', &input[i..])?;
 
         // A `</template>` written within a comment closes nothing, so the comment has to be skipped
         // through its own `-->` terminator rather than through the first `>` it holds.
@@ -341,7 +534,9 @@ fn find_comment_end(input: &[u8], start: usize) -> Option<usize> {
     let content_start = start + b"<!--".len();
     let mut i = start + b"<!".len();
 
-    while i < input.len() {
+    // Both terminators start with a dash.
+    while let Some(dash) = memchr(b'-', &input[i..]) {
+        i += dash;
         if input[i..].starts_with(b"-->") {
             return Some(i + b"-->".len());
         }
@@ -393,10 +588,7 @@ fn ends_at_first_greater_than(rest: &[u8]) -> bool {
 /// Returns the index just past the `>` ending the markup that starts with the `<` at `start`, for the
 /// markup [`ends_at_first_greater_than`] describes, or `None` if there is no `>` within `input`.
 fn find_bogus_comment_end(input: &[u8], start: usize) -> Option<usize> {
-    return input[start..]
-        .iter()
-        .position(|&byte| return byte == b'>')
-        .map(|index| return start + index + 1);
+    return memchr(b'>', &input[start..]).map(|index| return start + index + 1);
 }
 
 /// Returns whether `rest`, the bytes just after a `<` character, starts an open (`closing` false) or
@@ -423,19 +615,67 @@ fn is_tag_named(rest: &[u8], closing: bool, name: &[u8]) -> bool {
 
 /// Returns whether `content` holds a character encoding declaration.
 ///
-/// Used to decide whether the snippet has to be kept behind an inert element: the browser's encoding
-/// prescan reads the raw bytes, so it honours a declaration wherever it is nested.
-fn contains_encoding_declaration(content: &[u8]) -> bool {
+/// Used to decide whether the snippet has to be kept behind an element or declined: the browser's
+/// encoding prescan reads the raw bytes, so it honours a declaration wherever it is nested.
+///
+/// A `<meta>` tag that `content` ends in the middle of counts as a declaration if the part of it
+/// that can be seen is one: the snippet is never placed before a declaration that more data might
+/// complete.
+pub(super) fn contains_encoding_declaration(content: &[u8]) -> bool {
+    // A declaration is a `<meta` tag, whose name has to be there in full: without one, walking the
+    // markup cannot find any.
+    if !holds_meta_tag(content) {
+        return false;
+    }
     let mut offset = 0;
 
-    while let Some((tag_name, tag_start, tag_end)) = find_open_tag(content, offset) {
-        if tag_name == TagName::Meta && has_encoding_attributes(&content[tag_start..tag_end]) {
-            return true;
+    loop {
+        match next_markup(content, offset) {
+            Markup::None => return false,
+            Markup::Unfinished(start) => {
+                return is_tag_named(&content[start + 1..], false, b"meta")
+                    && has_encoding_attributes(&content[start..]);
+            }
+            // The prescan knows no CDATA section and reads what it holds as markup.
+            Markup::CdataSection(start) => offset = start + b"<![CDATA[".len(),
+            Markup::Tag {
+                closing: false,
+                name,
+                start,
+                end,
+            } if compare_case_insensitive(name, b"meta")
+                && has_encoding_attributes(&content[start..end]) =>
+            {
+                return true;
+            }
+            Markup::Tag { end, .. } => offset = end,
         }
-        offset = tag_end;
     }
+}
 
-    return false;
+/// Whether `content` holds `<meta`, in any case, anywhere, markup or not: the cheap necessary
+/// condition for it to hold a `<meta>` tag. One pass over five shifted views without branches or
+/// early exit, which the compiler vectorizes, rather than a search stopping at every `<`.
+fn holds_meta_tag(content: &[u8]) -> bool {
+    let Some(positions) = content.len().checked_sub(b"<meta".len() - 1) else {
+        return false;
+    };
+    let view = |shift: usize| return &content[shift..shift + positions];
+    // ASCII letters only differ from their upper case by 0x20, and `<` is compared as is.
+    return view(0)
+        .iter()
+        .zip(view(1))
+        .zip(view(2))
+        .zip(view(3))
+        .zip(view(4))
+        .fold(false, |found, ((((&lt, &m), &e), &t), &a)| {
+            return found
+                | ((lt == b'<')
+                    & (m | 0x20 == b'm')
+                    & (e | 0x20 == b'e')
+                    & (t | 0x20 == b't')
+                    & (a | 0x20 == b'a'));
+        });
 }
 
 /// Where within a tag [`find_tag_close`] is reading, which is what decides whether a quote opens an
@@ -456,27 +696,35 @@ enum TagPosition {
     QuotedAttributeValue(u8),
 }
 
-/// Returns the index of the `>` character closing the tag whose content starts at the beginning of
-/// `input`, or `None` if there is none.
-///
-/// `>` characters appearing within a quoted attribute value do not close the tag, so they are
-/// skipped: injecting at such a position would insert the snippet inside the attribute value.
-///
-/// A quote opens such a value only where the tokenizer reads one, right after an attribute's `=`.
-/// Written in a tag name, in an attribute name or in an unquoted value it is a parse error the
-/// tokenizer keeps as an ordinary character, so `<head '>` ends at its `>` like any other tag;
-/// skipping to a matching quote there would run past the real end of the tag and hand out an
-/// injection point within markup the browser has already parsed.
+/// The bytes [`find_tag_close`] may change its position on: whitespace, `/`, `=`, quotes and `>`.
+/// Past the first byte of a name or an unquoted value, any other leaves the position as it is.
+const TAG_DELIMITERS: [bool; 256] = {
+    let mut table = [false; 256];
+    let delimiters = *b"\t\n\x0C\r /='\">";
+    let mut i = 0;
+    while i < delimiters.len() {
+        table[delimiters[i] as usize] = true;
+        i += 1;
+    }
+    table
+};
+
 fn find_tag_close(input: &[u8]) -> Option<usize> {
     let mut position = TagPosition::TagName;
+    // The `/` of an end tag comes before its name, which a quote or an `=` is part of as much as of
+    // a start tag's: `</a="b>` ends at its `>`.
+    let name_start = usize::from(input.first() == Some(&b'/'));
 
-    for (index, &byte) in input.iter().enumerate() {
+    let mut index = name_start;
+    while index < input.len() {
+        let byte = input[index];
         position = match (position, byte) {
-            // Checked before `>`, which does not close the tag while within a quoted value.
-            (TagPosition::QuotedAttributeValue(quote), byte) => match byte == quote {
-                true => TagPosition::BeforeAttributeName,
-                false => TagPosition::QuotedAttributeValue(quote),
-            },
+            // Checked before `>`, which does not close the tag while within a quoted value: the
+            // whole value is skipped, up to its closing quote.
+            (TagPosition::QuotedAttributeValue(quote), _) => {
+                index += memchr(quote, &input[index..])?;
+                TagPosition::BeforeAttributeName
+            }
 
             (_, b'>') => return Some(index),
 
@@ -488,14 +736,17 @@ fn find_tag_close(input: &[u8]) -> Option<usize> {
 
             (TagPosition::AttributeName, b'=') => TagPosition::BeforeAttributeValue,
 
-            // A value ends at the whitespace following it, and the `/` of a self-closing tag ends
-            // whatever precedes it, so both leave the next attribute to start.
+            // The `/` of a self-closing tag ends the name preceding it, leaving the next attribute
+            // to start, and so does one between attributes: in `<meta /="x>">` the `=` starts an
+            // attribute name and the quote is part of it. Written in an unquoted value, a `/` is
+            // part of the value.
             (
                 TagPosition::TagName
-                | TagPosition::UnquotedAttributeValue
-                | TagPosition::AttributeName,
+                | TagPosition::AttributeName
+                | TagPosition::BeforeAttributeName,
                 b'/',
             ) => TagPosition::BeforeAttributeName,
+            // A value ends at the whitespace following it.
             (TagPosition::TagName | TagPosition::UnquotedAttributeValue, byte)
                 if byte.is_ascii_whitespace() =>
             {
@@ -507,6 +758,16 @@ fn find_tag_close(input: &[u8]) -> Option<usize> {
 
             _ => position,
         };
+        index += 1;
+        // Within a name or an unquoted value, the bytes up to the next delimiter change nothing.
+        if matches!(
+            position,
+            TagPosition::TagName | TagPosition::AttributeName | TagPosition::UnquotedAttributeValue
+        ) {
+            while index < input.len() && !TAG_DELIMITERS[usize::from(input[index])] {
+                index += 1;
+            }
+        }
     }
 
     return None;
@@ -515,8 +776,6 @@ fn find_tag_close(input: &[u8]) -> Option<usize> {
 fn parse_tag_name(input: &[u8]) -> Option<TagName> {
     if compare_case_insensitive(input, b"meta") {
         return Some(TagName::Meta);
-    } else if compare_case_insensitive(input, b"head") {
-        return Some(TagName::Head);
     } else if compare_case_insensitive(input, b"script") {
         return Some(TagName::RawText(b"script"));
     } else if compare_case_insensitive(input, b"style") {
@@ -531,8 +790,6 @@ fn parse_tag_name(input: &[u8]) -> Option<TagName> {
         return Some(TagName::RawText(b"xmp"));
     } else if compare_case_insensitive(input, b"plaintext") {
         return Some(TagName::Plaintext);
-    } else if compare_case_insensitive(input, b"frameset") {
-        return Some(TagName::Frameset);
     } else if compare_case_insensitive(input, b"noscript") {
         return Some(TagName::Inert(b"noscript"));
     } else if compare_case_insensitive(input, b"noframes") {
@@ -558,6 +815,7 @@ pub(super) fn compare_case_insensitive(a: &[u8], b_lower_case: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::head_open_tag::HeadOpenTagLocator;
     use super::*;
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -676,7 +934,8 @@ mod tests {
             "<html><head><meta http-equiv='content-type' content=\"text/html; charset='utf-8'\"></head></html>",
             "<html><head><meta http-equiv='content-type' content=\"text/html; charset='utf-8'\">{{SNIPPET}}</head></html>",
         );
-        // A `content` mentioning 'charset' without a value declares nothing.
+        // A `content` mentioning 'charset' without a value declares nothing: the snippet need not
+        // stay behind it.
         test_injector(
             "<html><head><meta http-equiv='content-type' content='text/html; charset='></head></html>",
             "<html><head>{{SNIPPET}}<meta http-equiv='content-type' content='text/html; charset='></head></html>",
@@ -761,13 +1020,14 @@ mod tests {
     fn noembed_is_an_inert_element() {
         // `noembed` holds raw text, and its content is only shown by a browser that cannot embed, so
         // the snippet cannot go inside it; the encoding prescan still honours a declaration there.
+        // The head cannot hold one, so the declaration within is out of the head.
         test_injector(
             "<html><head><noembed><meta charset='utf-8'></noembed></head></html>",
-            "<html><head><noembed><meta charset='utf-8'></noembed>{{SNIPPET}}</head></html>",
+            "<html><head><noembed><meta charset='utf-8'></noembed></head></html>",
         );
         test_injector(
             "<html><head></head><body><noembed><meta charset=utf-8></noembed>",
-            "<html><head></head><body><noembed><meta charset=utf-8></noembed>{{SNIPPET}}",
+            "<html><head></head><body><noembed><meta charset=utf-8></noembed>",
         );
         test_injector(
             "<html><head><noembed>no embed here</noembed></head></html>",
@@ -845,8 +1105,8 @@ mod tests {
             "<html><head data-x='>'><meta charset='utf-8' data-y='>'>{{SNIPPET}}</head></html>",
         );
         test_injector(
-            "<html><head data-x='>'><meta name='>'></head></html>",
-            "<html><head data-x='>'>{{SNIPPET}}<meta name='>'></head></html>",
+            "<html><head data-x='>'><meta http-equiv=X-UA-Compatible content='>'></head></html>",
+            "<html><head data-x='>'><meta http-equiv=X-UA-Compatible content='>'>{{SNIPPET}}</head></html>",
         );
     }
 
@@ -865,17 +1125,52 @@ mod tests {
             "<html><head data-x=a'><plaintext>'></head></html>",
             "<html><head data-x=a'>{{SNIPPET}}<plaintext>'></head></html>",
         );
-        // A quote in a tag name is an ordinary character too, so the tag it opens ends at the first
-        // `>` and the declaration written after it is markup the snippet has to stay behind.
+        // A quote in an attribute name is an ordinary character too, so the tag ends at the first
+        // `>` and the meta tag written after it is markup the snippet goes after.
+        test_injector(
+            "<html><head><link data'><meta charset=utf-8>'></head></html>",
+            "<html><head><link data'><meta charset=utf-8>{{SNIPPET}}'></head></html>",
+        );
+        // A quote in a tag name as well: the tag is one the head cannot hold, and the declaration
+        // that follows it is out of the head, so injection is declined.
         test_injector(
             "<html><head><p'><meta charset=utf-8>'></head></html>",
-            "<html><head><p'><meta charset=utf-8>{{SNIPPET}}'></head></html>",
+            "<html><head><p'><meta charset=utf-8>'></head></html>",
         );
         // A value quoted the usual way still hides the `>` it holds, whitespace around the `=`
         // included.
         test_injector(
             "<html><head data-x = '>'><meta charset='utf-8'></head></html>",
             "<html><head data-x = '>'><meta charset='utf-8'>{{SNIPPET}}</head></html>",
+        );
+    }
+
+    #[test]
+    fn a_slash_between_attributes_starts_a_new_one() {
+        test_injector(
+            "<html><head><meta /=\"x><meta charset=utf-8>\"></head>",
+            "<html><head><meta /=\"x><meta charset=utf-8>{{SNIPPET}}\"></head>",
+        );
+    }
+
+    #[test]
+    fn an_equals_sign_starting_an_attribute_name_is_part_of_it() {
+        // The `"` after it is part of the name too: the attributes that follow are attributes.
+        test_injector(
+            "<html><head><meta charset=utf-8><meta /=\"  x http-equiv=X-UA-Compatible content=IE=edge>\"></head>",
+            "<html><head><meta charset=utf-8><meta /=\"  x http-equiv=X-UA-Compatible content=IE=edge>{{SNIPPET}}\"></head>",
+        );
+        test_injector(
+            "<html><head><meta /=\"  charset=utf-8>\"></head>",
+            "<html><head><meta /=\"  charset=utf-8>{{SNIPPET}}\"></head>",
+        );
+    }
+
+    #[test]
+    fn a_quote_in_an_end_tag_name_does_not_quote_anything() {
+        test_injector(
+            "<html><head><template></a=\"b><meta charset=utf-8></template><meta charset=utf-8>\"</head>",
+            "<html><head><template></a=\"b><meta charset=utf-8></template><meta charset=utf-8>{{SNIPPET}}\"</head>",
         );
     }
 
@@ -896,10 +1191,256 @@ mod tests {
     }
 
     #[test]
-    fn head_and_meta_tags() {
+    fn before_metas_it_need_not_stay_behind() {
+        // SEO, Open Graph, viewport, the tracer's metas, a report-only policy (ignored in a meta),
+        // and `http-equiv` values other than the three that matter: none of them hold the snippet
+        // back.
+        for meta in [
+            "<meta name=description content=x>",
+            "<meta property='og:title' content=x>",
+            "<meta name=viewport content='width=device-width'>",
+            "<meta http-equiv=Content-Security-Policy-Report-Only content=\"script-src 'self'\">",
+            "<meta name=content-security-policy content=x>",
+            "<meta name=dd-trace-id content=123><meta name=dd-trace-time content=456>",
+            "<meta http-equiv=refresh content=0>",
+            "<meta data-charset=utf-8>",
+            "<meta name=x-ua-compatible content=IE=edge>",
+        ] {
+            test_injector(
+                &alloc::format!("<html><head>{meta}<title>t</title></head>"),
+                &alloc::format!("<html><head>{{{{SNIPPET}}}}{meta}<title>t</title></head>"),
+            );
+            test_injector(
+                &alloc::format!("<html><head><meta charset=utf-8>{meta}</head>"),
+                &alloc::format!("<html><head><meta charset=utf-8>{{{{SNIPPET}}}}{meta}</head>"),
+            );
+        }
+    }
+
+    #[test]
+    fn stops_at_text() {
+        // Text closes the head: a meta past it is in the body, and holds nothing back.
+        test_injector(
+            "<html><head><title>t</title>stray<meta http-equiv=X-UA-Compatible content=IE=edge></head>",
+            "<html><head>{{SNIPPET}}<title>t</title>stray<meta http-equiv=X-UA-Compatible content=IE=edge></head>",
+        );
+        test_injector(
+            "<html><head>><meta http-equiv=Content-Security-Policy content=x></head>",
+            "<html><head>{{SNIPPET}}><meta http-equiv=Content-Security-Policy content=x></head>",
+        );
+        // Whitespace does not, nor a character reference to it.
+        test_injector(
+            "<html><head>\n &#32;&Tab;<meta http-equiv=X-UA-Compatible content=IE=edge></head>",
+            "<html><head>\n &#32;&Tab;<meta http-equiv=X-UA-Compatible content=IE=edge>{{SNIPPET}}</head>",
+        );
+        // An encoding declaration past it, which the prescan still honours: declined, as past a tag
+        // the head cannot hold.
+        test_injector(
+            "<html><head>&nbsp;<meta charset=utf-8></head>",
+            "<html><head>&nbsp;<meta charset=utf-8></head>",
+        );
+    }
+
+    #[test]
+    fn past_head_and_html_start_tags_within_the_head() {
+        // The browser ignores the one, merges the other into the root: the head goes on.
+        test_injector(
+            "<html><head><head><meta charset=utf-8></head>",
+            "<html><head><head><meta charset=utf-8>{{SNIPPET}}</head>",
+        );
+        test_injector(
+            "<html><head><html lang=en><meta charset=utf-8><title>t</title></head>",
+            "<html><head><html lang=en><meta charset=utf-8>{{SNIPPET}}<title>t</title></head>",
+        );
+    }
+
+    #[test]
+    fn after_a_content_security_policy_meta() {
+        // The policy only governs what follows it: the snippet goes under it, not ahead of it.
+        test_injector(
+            "<html><head><meta http-equiv=Content-Security-Policy content=\"script-src 'self'\"><title>t</title></head>",
+            "<html><head><meta http-equiv=Content-Security-Policy content=\"script-src 'self'\">{{SNIPPET}}<title>t</title></head>",
+        );
+        // After the last of the metas to stay behind, whichever comes first.
+        test_injector(
+            "<html><head><meta charset=utf-8><meta http-equiv=content-security-policy content=x><meta name=a></head>",
+            "<html><head><meta charset=utf-8><meta http-equiv=content-security-policy content=x>{{SNIPPET}}<meta name=a></head>",
+        );
+        test_injector(
+            "<html><head><meta http-equiv=content-security-policy content=x><meta charset=utf-8><meta name=a></head>",
+            "<html><head><meta http-equiv=content-security-policy content=x><meta charset=utf-8>{{SNIPPET}}<meta name=a></head>",
+        );
+        // Anywhere the walk reaches within the head, past other head elements.
+        test_injector(
+            "<html><head><title>t</title><link rel=icon><script>1</script><meta http-equiv=' CONTENT-security-POLICY ' content=x><style></style></head>",
+            "<html><head><title>t</title><link rel=icon><script>1</script><meta http-equiv=' CONTENT-security-POLICY ' content=x>{{SNIPPET}}<style></style></head>",
+        );
+        // Spelled with character references, which the parser decodes in attribute values.
+        test_injector(
+            "<html><head><meta http-equiv=\"Content-Security-Polic&#121;\" content=x><title>t</title></head>",
+            "<html><head><meta http-equiv=\"Content-Security-Polic&#121;\" content=x>{{SNIPPET}}<title>t</title></head>",
+        );
+        test_injector(
+            "<html><head><meta http-equiv='&#x43;ontent-Security-Policy&Tab;' content=x></head>",
+            "<html><head><meta http-equiv='&#x43;ontent-Security-Policy&Tab;' content=x>{{SNIPPET}}</head>",
+        );
+        test_injector(
+            "<html><head><meta http-equiv='Content-Security-Polic&#200;' content=x></head>",
+            "<html><head>{{SNIPPET}}<meta http-equiv='Content-Security-Polic&#200;' content=x></head>",
+        );
+        // After a `/`, which the tokenizer skips between attributes.
+        test_injector(
+            "<html><head><meta /http-equiv=\"Content-Security-Policy\" content=x><title>t</title></head>",
+            "<html><head><meta /http-equiv=\"Content-Security-Policy\" content=x>{{SNIPPET}}<title>t</title></head>",
+        );
+        // Written in a comment or a raw text element, it is no tag.
+        test_injector(
+            "<html><head><!-- <meta http-equiv=content-security-policy> --><script>'<meta http-equiv=content-security-policy>'</script></head>",
+            "<html><head>{{SNIPPET}}<!-- <meta http-equiv=content-security-policy> --><script>'<meta http-equiv=content-security-policy>'</script></head>",
+        );
+        // Opportunistic: one past where the walk stops is not seen, nothing is held back for it.
+        test_injector(
+            "<html><head><meta charset=utf-8></head><meta http-equiv=content-security-policy content=x>",
+            "<html><head><meta charset=utf-8>{{SNIPPET}}</head><meta http-equiv=content-security-policy content=x>",
+        );
+        let padding = " ".repeat(DOCUMENT_CHARSET_SCAN_LIMIT);
+        test_injector(
+            &alloc::format!("<html><head><link rel=icon>{padding}<meta http-equiv=content-security-policy content=x></head>"),
+            &alloc::format!("<html><head>{{{{SNIPPET}}}}<link rel=icon>{padding}<meta http-equiv=content-security-policy content=x></head>"),
+        );
+    }
+
+    #[test]
+    fn attributes_after_a_slash() {
+        // The tokenizer and the encoding prescan skip a `/` between attributes, and end a tag name
+        // or an attribute name at one.
+        test_injector(
+            "<html><head><meta/charset=utf-8><title>t</title></head>",
+            "<html><head><meta/charset=utf-8>{{SNIPPET}}<title>t</title></head>",
+        );
+        test_injector(
+            "<html><head><meta name=a /charset=utf-8><title>t</title></head>",
+            "<html><head><meta name=a /charset=utf-8>{{SNIPPET}}<title>t</title></head>",
+        );
+        test_injector(
+            "<html><head><meta / / http-equiv=x-ua-compatible content=IE=edge><title>t</title></head>",
+            "<html><head><meta / / http-equiv=x-ua-compatible content=IE=edge>{{SNIPPET}}<title>t</title></head>",
+        );
+    }
+
+    #[test]
+    fn after_an_x_ua_compatible_meta() {
+        test_injector(
+            "<html><head><meta http-equiv='X-UA-Compatible' content='IE=edge'><meta name=a></head>",
+            "<html><head><meta http-equiv='X-UA-Compatible' content='IE=edge'>{{SNIPPET}}<meta name=a></head>",
+        );
+        // Matched case insensitively, surrounding whitespace trimmed, the first `http-equiv` being
+        // the one that counts.
+        test_injector(
+            "<html><head><META HTTP-EQUIV=' x-ua-COMPATIBLE\n' CONTENT=IE=edge></head>",
+            "<html><head><META HTTP-EQUIV=' x-ua-COMPATIBLE\n' CONTENT=IE=edge>{{SNIPPET}}</head>",
+        );
+        test_injector(
+            "<html><head><meta http-equiv=refresh http-equiv=x-ua-compatible></head>",
+            "<html><head>{{SNIPPET}}<meta http-equiv=refresh http-equiv=x-ua-compatible></head>",
+        );
+        test_injector(
+            "<html><head><meta http-equiv=x-ua-compatible http-equiv=refresh></head>",
+            "<html><head><meta http-equiv=x-ua-compatible http-equiv=refresh>{{SNIPPET}}</head>",
+        );
+        // Written in a comment, a raw text element or an attribute value, it is no tag.
+        test_injector(
+            "<html><head><!-- <meta http-equiv=x-ua-compatible> --><script>'<meta http-equiv=x-ua-compatible>'</script><link href='<meta http-equiv=x-ua-compatible>'></head>",
+            "<html><head>{{SNIPPET}}<!-- <meta http-equiv=x-ua-compatible> --><script>'<meta http-equiv=x-ua-compatible>'</script><link href='<meta http-equiv=x-ua-compatible>'></head>",
+        );
+    }
+
+    #[test]
+    fn after_the_last_relevant_meta_tag() {
         test_injector(
             "<html><head><meta charset='utf-8'><meta http-equiv='...'></head></html>",
             "<html><head><meta charset='utf-8'>{{SNIPPET}}<meta http-equiv='...'></head></html>",
+        );
+        test_injector(
+            "<html><head><title>t</title><meta charset=utf-8><link rel=icon><script>1</script><meta http-equiv=x-ua-compatible content=IE=edge><meta name=b><style></style></head></html>",
+            "<html><head><title>t</title><meta charset=utf-8><link rel=icon><script>1</script><meta http-equiv=x-ua-compatible content=IE=edge>{{SNIPPET}}<meta name=b><style></style></head></html>",
+        );
+        // The head only holds what the `in head` insertion mode keeps in it.
+        test_injector(
+            "<html><head><base href=/><basefont><bgsound><noframes></noframes><template></template><meta charset=utf-8></head></html>",
+            "<html><head><base href=/><basefont><bgsound><noframes></noframes><template></template><meta charset=utf-8>{{SNIPPET}}</head></html>",
+        );
+        // End tags close nothing the walk cares about, but the head's own and the few the `in head`
+        // insertion mode closes the head on.
+        test_injector(
+            "<html><head></p></meta><meta charset=utf-8></HEAD ><meta charset=utf-8>",
+            "<html><head></p></meta><meta charset=utf-8>{{SNIPPET}}</HEAD ><meta charset=utf-8>",
+        );
+        for end_tag in ["</body>", "</html>", "</BR>"] {
+            test_injector(
+                &alloc::format!("<html><head><meta charset=utf-8>{end_tag}<meta charset=utf-8>"),
+                &alloc::format!(
+                    "<html><head><meta charset=utf-8>{{{{SNIPPET}}}}{end_tag}<meta charset=utf-8>"
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn stops_at_a_tag_the_head_cannot_hold() {
+        for tag in [
+            "<div>",
+            "<body>",
+            "<p>",
+            "<svg>",
+            "<textarea>",
+            "<noembed>",
+            "<iframe>",
+            "<xmp>",
+        ] {
+            test_injector(
+                &alloc::format!("<head><meta charset=utf-8>{tag}<meta charset=utf-8>"),
+                &alloc::format!(
+                    "<head><meta charset=utf-8>{{{{SNIPPET}}}}{tag}<meta charset=utf-8>"
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn declines_before_an_encoding_declaration_out_of_the_head() {
+        test_injector(
+            "<html><head></head><script></script><meta charset='utf-8'></html>",
+            "<html><head></head><script></script><meta charset='utf-8'></html>",
+        );
+        test_injector(
+            "<html><head><div><meta charset='utf-8'></html>",
+            "<html><head><div><meta charset='utf-8'></html>",
+        );
+        // Not when the declaration was already read, whether it lies behind the point or not.
+        test_injector(
+            "<html><meta charset='utf-8'><head></head><meta charset='utf-8'></html>",
+            "<html><meta charset='utf-8'><head>{{SNIPPET}}</head><meta charset='utf-8'></html>",
+        );
+        // Nor when what follows declares nothing.
+        test_injector(
+            "<html><head></head><meta charset='bogus'><meta name=a></html>",
+            "<html><head>{{SNIPPET}}</head><meta charset='bogus'><meta name=a></html>",
+        );
+    }
+
+    #[test]
+    fn unfinished_tags() {
+        // A meta tag the document ends within is not one the snippet goes after.
+        test_injector(
+            "<html><head><meta charset=utf-8><meta http-equiv=x-ua-compatible",
+            "<html><head><meta charset=utf-8>{{SNIPPET}}<meta http-equiv=x-ua-compatible",
+        );
+        // But injection is declined if what can be seen of it is a declaration: more data could
+        // complete it.
+        test_injector(
+            "<html><head><meta name=a><meta charset=utf-8",
+            "<html><head><meta name=a><meta charset=utf-8",
         );
     }
 
@@ -933,16 +1474,15 @@ mod tests {
             "<html><head><script>const x = '<meta charset=utf-8>';</script></head></html>",
             "<html><head><script>const x = '<meta charset=utf-8>';</script>{{SNIPPET}}</head></html>",
         );
-        // The prescan stops at the first declaration it can resolve, so a real one written after the
-        // element is not one the snippet has to stay behind.
+        // The snippet goes after the last declaration all the same.
         test_injector(
             "<html><head><style>/* <meta charset=utf-8> */</style><meta charset='utf-8'></head></html>",
-            "<html><head><style>/* <meta charset=utf-8> */</style>{{SNIPPET}}<meta charset='utf-8'></head></html>",
+            "<html><head><style>/* <meta charset=utf-8> */</style><meta charset='utf-8'>{{SNIPPET}}</head></html>",
         );
         // The closing tag is matched case insensitively and may carry trailing spaces.
         test_injector(
             "<html><head><SCRIPT><meta charset=utf-8></SCRIPT ><meta charset='utf-8'></head></html>",
-            "<html><head><SCRIPT><meta charset=utf-8></SCRIPT >{{SNIPPET}}<meta charset='utf-8'></head></html>",
+            "<html><head><SCRIPT><meta charset=utf-8></SCRIPT ><meta charset='utf-8'>{{SNIPPET}}</head></html>",
         );
         // The content of a title is text as well: a meta tag written there is displayed, not parsed,
         // and the prescan honours it nonetheless.
@@ -950,11 +1490,11 @@ mod tests {
             "<html><head><title>Using <meta charset=utf-8></title></head></html>",
             "<html><head><title>Using <meta charset=utf-8></title>{{SNIPPET}}</head></html>",
         );
-        // An `xmp` holds raw text as well: its content is displayed literally, so a snippet written
-        // there would be shown rather than run.
+        // An `xmp` holds raw text as well, but the head cannot hold one, so the declaration within is
+        // out of the head and injection is declined.
         test_injector(
             "<html><head><xmp><meta charset=utf-8></xmp></head></html>",
-            "<html><head><xmp><meta charset=utf-8></xmp>{{SNIPPET}}</head></html>",
+            "<html><head><xmp><meta charset=utf-8></xmp></head></html>",
         );
         // A `</scriptfoo>` tag does not close the script element, so the declaration is still part of
         // its source.
@@ -1012,9 +1552,8 @@ mod tests {
 
     #[test]
     fn comment_closed_by_a_bang_terminator() {
-        // The tokenizer ends a comment on `--!>` too, so what follows one is markup: the snippet has
-        // to stay behind an encoding declaration written there rather than fall back to the `<head>`
-        // point, which would push that declaration further into the document.
+        // The tokenizer ends a comment on `--!>` too, so what follows one is markup: a meta tag the
+        // snippet goes after.
         test_injector(
             "<html><head><!-- --!><meta charset=utf-8></head></html>",
             "<html><head><!-- --!><meta charset=utf-8>{{SNIPPET}}</head></html>",
@@ -1055,16 +1594,16 @@ mod tests {
             "<html><head></3 '><meta charset=utf-8>{{SNIPPET}}'></head></html>",
         );
         // A doctype ends at its first `>` as well, quoted or not, so the `<head>` after one is found.
+        // What follows it, `">`, is text then, which starts the body: no `<head>` counts past it.
         test_injector(
             "<!DOCTYPE html SYSTEM \"x>\"><html><head></head></html>",
-            "<!DOCTYPE html SYSTEM \"x>\"><html><head>{{SNIPPET}}</head></html>",
+            "<!DOCTYPE html SYSTEM \"x>\"><html><head></head></html>",
         );
         // A `>` written within a quoted identifier ends the doctype where it stands: the tokenizer
-        // emits the token there, so what follows is markup rather than the rest of the identifier,
-        // and the meta tag is a real encoding declaration.
+        // emits the token there, so what follows is markup rather than the rest of the identifier.
         test_injector(
-            "<!DOCTYPE html SYSTEM \"x><meta charset=utf-8>\"><head></head>",
-            "<!DOCTYPE html SYSTEM \"x><meta charset=utf-8>{{SNIPPET}}\"><head></head>",
+            "<!DOCTYPE html SYSTEM \"x><head>\"></head>",
+            "<!DOCTYPE html SYSTEM \"x><head>{{SNIPPET}}\"></head>",
         );
     }
 
@@ -1184,8 +1723,8 @@ mod tests {
             "<html><head></head><frameset><frame src='a.html'></frameset></html>",
             "<html><head>{{SNIPPET}}</head><frameset><frame src='a.html'></frameset></html>",
         );
-        // The prescan honours a declaration written within the frameset all the same, and the
-        // fallback point would push it further into the document, so injection is declined.
+        // The prescan honours a declaration written within the frameset all the same, and the point
+        // found before it would push it further into the document, so injection is declined.
         test_injector(
             "<html><head></head><frameset><meta charset=utf-8><frame src='a.html'></frameset>",
             "<html><head></head><frameset><meta charset=utf-8><frame src='a.html'></frameset>",
@@ -1208,7 +1747,7 @@ mod tests {
         // after it: it would sit in both the comment and the template.
         test_injector(
             "<html><head><template><meta charset=utf-8><!-- > </template> --></template><meta charset='utf-8'></head>",
-            "<html><head><template><meta charset=utf-8><!-- > </template> --></template>{{SNIPPET}}<meta charset='utf-8'></head>",
+            "<html><head><template><meta charset=utf-8><!-- > </template> --></template><meta charset='utf-8'>{{SNIPPET}}</head>",
         );
         // A comment left unclosed within a template is one the template never closes either.
         test_injector(
@@ -1235,14 +1774,15 @@ mod tests {
     #[test]
     fn tags_within_an_iframe_are_not_markup() {
         // An iframe holds raw text, and a snippet written there would never run. The prescan still
-        // honours the declaration below, so the snippet goes after the element rather than before it.
+        // honours the declaration below, which is out of the head, so injection is declined.
         test_injector(
             "<html><head></head><body><iframe><meta charset=utf-8></iframe>",
-            "<html><head></head><body><iframe><meta charset=utf-8></iframe>{{SNIPPET}}",
+            "<html><head></head><body><iframe><meta charset=utf-8></iframe>",
         );
+        // Past the `<body>`, a `<head>` tag is ignored by the browser, and not looked for.
         test_injector(
             "<html><body><iframe>a <b>frame</b></iframe><head>",
-            "<html><body><iframe>a <b>frame</b></iframe><head>{{SNIPPET}}",
+            "<html><body><iframe>a <b>frame</b></iframe><head>",
         );
     }
 
@@ -1263,17 +1803,19 @@ mod tests {
     fn casing() {
         test_injector("<HeAd></head>", "<HeAd>{{SNIPPET}}</head>");
         test_injector(
-            "<Meta charset='UtF-8'> ",
-            "<Meta charset='UtF-8'>{{SNIPPET}} ",
+            "<HEAD><Meta charset='UtF-8'> ",
+            "<HEAD><Meta charset='UtF-8'>{{SNIPPET}} ",
         );
     }
 
     #[test]
     fn spaces() {
-        test_injector("abc <head>def", "abc <head>{{SNIPPET}}def");
-        test_injector("abc<head >def", "abc<head >{{SNIPPET}}def");
-        test_injector("abc<head >def", "abc<head >{{SNIPPET}}def");
-        test_injector("abc<head> def", "abc<head>{{SNIPPET}} def");
+        test_injector(" \n<head>def", " \n<head>{{SNIPPET}}def");
+        test_injector("<head >def", "<head >{{SNIPPET}}def");
+        test_injector("\t<head\n>def", "\t<head\n>{{SNIPPET}}def");
+        test_injector("<head> def", "<head>{{SNIPPET}} def");
+        // Text before it closes the head the browser opens for it: the tag is ignored then.
+        test_injector("abc <head>def", "abc <head>def");
     }
 
     mod no_supported_cases {
@@ -1287,20 +1829,17 @@ mod tests {
                 "<html><foo <head ></head></html>",
             );
         }
-
-        #[test]
-        fn script_before_meta() {
-            // We would inject after a meta tag even if some script are defined before
-            test_injector(
-                "<html><head></head><script></script><meta charset='utf-8'></html>",
-                "<html><head></head><script></script><meta charset='utf-8'>{{SNIPPET}}</html>",
-            );
-        }
     }
 
     fn test_injector(input: &str, expected: &str) {
         let mut input_bytes: Vec<u8> = input.as_bytes().to_vec();
-        if let Some(index) = InjectionPointLocator::find(&input_bytes) {
+        // Only a `<head>` tag is walked from: where the head closes without one is the injector's.
+        let head = HeadOpenTagLocator::new()
+            .scan(&input_bytes)
+            .filter(|head| return !head.breaks);
+        if let Some(Placement::At(index)) =
+            head.map(|head| return find_injection_point(input.as_bytes(), head.end, true))
+        {
             input_bytes.splice(index..index, b"{{SNIPPET}}".iter().copied());
         }
         let result = String::from_utf8(input_bytes).expect("Valid UTF-8");

@@ -1,0 +1,15 @@
+# Placeholder: CI runs on GitLab and GitHub Actions, not CircleCI. The CircleCI
+# project is still enabled for this repository, so without a config every
+# commit gets a failing "CircleCI Pipeline" check ("No configuration was found").
+# Use the built-in no-op type so the placeholder needs no executor or credits.
+# Remove this file once an admin removes the CircleCI project.
+version: 2.1
+
+jobs:
+  noop:
+    type: no-op
+
+workflows:
+  noop:
+    jobs:
+      - noop

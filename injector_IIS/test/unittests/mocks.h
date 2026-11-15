@@ -11,6 +11,8 @@
 #include "gmock/gmock.h"
 #include <cstdlib>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 class MockModule : public IHttpModuleRegistrationInfo {
  public:
@@ -85,8 +87,10 @@ class MockServer : public IHttpServer {
 };
 
 class MockHttpContext : public IHttpContext {
-  VOID* m_allocatedMemory;
-  DWORD m_allocatedSize = 0;
+  // Every allocation and its size, without the guard. Like IIS request memory, each one lives
+  // until the request ends.
+  std::vector<std::pair<VOID*, DWORD>> m_allocations;
+  bool m_failAllocations = false;
 
  public:
   // Bytes of guard pattern placed just past every allocation, so a write that runs off the end of
@@ -95,17 +99,28 @@ class MockHttpContext : public IHttpContext {
   static constexpr size_t k_allocationGuardSize = 64;
   static constexpr unsigned char k_allocationGuardByte = 0xAB;
 
-  MockHttpContext() : m_allocatedMemory(nullptr) {};
+  MockHttpContext() = default;
   ~MockHttpContext() {
-    if (m_allocatedMemory != nullptr) free(m_allocatedMemory);
+    for (const auto& [memory, size] : m_allocations) free(memory);
   };
 
-  // Whether the guard region past the last allocation is untouched.
+  // Total size of the request memory allocated, without the guards.
+  size_t AllocatedSize() const {
+    size_t total = 0;
+    for (const auto& [memory, size] : m_allocations) total += size;
+    return total;
+  }
+
+  // Make every later AllocateRequestMemory call fail, as IIS does when out of request memory.
+  void FailAllocations() { m_failAllocations = true; }
+
+  // Whether the guard region past every allocation is untouched.
   bool AllocationGuardIntact() const {
-    if (m_allocatedMemory == nullptr) return true;
-    const auto* guard = static_cast<const unsigned char*>(m_allocatedMemory) + m_allocatedSize;
-    for (size_t i = 0; i < k_allocationGuardSize; i++) {
-      if (guard[i] != k_allocationGuardByte) return false;
+    for (const auto& [memory, size] : m_allocations) {
+      const auto* guard = static_cast<const unsigned char*>(memory) + size;
+      for (size_t i = 0; i < k_allocationGuardSize; i++) {
+        if (guard[i] != k_allocationGuardByte) return false;
+      }
     }
     return true;
   }
@@ -199,14 +214,14 @@ class MockHttpContext : public IHttpContext {
   // To make memory management a little easier, we'll implement this function
   // instead of mocking it
   VOID* AllocateRequestMemory(DWORD size) override {
-    if (m_allocatedMemory != nullptr) {
-      free(m_allocatedMemory);
-    };
-    m_allocatedMemory = static_cast<VOID*>(malloc(size + k_allocationGuardSize));
-    m_allocatedSize = size;
-    memset(static_cast<unsigned char*>(m_allocatedMemory) + size, k_allocationGuardByte,
+    if (m_failAllocations) {
+      return nullptr;
+    }
+    auto* memory = static_cast<VOID*>(malloc(size + k_allocationGuardSize));
+    memset(static_cast<unsigned char*>(memory) + size, k_allocationGuardByte,
            k_allocationGuardSize);
-    return m_allocatedMemory;
+    m_allocations.emplace_back(memory, size);
+    return memory;
   };
 };
 
@@ -221,6 +236,25 @@ class MockHttpSite : public IHttpSite {
 class MockEventProvider : public IHttpEventProvider {
  public:
   MOCK_METHOD(VOID, SetErrorStatus, (HRESULT hrError), (override));
+};
+
+// One send of a response: whether it carries the headers, which only the first one does, and its
+// HTTP_SEND_RESPONSE_FLAG_* flags.
+class MockSendResponseProvider : public ISendResponseProvider {
+  BOOL headers_being_sent_;
+  DWORD flags_;
+
+ public:
+  MockSendResponseProvider(BOOL headers_being_sent, DWORD flags)
+      : headers_being_sent_(headers_being_sent), flags_(flags) {}
+
+  MOCK_METHOD(VOID, SetErrorStatus, (HRESULT hrError), (override));
+  BOOL GetHeadersBeingSent() const override { return headers_being_sent_; }
+  DWORD GetFlags() const override { return flags_; }
+  MOCK_METHOD(VOID, SetFlags, (DWORD dwFlags), (override));
+  MOCK_METHOD(HTTP_LOG_DATA*, GetLogData, (), (const, override));
+  MOCK_METHOD(HRESULT, SetLogData, (HTTP_LOG_DATA * pLogData), (override));
+  MOCK_METHOD(BOOL, GetReadyToLogData, (), (const, override));
 };
 
 class MockHttpRequest : public IHttpRequest {

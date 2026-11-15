@@ -36,14 +36,14 @@ GlobalModule::GlobalModule(IHttpServer* server, DWORD server_version,
     datadog::tracing::DatadogAgentConfig const agent_cfg_for_telemetry;
     auto finalized_agent_cfg_result =
         datadog::tracing::finalize_config(agent_cfg_for_telemetry, logger_, clock);
-    if (auto* error = finalized_agent_cfg_result.if_error()) {
+    if (const auto* error = finalized_agent_cfg_result.if_error()) {
       logger_->log_error(
           error->with_prefix("Failed to finalize agent settings for "
                              "telemetry, no telemetry will be sent."));
 
       return;
     }
-    datadog::tracing::FinalizedDatadogAgentConfig const dac = *finalized_agent_cfg_result;
+    const auto& dac = *finalized_agent_cfg_result;
 
     if (!dac.http_client) {
       logger_->error("HTTPClient for telemetry is null, no telemetry will be sent");
@@ -126,7 +126,7 @@ HRESULT GlobalModule::PrepareApp(IHttpApplication* app) {
 
 GLOBAL_NOTIFICATION_STATUS
 GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider* provider) {
-  auto* app = provider->GetApplication();
+  const auto* app = provider->GetApplication();
   if (!app) {
     return GL_NOTIFICATION_CONTINUE;
   }

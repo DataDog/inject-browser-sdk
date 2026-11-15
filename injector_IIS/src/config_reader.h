@@ -18,18 +18,19 @@
 
 namespace datadog::rum {
 
+// The values web.config sets explicitly. Each one overrides stable configuration
+// (application_monitoring.yaml); unset ones fall back to it, then to the defaults.
 struct RumConfig {  // NOLINT(bugprone-exception-escape)
-  int version;
+  // Set only when `enabled="true"` is explicit: it then overrides a stable-config opt-out.
+  std::optional<bool> enabled;
+  // The Browser SDK major version, the `version` attribute.
+  std::optional<int> version;
+  // The `option` collection: Browser SDK init options by name, in their text form.
   std::unordered_map<std::string, std::string> sdk_options;
-  // Where the snippet is injected. Configures the module rather than the Browser SDK, so it is
-  // read as its own attribute instead of going through the `option` collection.
-  InjectionStrategy injection_strategy = InjectionStrategy::HeadCloseTag;
-  // Explicit IIS values and the optional advanced JSON baseline can override
-  // stable-config scalars. Collection directives suppress only SDK defaults.
-  bool enabled_overrides_stable = false;
-  bool enabled_explicit_iis = false;
-  bool version_overrides_stable = false;
-  bool suppress_stable_options = false;
+  // Where the snippet is injected, the `injectionStrategy` attribute.
+  std::optional<InjectionStrategy> injection_strategy;
+  // Whether static files are read to be injected, the `injectStaticFiles` attribute.
+  std::optional<bool> inject_static_files;
 };
 
 enum class ReadConfStatus {

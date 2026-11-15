@@ -27,14 +27,16 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
       RUSTFLAGS: "-Lnative=/xwin/crt/lib/x86_64 -Lnative=/xwin/sdk/lib/ucrt/x86_64 -Lnative=/xwin/sdk/lib/um/x86_64"
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check version contract
+        run: python3 -m unittest discover -s injector_IIS/test/version_tests
       - name: Build
         working-directory: injector_IIS
         run: |
           cmake --preset=ci-xcomp -B build -DCMAKE_BUILD_TYPE=Debug .
           cmake --build build -j
       - name: Upload IIS build
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: iis-build
           path: injector_IIS/build
@@ -58,9 +60,9 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download IIS build
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iis-build
           path: injector_IIS/build
@@ -84,7 +86,7 @@ jobs:
           $env:OutDir = (Join-Path (Split-Path ${pwd}) "build_out") + "\"
           uv run --with invoke invoke iis.package --iis-dll ${pwd}\build\iis_injector.dll --out-dir $env:OutDir --debug
       - name: Upload MSI
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: injector_IIS_installer.msi
           path: build_out\injector_IIS_installer.msi
@@ -96,4 +98,12 @@ jobs:
       - name: Run End-to-End Tests
         # --isolation=hyperv allows running Windows images built on a different Windows Server
         # version than the runner (e.g. ltsc2019 image on windows-2022 host).
-        run: docker run --isolation=hyperv -e WEBSERVER-FLAVOR=iis -v ${pwd}:C:\inject-browser-sdk datadog/docker-library:rum-auto-instrumentation-windows-iis-latest powershell -Command "C:\inject-browser-sdk\injector_IIS\scripts\SetupIntegrationTestEnvironment.ps1; pytest C:\inject-browser-sdk\tests\integration_tests\scenario -v"
+        run: |
+          docker run --isolation=hyperv --entrypoint powershell `
+          -e WEBSERVER-FLAVOR=iis -v ${pwd}:C:\inject-browser-sdk `
+          datadog/docker-library:rum-auto-instrumentation-windows-iis-latest `
+          -NoProfile -ExecutionPolicy Bypass -File `
+          C:\inject-browser-sdk\injector_IIS\scripts\ci\run-container-integration-tests.ps1
+          $containerExitCode = $LASTEXITCODE
+          Write-Host "IIS integration-test container exited with code $containerExitCode"
+          exit $containerExitCode

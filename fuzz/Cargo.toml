@@ -8,9 +8,15 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+# The oracle of `oracle_differential`, shared with the corpus tests.
+lol_html = "3.0.3"
+encoding_rs = "0.8.44"
 
 [dependencies.inject-browser-sdk]
 path = "../lib/inject-browser-sdk"
+
+[dependencies.inject-browser-sdk-ffi]
+path = "../lib/inject-browser-sdk-ffi"
 
 [[bin]]
 name = "fuzz-html-scanner"
@@ -18,3 +24,27 @@ path = "fuzz_targets/fuzz-html-scanner.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "chunking_invariance"
+path = "fuzz_targets/chunking_invariance.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oracle_differential"
+path = "fuzz_targets/oracle_differential.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "injector_c_api"
+path = "fuzz_targets/injector_c_api.rs"
+test = false
+doc = false
+bench = false
+
+[lints]
+workspace = true

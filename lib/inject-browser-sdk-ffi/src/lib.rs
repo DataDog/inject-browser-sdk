@@ -2,7 +2,7 @@
 // under the Apache 2.0 License. This product includes software developed at
 // Datadog (https://www.datadoghq.com/).
 //
-// Copyright 2024-Present Datadog, Inc.
+// Copyright 2025-Present Datadog, Inc.
 
 //! A library to inject the Datadog Browser SDK inside an HTML document. This library is used by
 //! Web servers modules and APM tracer libraries to allow customers to enable Real User Monitoring

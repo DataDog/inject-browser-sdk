@@ -3,7 +3,7 @@
 // under the Apache 2.0 License. This product includes software developed at
 // Datadog (https://www.datadoghq.com/).
 //
-// Copyright 2024-Present Datadog, Inc.
+// Copyright 2025-Present Datadog, Inc.
 
 //! Any chunking of a document gives the output of the single chunk run, and the chunks a server
 //! rebuilds around the injection serve it too.

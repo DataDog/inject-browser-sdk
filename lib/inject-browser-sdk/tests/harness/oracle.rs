@@ -2,7 +2,7 @@
 // under the Apache 2.0 License. This product includes software developed at
 // Datadog (https://www.datadoghq.com/).
 //
-// Copyright 2024-Present Datadog, Inc.
+// Copyright 2025-Present Datadog, Inc.
 
 //! Where the snippet must go according to lol_html, Cloudflare's streaming HTML rewriter, used as
 //! an independent oracle: its tokenizer and element stack decide what is really a tag, and what is

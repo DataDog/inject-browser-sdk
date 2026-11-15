@@ -2,7 +2,7 @@
 // under the Apache 2.0 License. This product includes software developed at
 // Datadog (https://www.datadoghq.com/).
 //
-// Copyright 2024-Present Datadog, Inc.
+// Copyright 2025-Present Datadog, Inc.
 
 //! Streaming locator for where the snippet goes: the first `<head>` start tag, the first `</head>`
 //! end tag, or the point where the browser closes the head without one. See

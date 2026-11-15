@@ -459,6 +459,18 @@ pub fn regressions() -> Vec<Fixture> {
                 "<html><head>{OPEN}<meta http-equiv='\u{a0}X-UA-Compatible\u{a0}' content=IE=edge>{CLOSE}</head>"
             ),
         ),
+        // A byte order mark starting an attribute value is part of it, as a no-break space is: no
+        // encoding label, nor `X-UA-Compatible`. lol_html's own decoding drops it.
+        Fixture::new(
+            "byte-order-mark-in-charset",
+            format!("<html><head>{OPEN}<meta charset=\u{feff}utf-8>{CLOSE}</head>"),
+        ),
+        Fixture::new(
+            "byte-order-mark-in-http-equiv",
+            format!(
+                "<html><head>{OPEN}<meta http-equiv=\"\u{feff}X-UA-Compatible\" content=IE=edge>{CLOSE}</head>"
+            ),
+        ),
         // Foreign content ends the walk. lol_html is not run on it: some makes 3.0.3 panic.
         Fixture::new(
             "foreign-content-in-head",

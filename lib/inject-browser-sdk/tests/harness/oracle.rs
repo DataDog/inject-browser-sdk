@@ -38,6 +38,9 @@ const RAW_TEXT: &[&str] = &[
 /// A text node: where it is, its content, and whether it is in the data state.
 type TextNode = (Range<usize>, String, bool);
 
+/// Where an attribute value is, `Some(None)` for an attribute without one.
+type ValueLocation = Option<Option<Range<usize>>>;
+
 /// A start tag directly within a `<head>`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct HeadChild {
@@ -231,6 +234,9 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
     let depth: Rc<Cell<usize>> = Rc::default();
     let (template_depth, body_depth) = (depth.clone(), depth.clone());
     let root_depth = depth;
+    // Where the `charset`, `http-equiv` and `content` values of each head child are, see below.
+    let values: Rc<RefCell<Vec<[ValueLocation; 3]>>> = Rc::default();
+    let child_values = values.clone();
     let settings = Settings::new()
         .append_element_content_handler(element!("head", move |el: &mut Element| {
             let first = heads.borrow().heads.is_empty();
@@ -251,15 +257,29 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
             return Ok(());
         }))
         .append_element_content_handler(element!("head > *", move |el: &mut Element| {
+            // lol_html decodes an attribute value as a document of its own, which drops a byte order
+            // mark starting it: where each value is, to read it as the browser does once the
+            // document is complete.
+            let value = |name: &str| {
+                return el
+                    .attributes()
+                    .iter()
+                    .find(|attribute| return attribute.name() == name)
+                    .map(|attribute| {
+                        return attribute
+                            .value_source_location()
+                            .map(|location| return location.bytes());
+                    });
+            };
+            values
+                .borrow_mut()
+                .push([value("charset"), value("http-equiv"), value("content")]);
             let index = {
                 let mut observed = children.borrow_mut();
                 observed.head_children.push(HeadChild {
                     name: el.tag_name().to_ascii_lowercase(),
                     location: el.source_location().bytes(),
-                    end: None,
-                    charset: el.get_attribute("charset"),
-                    http_equiv: el.get_attribute("http-equiv"),
-                    content: el.get_attribute("content"),
+                    ..HeadChild::default()
                 });
                 observed.head_children.len() - 1
             };
@@ -332,6 +352,23 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
     rewriter.end().ok()?;
 
     let mut observed = observed.borrow().clone();
+    let document = chunks.concat();
+    let read = |value: &ValueLocation| {
+        return value.as_ref().map(|location| {
+            return location.as_ref().map_or_else(String::new, |location| {
+                return String::from_utf8_lossy(&document[location.clone()]).into_owned();
+            });
+        });
+    };
+    for (child, [charset, http_equiv, content]) in observed
+        .head_children
+        .iter_mut()
+        .zip(child_values.borrow().iter())
+    {
+        child.charset = read(charset);
+        child.http_equiv = read(http_equiv);
+        child.content = read(content);
+    }
     let nodes = text_nodes(chunks);
     observed.text = nodes.text;
     observed.data_text = nodes.data_text;

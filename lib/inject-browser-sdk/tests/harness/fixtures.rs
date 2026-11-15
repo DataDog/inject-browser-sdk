@@ -484,6 +484,16 @@ pub fn regressions() -> Vec<Fixture> {
                 "a".repeat(1100)
             ),
         ),
+        // A `</head>` closing the head a `<title>` opened, ahead of any evidence: the `<head>` tag
+        // that follows, past the window, is ignored, and the snippet goes before the `<html>` one
+        // the body holds.
+        Fixture::new(
+            "head-tag-after-head-closed-ahead-of-evidence",
+            format!(
+                "<title>{}</title>{CLOSE}</head><head>x{OPEN}<html>",
+                "t".repeat(1010)
+            ),
+        ),
         // Nor does the snippet go before such an end tag closing a head the document has evidence
         // for, as it does not before such a `</head>` tag.
         Fixture::new(

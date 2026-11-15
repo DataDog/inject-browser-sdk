@@ -464,5 +464,15 @@ pub fn regressions() -> Vec<Fixture> {
             "foreign-content-in-head",
             format!("<html><head><meta charset=utf-8>{MARK}<svg><style></style></svg>{XUA}</head>"),
         ),
+        // The start of a byte order mark that does not go on to the whole of it is text, ahead of
+        // any evidence: the head closes there, whether a chunk ends within the mark or not.
+        Fixture::new(
+            "broken-byte-order-mark",
+            b"\xEF\xBB\n<html><head><title>t</title></head>".as_slice(),
+        ),
+        Fixture::new(
+            "byte-order-mark-cut-by-markup",
+            b"\xEF\xBB<html><head><title>t</title></head>".as_slice(),
+        ),
     ];
 }

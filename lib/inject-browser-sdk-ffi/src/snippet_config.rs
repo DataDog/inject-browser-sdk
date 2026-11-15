@@ -114,7 +114,8 @@ pub unsafe extern "C" fn snippet_config_set_number(
     name: *const c_char,
     value: f64,
 ) -> bool {
-    let value = if value.fract() == 0.0 && (0.0..=u32::MAX as f64).contains(&value) {
+    let whole = value >= 0.0 && value <= f64::from(u32::MAX) && (value as u64) as f64 == value;
+    let value = if whole {
         Value::from(value as u64)
     } else {
         Value::from(value)

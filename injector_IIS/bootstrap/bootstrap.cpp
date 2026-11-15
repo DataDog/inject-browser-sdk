@@ -29,45 +29,37 @@ constexpr DWORD kRequestNotifications =
 constexpr DWORD kGlobalNotifications =
     GL_APPLICATION_START | GL_APPLICATION_STOP | GL_CONFIGURATION_CHANGE;
 
-void diagnostic(const wchar_t *message) {
-  OutputDebugStringW(message);
-}
+void diagnostic(const wchar_t* message) { OutputDebugStringW(message); }
 
-void disable_output_cache(IHttpResponse *response) {
-  if (response == nullptr)
-    return;
+void disable_output_cache(IHttpResponse* response) {
+  if (response == nullptr) return;
   response->DisableKernelCache();
-  if (auto *policy = response->GetCachePolicy())
-    policy->DisableUserCache();
+  if (auto* policy = response->GetCachePolicy()) policy->DisableUserCache();
 }
 
 // IIS output caches can serve a response without invoking any native module.
 // Prevent a cached HTML response from surviving package publication/removal.
-void disable_html_output_cache(IHttpContext *context) {
-  if (context == nullptr)
-    return;
-  auto *response = context->GetResponse();
-  if (response == nullptr)
-    return;
+void disable_html_output_cache(IHttpContext* context) {
+  if (context == nullptr) return;
+  auto* response = context->GetResponse();
+  if (response == nullptr) return;
   USHORT length = 0;
   const PCSTR content_type = response->GetHeader("Content-Type", &length);
-  if (content_type == nullptr || length < 9 || _strnicmp(content_type, "text/html", 9) != 0)
-    return;
+  if (content_type == nullptr || length < 9 || _strnicmp(content_type, "text/html", 9) != 0) return;
   disable_output_cache(response);
 }
 
 class RuntimeState {
  public:
-  RuntimeState(DWORD server_version, IHttpServer *server, HTTP_MODULE_ID module_id)
+  RuntimeState(DWORD server_version, IHttpServer* server, HTTP_MODULE_ID module_id)
       : server_version_(server_version), server_(server), module_id_(module_id) {}
 
   void disable_runtime() { runtime_enabled_.store(false, std::memory_order_release); }
 
   // The returned runtime lives until process exit. Its DLL is intentionally
   // never unloaded: IIS may retain app/metadata contexts with its vtables.
-  const DatadogRumRuntimeV1 *active_runtime(IHttpApplication *application) {
-    if (!runtime_enabled_.load(std::memory_order_acquire))
-      return nullptr;
+  const DatadogRumRuntimeV1* active_runtime(IHttpApplication* application) {
+    if (!runtime_enabled_.load(std::memory_order_acquire)) return nullptr;
     auto selected = select_package();
     std::lock_guard lock(mutex_);
     if (!selected) {
@@ -75,11 +67,9 @@ class RuntimeState {
       return nullptr;
     }
     if (loaded_package_) {
-      if (!loaded_package_->same_identity(*selected))
-        return nullptr;
+      if (!loaded_package_->same_identity(*selected)) return nullptr;
     } else {
-      if (failed_package_ && failed_package_->same_identity(*selected))
-        return nullptr;
+      if (failed_package_ && failed_package_->same_identity(*selected)) return nullptr;
       if (!load_runtime(*selected)) {
         failed_package_ = std::move(selected);
         return nullptr;
@@ -89,46 +79,26 @@ class RuntimeState {
     // A package may be removed or its active junction retargeted while its DLL
     // is loading. Recheck before handing its objects to request processing.
     auto current = select_package();
-    if (!current || !loaded_package_->same_identity(*current))
-      return nullptr;
-    if (application == nullptr)
-      return nullptr;
-    auto *container = application->GetModuleContextContainer();
-    if (container == nullptr)
-      return nullptr;
+    if (!current || !loaded_package_->same_identity(*current)) return nullptr;
+    if (application == nullptr) return nullptr;
+    auto* container = application->GetModuleContextContainer();
+    if (container == nullptr) return nullptr;
     if (container->GetModuleContext(module_id_) == nullptr) {
       std::unique_lock callback_lock(callback_mutex_);
       const HRESULT hr = runtime_.prepare_app(runtime_.runtime, application);
-      if (FAILED(hr) || container->GetModuleContext(module_id_) == nullptr)
-        return nullptr;
+      if (FAILED(hr) || container->GetModuleContext(module_id_) == nullptr) return nullptr;
     }
     return &runtime_;
   }
 
-  GLOBAL_NOTIFICATION_STATUS application_start(IHttpApplicationStartProvider *provider) {
+  // Global notifications reach a loaded runtime even after its package is
+  // withdrawn: its map holds observer pointers to contexts IIS owns and
+  // releases, so application stops must keep arriving.
+  template <typename Notify>
+  GLOBAL_NOTIFICATION_STATUS notify(Notify notify) {
     std::lock_guard lock(mutex_);
     std::unique_lock callback_lock(callback_mutex_);
-    if (loaded_package_)
-      return runtime_.global_module->OnGlobalApplicationStart(provider);
-    return GL_NOTIFICATION_CONTINUE;
-  }
-
-  GLOBAL_NOTIFICATION_STATUS application_stop(IHttpApplicationStopProvider *provider) {
-    std::lock_guard lock(mutex_);
-    std::unique_lock callback_lock(callback_mutex_);
-    // Always deliver cleanup even after package removal: the runtime's map
-    // holds observer pointers to contexts owned and released by IIS.
-    if (loaded_package_)
-      return runtime_.global_module->OnGlobalApplicationStop(provider);
-    return GL_NOTIFICATION_CONTINUE;
-  }
-
-  GLOBAL_NOTIFICATION_STATUS configuration_change(IGlobalConfigurationChangeProvider *provider) {
-    std::lock_guard lock(mutex_);
-    std::unique_lock callback_lock(callback_mutex_);
-    if (loaded_package_)
-      return runtime_.global_module->OnGlobalConfigurationChange(provider);
-    return GL_NOTIFICATION_CONTINUE;
+    return loaded_package_ ? notify(*runtime_.global_module) : GL_NOTIFICATION_CONTINUE;
   }
 
   std::shared_lock<std::shared_mutex> request_callback_lock() {
@@ -143,11 +113,10 @@ class RuntimeState {
   }
 
  private:
-  bool load_runtime(const Package &package) {
-    const HMODULE library = LoadLibraryExW(
-        package.dll_path.c_str(), nullptr,
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
-    );
+  bool load_runtime(const Package& package) {
+    const HMODULE library =
+        LoadLibraryExW(package.dll_path.c_str(), nullptr,
+                       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (library == nullptr) {
       diagnostic(L"Datadog IIS RUM bootstrap: package DLL could not be loaded.\n");
       return false;
@@ -155,7 +124,7 @@ class RuntimeState {
     // Retain the library even if its entrypoint rejects our ABI. Once an
     // entrypoint has run, it may have created objects with DLL-owned vtables.
     pinned_libraries_.push_back(library);
-    auto *proc = GetProcAddress(library, "DatadogRumCreateRuntimeV1");
+    auto* proc = GetProcAddress(library, "DatadogRumCreateRuntimeV1");
     if (proc == nullptr) {
       diagnostic(L"Datadog IIS RUM bootstrap: package lacks runtime ABI v1.\n");
       return false;
@@ -182,7 +151,7 @@ class RuntimeState {
   }
 
   DWORD server_version_;
-  IHttpServer *server_;
+  IHttpServer* server_;
   HTTP_MODULE_ID module_id_;
   std::atomic<bool> runtime_enabled_{true};
   std::mutex mutex_;
@@ -195,26 +164,17 @@ class RuntimeState {
 
 class RequestProxy final : public CHttpModule {
  public:
-  RequestProxy(std::shared_ptr<RuntimeState> state, IModuleAllocator *allocator)
+  RequestProxy(std::shared_ptr<RuntimeState> state, IModuleAllocator* allocator)
       : state_(std::move(state)), allocator_(allocator) {}
 
   REQUEST_NOTIFICATION_STATUS
-  OnBeginRequest(IHttpContext *context, IHttpEventProvider *provider) override {
-    try {
-      auto *target = delegate_for(context);
-      if (target == nullptr)
-        return RQ_NOTIFICATION_CONTINUE;
-      auto callback_lock = state_->request_callback_lock();
-      if (!state_->package_still_active())
-        return RQ_NOTIFICATION_CONTINUE;
-      return target->OnBeginRequest(context, provider);
-    } catch (...) {
-      return RQ_NOTIFICATION_CONTINUE;
-    }
+  OnBeginRequest(IHttpContext* context, IHttpEventProvider* provider) override {
+    return forward(context,
+                   [&](CHttpModule& target) { return target.OnBeginRequest(context, provider); });
   }
 
   REQUEST_NOTIFICATION_STATUS
-  OnUpdateRequestCache(IHttpContext *context, IHttpEventProvider *) override {
+  OnUpdateRequestCache(IHttpContext* context, IHttpEventProvider*) override {
     try {
       disable_html_output_cache(context);
     } catch (...) {
@@ -223,34 +183,40 @@ class RequestProxy final : public CHttpModule {
   }
 
   REQUEST_NOTIFICATION_STATUS
-  OnSendResponse(IHttpContext *context, ISendResponseProvider *provider) override {
+  OnSendResponse(IHttpContext* context, ISendResponseProvider* provider) override {
     try {
       disable_html_output_cache(context);
-      auto *target = delegate_for(context);
-      if (target == nullptr)
-        return RQ_NOTIFICATION_CONTINUE;
+    } catch (...) {
+    }
+    return forward(context,
+                   [&](CHttpModule& target) { return target.OnSendResponse(context, provider); });
+  }
+
+  void Dispose() override {
+    if (delegate_ != nullptr) delegate_->Dispose();
+    delete this;
+  }
+
+ private:
+  // Hands the notification to the runtime's module while its package is still
+  // active. Failures continue the request untouched.
+  template <typename Call>
+  REQUEST_NOTIFICATION_STATUS forward(IHttpContext* context, Call call) {
+    try {
+      auto* target = delegate_for(context);
+      if (target == nullptr) return RQ_NOTIFICATION_CONTINUE;
       auto callback_lock = state_->request_callback_lock();
-      if (!state_->package_still_active())
-        return RQ_NOTIFICATION_CONTINUE;
-      return target->OnSendResponse(context, provider);
+      if (!state_->package_still_active()) return RQ_NOTIFICATION_CONTINUE;
+      return call(*target);
     } catch (...) {
       return RQ_NOTIFICATION_CONTINUE;
     }
   }
 
-  void Dispose() override {
-    if (delegate_ != nullptr)
-      delegate_->Dispose();
-    delete this;
-  }
-
- private:
-  CHttpModule *delegate_for(IHttpContext *context) {
-    if (context == nullptr)
-      return nullptr;
-    const auto *runtime = state_->active_runtime(context->GetApplication());
-    if (runtime == nullptr)
-      return nullptr;
+  CHttpModule* delegate_for(IHttpContext* context) {
+    if (context == nullptr) return nullptr;
+    const auto* runtime = state_->active_runtime(context->GetApplication());
+    if (runtime == nullptr) return nullptr;
     if (delegate_ == nullptr) {
       if (FAILED(runtime->request_factory->GetHttpModule(&delegate_, allocator_))) {
         delegate_ = nullptr;
@@ -260,17 +226,16 @@ class RequestProxy final : public CHttpModule {
   }
 
   std::shared_ptr<RuntimeState> state_;
-  IModuleAllocator *allocator_;
-  CHttpModule *delegate_ = nullptr;
+  IModuleAllocator* allocator_;
+  CHttpModule* delegate_ = nullptr;
 };
 
 class RequestFactory final : public IHttpModuleFactory {
  public:
   explicit RequestFactory(std::shared_ptr<RuntimeState> state) : state_(std::move(state)) {}
 
-  HRESULT GetHttpModule(CHttpModule **module, IModuleAllocator *allocator) override {
-    if (module == nullptr)
-      return E_POINTER;
+  HRESULT GetHttpModule(CHttpModule** module, IModuleAllocator* allocator) override {
+    if (module == nullptr) return E_POINTER;
     *module = new (std::nothrow) RequestProxy(state_, allocator);
     return *module == nullptr ? E_OUTOFMEMORY : S_OK;
   }
@@ -286,38 +251,34 @@ class GlobalProxy final : public CGlobalModule {
   explicit GlobalProxy(std::shared_ptr<RuntimeState> state) : state_(std::move(state)) {}
 
   GLOBAL_NOTIFICATION_STATUS OnGlobalApplicationStart(
-      IHttpApplicationStartProvider *provider
-  ) override {
-    try {
-      return state_->application_start(provider);
-    } catch (...) {
-      return GL_NOTIFICATION_CONTINUE;
-    }
+      IHttpApplicationStartProvider* provider) override {
+    return forward(
+        [&](CGlobalModule& module) { return module.OnGlobalApplicationStart(provider); });
   }
 
   GLOBAL_NOTIFICATION_STATUS OnGlobalApplicationStop(
-      IHttpApplicationStopProvider *provider
-  ) override {
-    try {
-      return state_->application_stop(provider);
-    } catch (...) {
-      return GL_NOTIFICATION_CONTINUE;
-    }
+      IHttpApplicationStopProvider* provider) override {
+    return forward([&](CGlobalModule& module) { return module.OnGlobalApplicationStop(provider); });
   }
 
   GLOBAL_NOTIFICATION_STATUS OnGlobalConfigurationChange(
-      IGlobalConfigurationChangeProvider *provider
-  ) override {
-    try {
-      return state_->configuration_change(provider);
-    } catch (...) {
-      return GL_NOTIFICATION_CONTINUE;
-    }
+      IGlobalConfigurationChangeProvider* provider) override {
+    return forward(
+        [&](CGlobalModule& module) { return module.OnGlobalConfigurationChange(provider); });
   }
 
   void Terminate() override { delete this; }
 
  private:
+  template <typename Notify>
+  GLOBAL_NOTIFICATION_STATUS forward(Notify notify) {
+    try {
+      return state_->notify(notify);
+    } catch (...) {
+      return GL_NOTIFICATION_CONTINUE;
+    }
+  }
+
   std::shared_ptr<RuntimeState> state_;
 };
 
@@ -325,39 +286,30 @@ class GlobalProxy final : public CGlobalModule {
 }  // namespace datadog::iis_rum
 
 extern "C" __declspec(dllexport) HRESULT __stdcall RegisterModule(
-    DWORD server_version,
-    IHttpModuleRegistrationInfo *registration,
-    IHttpServer *server
-) {
-  if (registration == nullptr || server == nullptr)
-    return S_OK;
+    DWORD server_version, IHttpModuleRegistrationInfo* registration, IHttpServer* server) {
+  if (registration == nullptr || server == nullptr) return S_OK;
   try {
-    auto state = std::make_shared<datadog::iis_rum::RuntimeState>(
-        server_version, server, registration->GetId()
-    );
-    auto *global = new (std::nothrow) datadog::iis_rum::GlobalProxy(state);
-    if (global == nullptr)
-      return S_OK;
+    auto state = std::make_shared<datadog::iis_rum::RuntimeState>(server_version, server,
+                                                                  registration->GetId());
+    auto* global = new (std::nothrow) datadog::iis_rum::GlobalProxy(state);
+    if (global == nullptr) return S_OK;
     const HRESULT global_hr =
         registration->SetGlobalNotifications(global, datadog::iis_rum::kGlobalNotifications);
     if (FAILED(global_hr)) {
       delete global;
       return S_OK;
     }
-    auto *factory = new (std::nothrow) datadog::iis_rum::RequestFactory(state);
-    if (factory == nullptr)
-      return S_OK;
+    auto* factory = new (std::nothrow) datadog::iis_rum::RequestFactory(state);
+    if (factory == nullptr) return S_OK;
     const HRESULT request_hr =
         registration->SetRequestNotifications(factory, datadog::iis_rum::kRequestNotifications, 0);
     if (FAILED(request_hr)) {
       delete factory;
-    } else if (FAILED(registration->SetPriorityForRequestNotification(
-                   RQ_UPDATE_REQUEST_CACHE, PRIORITY_ALIAS_FIRST
-               ))) {
+    } else if (FAILED(registration->SetPriorityForRequestNotification(RQ_UPDATE_REQUEST_CACHE,
+                                                                      PRIORITY_ALIAS_FIRST))) {
       state->disable_runtime();
       datadog::iis_rum::diagnostic(
-          L"Datadog IIS RUM bootstrap: cache update priority failed; runtime disabled.\n"
-      );
+          L"Datadog IIS RUM bootstrap: cache update priority failed; runtime disabled.\n");
     }
   } catch (...) {
     datadog::iis_rum::diagnostic(L"Datadog IIS RUM bootstrap: registration failed.\n");
@@ -366,6 +318,4 @@ extern "C" __declspec(dllexport) HRESULT __stdcall RegisterModule(
   return S_OK;
 }
 
-extern "C" __declspec(dllexport) DWORD __stdcall DatadogIisRumBootstrapVersion() {
-  return 1;
-}
+extern "C" __declspec(dllexport) DWORD __stdcall DatadogIisRumBootstrapVersion() { return 1; }

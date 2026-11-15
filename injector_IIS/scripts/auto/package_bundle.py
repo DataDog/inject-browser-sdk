@@ -7,16 +7,10 @@ import json
 from pathlib import Path
 import re
 import struct
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 import zipfile
 
 
-ASSETS = (
-    "Invoke-IisRumLifecycle.ps1",
-    "Install-IisRum.ps1",
-    "ddiisrum-bootstrap.dll",
-    "RUM_schema.xml",
-)
 VERSION = re.compile(r"[0-9][0-9A-Za-z._+-]{0,127}\Z")
 
 
@@ -34,6 +28,19 @@ def assert_x64_dll(path: Path) -> None:
         raise ValueError(f"Expected an x64 PE DLL: {path}")
 
 
+def asset_sources(dll: Path, assets_dir: Optional[Path]) -> Dict[str, Path]:
+    """Bundle entry names and the files they come from. Signed copies in
+    `assets_dir` replace the scripts and schema of the source tree."""
+    scripts = assets_dir or Path(__file__).resolve().parent
+    schema_dir = assets_dir or scripts.parent.parent / "resources"
+    return {
+        "Invoke-IisRumLifecycle.ps1": scripts / "Invoke-IisRumLifecycle.ps1",
+        "Install-IisRum.ps1": scripts / "Install-IisRum.ps1",
+        "ddiisrum-bootstrap.dll": dll,
+        "RUM_schema.xml": schema_dir / "RUM_schema.xml",
+    }
+
+
 def build_bundle(
     dll: Path, out_dir: Path, version: str, assets_dir: Optional[Path] = None
 ) -> Tuple[Path, str]:
@@ -42,36 +49,23 @@ def build_bundle(
             "Bundle version must be explicit and contain only version characters"
         )
     assert_x64_dll(dll)
-    source_dir = assets_dir or Path(__file__).resolve().parent
     manifest = {
         "contract_version": 1,
         "architecture": "x64",
         "runtime_abi": 1,
         "bundle_version": version,
     }
-    schema = (
-        source_dir / "RUM_schema.xml"
-        if assets_dir
-        else source_dir.parent.parent / "resources" / "RUM_schema.xml"
-    )
-    contents = {
-        "manifest.json": (json.dumps(manifest, separators=(",", ":")) + "\n").encode(),
-        "Invoke-IisRumLifecycle.ps1": (
-            source_dir / "Invoke-IisRumLifecycle.ps1"
-        ).read_bytes(),
-        "Install-IisRum.ps1": (source_dir / "Install-IisRum.ps1").read_bytes(),
-        "ddiisrum-bootstrap.dll": dll.read_bytes(),
-        "RUM_schema.xml": schema.read_bytes(),
-    }
-    assert set(contents) == {"manifest.json", *ASSETS}
+    contents = {"manifest.json": (json.dumps(manifest, separators=(",", ":")) + "\n").encode()}
+    for name, source in asset_sources(dll, assets_dir).items():
+        contents[name] = source.read_bytes()
+
     out_dir.mkdir(parents=True, exist_ok=True)
     archive = out_dir / f"iis-rum-bootstrap-{version}-x64.zip"
     temporary = archive.with_suffix(".zip.tmp")
     try:
-        with zipfile.ZipFile(
-            temporary, "w", compression=zipfile.ZIP_DEFLATED
-        ) as bundle:
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
             for name, content in contents.items():
+                # A fixed timestamp keeps the archive, and so its digest, reproducible.
                 entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
                 entry.compress_type = zipfile.ZIP_DEFLATED
                 bundle.writestr(entry, content)

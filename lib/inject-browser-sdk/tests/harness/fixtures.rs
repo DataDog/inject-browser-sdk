@@ -494,6 +494,15 @@ pub fn regressions() -> Vec<Fixture> {
             "byte-order-mark-in-doctype-name",
             format!("<!DOCTYPE\u{feff}html><h><head>{MARK}<body>"),
         ),
+        // A character reference to whitespace between `<meta>` tags is whitespace: the run goes on
+        // past the window, to the `X-UA-Compatible` one.
+        Fixture::new(
+            "whitespace-reference-in-meta-run",
+            format!(
+                "<html><head><meta charset=utf-8> &#32;{}{XUA}{MARK}</head>",
+                "<meta name=a>".repeat(80)
+            ),
+        ),
         // An AMP document opens with its `<html>` tag. One past where the snippet goes is not looked
         // for, in the head or past it, though the browser merges its attributes into the root.
         Fixture::new(

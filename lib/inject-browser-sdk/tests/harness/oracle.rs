@@ -484,7 +484,12 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> Option<TextNodes> {
         if range.is_empty() {
             continue;
         }
-        if !blank(content) {
+        // In the data state a character reference to whitespace is whitespace; raw text keeps it.
+        let text = match data {
+            true => decode_references(content),
+            false => content.clone(),
+        };
+        if !blank(&text) {
             gathered.text.push(range.clone());
         }
         if *data {

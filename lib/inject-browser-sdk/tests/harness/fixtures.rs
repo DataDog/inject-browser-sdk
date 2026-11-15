@@ -483,6 +483,13 @@ pub fn regressions() -> Vec<Fixture> {
             "text-before-head-with-frameset-in-script",
             "><head><script c=><frameset><script>",
         ),
+        // An AMP document opens with its `<html>` tag. One past where the snippet goes is not looked
+        // for, in the head or past it, though the browser merges its attributes into the root.
+        Fixture::new(
+            "amp-html-tag-in-head",
+            format!("<html><head>{OPEN}<html amp></head>"),
+        ),
+        Fixture::new("amp-html-tag-past-head", format!("<head>{MARK}t<html amp>")),
         // Foreign content ends the walk. lol_html is not run on it: some makes 3.0.3 panic.
         Fixture::new(
             "foreign-content-in-head",

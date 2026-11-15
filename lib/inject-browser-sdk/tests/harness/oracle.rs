@@ -89,6 +89,8 @@ pub struct Observed {
     pub body_starts: Vec<usize>,
     /// Whether an `<html>` tag makes the document an AMP one, which the snippet stays out of.
     pub amp: bool,
+    /// Start of the first `<html>` tag making the document an AMP one.
+    pub first_amp_html: Option<usize>,
     /// Start of every start tag, wherever it is.
     pub start_tags: Vec<usize>,
     /// Every `<template>` element, from its start tag to the start of its end tag, if it has one.
@@ -211,6 +213,7 @@ impl Observed {
             html_starts: positions(self.html_starts),
             body_starts: positions(self.body_starts),
             amp: self.amp,
+            first_amp_html: self.first_amp_html.map(map),
             start_tags: positions(self.start_tags),
             templates: self
                 .templates
@@ -329,9 +332,13 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
             match el.tag_name().eq_ignore_ascii_case("html") {
                 true => {
                     observed.html_starts.push(start);
-                    observed.amp |= AMP_ATTRIBUTES
+                    let amp = AMP_ATTRIBUTES
                         .iter()
                         .any(|name| return el.has_attribute(name));
+                    observed.amp |= amp;
+                    if amp && observed.first_amp_html.is_none() {
+                        observed.first_amp_html = Some(start);
+                    }
                 }
                 false => observed.body_starts.push(start),
             }
@@ -910,6 +917,10 @@ pub enum Exception {
     /// prescan honours, which lol_html knows nothing about: within a raw text or inert element
     /// (later point), or past where the head ends or within a tag the window ends in (no point).
     EncodingDeclaration,
+    /// An `<html>` tag past the `<head>` tag making the document an AMP one: the browser merges its
+    /// attributes into the root element, wherever it is. An AMP document opens with that tag,
+    /// which the injector stays out of, and does not look for one past where the snippet goes.
+    LateAmpRoot,
 }
 
 /// Returns the exception explaining why `ours` differs from `oracle` for `document`, which lol_html
@@ -922,6 +933,15 @@ pub fn exception(
     oracle: Option<usize>,
 ) -> Option<Exception> {
     let lower = document.to_ascii_lowercase();
+    if oracle.is_none()
+        && ours.is_some()
+        && observed
+            .first_amp_html
+            .zip(observed.heads.first())
+            .is_some_and(|(amp, head)| return amp > head.start)
+    {
+        return Some(Exception::LateAmpRoot);
+    }
     // As long as lol_html's tokenizer has it, quoted values hiding any `>` they hold.
     if observed.head_end_tags.iter().any(|tag| {
         return oracle == Some(tag.start) && tag.len() > MAX_PENDING_END_TAG;

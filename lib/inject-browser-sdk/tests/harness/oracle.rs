@@ -369,7 +369,7 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
         child.http_equiv = read(http_equiv);
         child.content = read(content);
     }
-    let nodes = text_nodes(chunks);
+    let nodes = text_nodes(chunks)?;
     observed.text = nodes.text;
     observed.data_text = nodes.data_text;
     observed.blank_data = nodes.blank_data;
@@ -392,7 +392,7 @@ struct TextNodes {
     doctype_html: Option<usize>,
 }
 
-fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> TextNodes {
+fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> Option<TextNodes> {
     // Text nodes come in chunks, which the ones of the input decide: joined up, so that what is
     // observed does not depend on them. Comments and doctypes come from the same run, which
     // tokenizes everything.
@@ -433,14 +433,13 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> TextNodes {
             return Ok(());
         }));
     let mut rewriter = HtmlRewriter::new(settings, |_: &[u8]| {});
+    // A run that fails tells nothing, rather than that there is no text: lol_html gives up on
+    // markup whose tokenization it cannot tell, which a run tokenizing text runs into where the
+    // one of `observe_decoded` may not.
     for chunk in chunks {
-        if rewriter.write(chunk.as_ref()).is_err() {
-            return TextNodes::default();
-        }
+        rewriter.write(chunk.as_ref()).ok()?;
     }
-    if rewriter.end().is_err() {
-        return TextNodes::default();
-    }
+    rewriter.end().ok()?;
     let blank = |content: &str| return content.bytes().all(|b| return b.is_ascii_whitespace());
     // A chunk split within the byte order mark may move where its text starts by a byte or two.
     let without_mark = |range: &Range<usize>, content: &'_ str| -> String {
@@ -488,7 +487,7 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> TextNodes {
             }
         }
     }
-    return gathered;
+    return Some(gathered);
 }
 
 /// How many bytes at the start of `text` are whitespace, or character references to it.
@@ -902,7 +901,7 @@ pub enum Exception {
     /// on it rather than hold back without bound.
     LongEndTag,
     /// A raw text or RCDATA element (`<script>`, `<title>`…) whose start tag ends in an empty
-    /// unquoted attribute value (`<script c=>`): lol_html 3.0.3 tokenizes it rightly when it only
+    /// unquoted attribute value (`<script c=>`, `<script/c=>`): lol_html 3.0.3 tokenizes it rightly when it only
     /// looks for tags, and reads on past its `>` when it tokenizes everything, as its text handler
     /// makes it, so the text nodes it reports past it are wrong. The browser, and the injector, end
     /// the tag at its `>`.
@@ -1144,9 +1143,20 @@ fn empty_attribute_value_on_raw_text(lower: &[u8]) -> bool {
                 let Some(end) = tag.iter().position(|&b| return b == b'>') else {
                     return false;
                 };
+                // A `/` after the name, not ending the tag, starts the attributes as whitespace does.
                 let attributes = tag[..end].trim_ascii_end();
-                return tag.first().is_some_and(u8::is_ascii_whitespace)
-                    && attributes.ends_with(b"=");
+                let Some(name) = attributes.strip_suffix(b"=") else {
+                    return false;
+                };
+                // The `=` follows an attribute name, rather than starting one (`<script/=>`).
+                let name = name.trim_ascii_end();
+                return tag
+                    .first()
+                    .is_some_and(|&b| return b.is_ascii_whitespace() || b == b'/')
+                    && name
+                        .last()
+                        .is_some_and(|&b| return !b.is_ascii_whitespace() && b != b'/')
+                    && name.len() > 1;
             });
     });
 }

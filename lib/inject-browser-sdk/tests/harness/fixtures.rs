@@ -471,6 +471,18 @@ pub fn regressions() -> Vec<Fixture> {
                 "<html><head>{OPEN}<meta http-equiv=\"\u{feff}X-UA-Compatible\" content=IE=edge>{CLOSE}</head>"
             ),
         ),
+        // An empty attribute value ends a raw text element's start tag at its `>`, after a `/` too.
+        Fixture::new(
+            "empty-attribute-value-after-slash",
+            format!("<html><head>{OPEN}<script/\0=><c>;</script>{CLOSE}</head>"),
+        ),
+        // Text before the `<head>` tag closes the head the browser opens, wherever lol_html can or
+        // cannot tell what follows: a `<frameset>` it reads as markup within a script it took for
+        // ended.
+        Fixture::new(
+            "text-before-head-with-frameset-in-script",
+            "><head><script c=><frameset><script>",
+        ),
         // Foreign content ends the walk. lol_html is not run on it: some makes 3.0.3 panic.
         Fixture::new(
             "foreign-content-in-head",

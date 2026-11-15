@@ -474,5 +474,24 @@ pub fn regressions() -> Vec<Fixture> {
             "byte-order-mark-cut-by-markup",
             b"\xEF\xBB<html><head><title>t</title></head>".as_slice(),
         ),
+        // An end tag closing the head ahead of any evidence, longer than any held back and ending
+        // past the head window: the scan goes on in the body whatever the chunking, to the
+        // `<html>` tag, rather than giving up when a chunk ends within the tag.
+        Fixture::new(
+            "long-end-tag-closing-the-head-ahead-of-evidence",
+            format!(
+                "</head {}>{OPEN}<html><head><title>t</title></head>",
+                "a".repeat(1100)
+            ),
+        ),
+        // Nor does the snippet go before such an end tag closing a head the document has evidence
+        // for, as it does not before such a `</head>` tag.
+        Fixture::new(
+            "long-end-tag-closing-the-head",
+            format!(
+                "<html><head>{OPEN}<title>t</title></body {}><p>",
+                "a".repeat(1100)
+            ),
+        ),
     ];
 }

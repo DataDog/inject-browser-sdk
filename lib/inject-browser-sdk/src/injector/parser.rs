@@ -96,7 +96,9 @@ pub(super) fn find_injection_point(window: &[u8], head_end: usize, complete: boo
             Markup::Unfinished(start) | Markup::CdataSection(start) => start,
             Markup::Tag { start, .. } => start,
         };
-        if holds_text(&window[offset..text_end]) {
+        // Markup ends the text, and so a character reference it ends in, as the end of the
+        // document does: only one the window ends within may be told by more of it.
+        if holds_text(&window[offset..text_end], more && text_end == window.len()) {
             break offset;
         }
         let (closing, name, tag_start, tag_end) = match markup {
@@ -189,8 +191,9 @@ pub(super) fn find_injection_point(window: &[u8], head_end: usize, complete: boo
 }
 
 /// Returns whether `input`, what [`next_markup`] skipped on its way to the next tag, holds text other
-/// than whitespace, rather than only comments, doctypes and bogus comments.
-fn holds_text(input: &[u8]) -> bool {
+/// than whitespace, rather than only comments, doctypes and bogus comments. `open` tells more data
+/// may follow `input`, rather than markup or the end of the document.
+fn holds_text(input: &[u8], open: bool) -> bool {
     let mut i = 0;
     loop {
         while i < input.len() && input[i].is_ascii_whitespace() {
@@ -204,7 +207,7 @@ fn holds_text(input: &[u8]) -> bool {
             b'<' if input[i..].starts_with(b"<!--") => find_comment_end(input, i),
             b'<' if ends_at_first_greater_than(&input[i + 1..]) => find_bogus_comment_end(input, i),
             // A character reference to whitespace is whitespace. One the input ends within is
-            // not text yet: more of it may tell.
+            // not text yet, while more of it may come to tell.
             b'&' => {
                 let name = &input[i + 1..];
                 let length = name
@@ -214,10 +217,10 @@ fn holds_text(input: &[u8]) -> bool {
                         return byte.is_ascii_alphanumeric() || (index == 0 && byte == b'#');
                     })
                     .count();
-                if i + 1 + length == input.len() {
+                if i + 1 + length == input.len() && open {
                     return false;
                 }
-                let terminated = name[length] == b';';
+                let terminated = name.get(length) == Some(&b';');
                 if !is_whitespace_reference(&name[..length], terminated) {
                     return true;
                 }

@@ -406,6 +406,10 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> Option<TextNodes> {
     let nodes: Rc<RefCell<Vec<TextNode>>> = Rc::default();
     let markup: Rc<RefCell<TextNodes>> = Rc::default();
     let (text, comments, doctypes) = (nodes.clone(), markup.clone(), markup.clone());
+    let source: Vec<u8> = chunks
+        .iter()
+        .flat_map(|chunk| return chunk.as_ref().to_vec())
+        .collect();
     let settings = Settings::new()
         .append_document_content_handler(doc_text!(move |chunk: &mut TextChunk| {
             let range = chunk.source_location().bytes();
@@ -430,9 +434,12 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> Option<TextNodes> {
         .append_document_content_handler(doctype!(move |doctype| {
             let location = doctype.source_location().bytes();
             let mut markup = doctypes.borrow_mut();
+            // lol_html decodes the name as a document of its own, which drops a byte order mark
+            // starting it: the browser reads one as part of the name, no `html` then.
             let html = doctype
                 .name()
-                .is_some_and(|name| return name.eq_ignore_ascii_case("html"));
+                .is_some_and(|name| return name.eq_ignore_ascii_case("html"))
+                && !name_starts_with_mark(&source[location.clone()]);
             if html && markup.doctype_html.is_none() {
                 markup.doctype_html = Some(location.start);
             }
@@ -1089,6 +1096,19 @@ fn head_close_exception(
         {
             return Some(Exception::StrayEndTag);
         }
+        // lol_html closed a template on the end tag of an element opened before it, within the
+        // body: the browser, and the injector, ignore it, the template keeping what follows inert,
+        // where lol_html finds the point.
+        (_, Some(point))
+            if observed.templates.iter().any(|&(_, template_end)| {
+                return template_end.is_some_and(|template_end| {
+                    return template_end <= point
+                        && !lower[template_end..].starts_with(b"</template");
+                });
+            }) =>
+        {
+            return Some(Exception::StrayEndTag);
+        }
         // lol_html closed a template at a `</head>` within it, which the browser, and the
         // injector, ignore: the template it took the next `</template>` for still holds what
         // follows, until the one after.
@@ -1147,6 +1167,12 @@ fn head_close_exception(
         _ => {}
     }
     return None;
+}
+
+/// Whether the name of `doctype`, the source of a doctype, starts with a byte order mark.
+fn name_starts_with_mark(doctype: &[u8]) -> bool {
+    let rest = doctype.get(b"<!doctype".len()..).unwrap_or_default();
+    return rest.trim_ascii_start().starts_with("\u{feff}".as_bytes());
 }
 
 /// Whether a start tag of a raw text or RCDATA element in `lower` ends in an empty unquoted attribute

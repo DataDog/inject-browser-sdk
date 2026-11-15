@@ -483,6 +483,17 @@ pub fn regressions() -> Vec<Fixture> {
             "text-before-head-with-frameset-in-script",
             "><head><script c=><frameset><script>",
         ),
+        // Within a template, an end tag for an element opened before it is ignored: the template
+        // keeps what follows inert, an `<html>` tag past a head closed before any evidence too.
+        Fixture::new(
+            "end-tag-of-element-before-template",
+            format!("<p><head><template></p><html></template>{MARK}<html>"),
+        ),
+        // A byte order mark starting a doctype's name is part of it: no `<!DOCTYPE html>` then.
+        Fixture::new(
+            "byte-order-mark-in-doctype-name",
+            format!("<!DOCTYPE\u{feff}html><h><head>{MARK}<body>"),
+        ),
         // An AMP document opens with its `<html>` tag. One past where the snippet goes is not looked
         // for, in the head or past it, though the browser merges its attributes into the root.
         Fixture::new(

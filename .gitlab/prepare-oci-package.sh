@@ -11,11 +11,17 @@ if [ "${OS:-}" != "windows" ] || [ "${ARCH:-}" != "amd64" ]; then
 fi
 
 artifacts=../artifacts
-# X.Y.Z on iis-X.Y.Z tags, X.Y.Z-dev.<pipeline IID> otherwise.
 version="$(tr -d '\r\n' < "$artifacts/injector_IIS.release")"
 if [ -z "$version" ]; then
   echo "empty version in $artifacts/injector_IIS.release" >&2
   exit 1
+fi
+# Only signed iis-X.Y.Z tag builds may publish X.Y.Z. The release-please
+# branch builds X.Y.Z unsigned, so it gets a dev version too.
+if [[ $version != *-* && ! ${CI_COMMIT_TAG:-} =~ ^iis-[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  # MAJ.MIN.<parent pipeline IID>
+  build="$(tr -d '\r\n' < "$artifacts/injector_IIS.version")"
+  version="$version-dev.${build##*.}"
 fi
 
 mkdir -p sources/library sources/installer sources/modules/Datadog.RUM sources/schema

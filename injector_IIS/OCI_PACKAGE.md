@@ -16,8 +16,9 @@ The package is built by libdatadog-build one-pipeline, in a child pipeline
 - Only `iis-X.Y.Z` tag pipelines sign. There, `iis.package` signs the DLL, the
   MSI and the PowerShell scripts, and fails the build unless every signature is
   valid (`scripts/Assert-IISSignature.ps1`).
-- Package version: `X.Y.Z` on `iis-X.Y.Z` tags, `X.Y.Z-dev.<pipeline IID>`
-  otherwise (`injector_IIS.release`).
+- Package version: `X.Y.Z` only on signed `iis-X.Y.Z` tags. Every other
+  build, including the unsigned release-please branch, gets
+  `X.Y.Z-dev.<pipeline IID>`.
 - Every pipeline that builds the IIS injector pushes the package to the internal
   registry (`oci-internal-publish`).
 - Promotion to staging and production goes through `agent-release-management`

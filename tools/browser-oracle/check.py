@@ -347,11 +347,21 @@ def charset_parameter(content):
         return content[position:end]
 
 
+# A `<?…>` bogus comment, which holds no `>`, or the processing instruction Chrome makes of one.
+QUESTION_MARK_COMMENT = re.compile(r"<!-- \?([^\s>]*)[^>]*? -->")
+
+
 def same_tree(html5ever, chrome):
-    """Whether the trees are the same but for U+0000 and U+FFFD: Chrome keeps a NUL in body text
-    as a replacement character, which the spec, and html5ever, drop. Where markup ends is the same."""
+    """Whether the trees are the same but for what Chrome makes of characters, rather than of
+    markup: it keeps a NUL in body text as a replacement character, which the spec, and html5ever,
+    drop; and it reads `<?target data>` as a processing instruction, trimming its data (`<?x ?>`),
+    where the spec reads a bogus comment ending at the same `>`."""
     strip = str.maketrans("", "", "\x00\ufffd")
-    return html5ever.translate(strip) == chrome.translate(strip)
+
+    def normal(tree):
+        return QUESTION_MARK_COMMENT.sub(r"<!-- ?\1 -->", tree.translate(strip))
+
+    return normal(html5ever) == normal(chrome)
 
 
 def diff(expected, actual):

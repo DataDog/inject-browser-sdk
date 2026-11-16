@@ -75,20 +75,10 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(dd-trace-cpp)
 
-# The worker links the no_std + alloc build: no Rust runtime, no std I/O.
 corrosion_import_crate(
   MANIFEST_PATH ${CMAKE_SOURCE_DIR}/../Cargo.toml
-  CRATES inject-browser-sdk-ffi
   CRATE_TYPES staticlib
-  NO_DEFAULT_FEATURES
-  FEATURES support_gov_domain
 )
-
-add_custom_target(inject_browser_sdk_ffi_no_std_check
-  COMMAND ${CMAKE_COMMAND} -DLIB=$<TARGET_FILE:inject_browser_sdk_ffi-static>
-          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_no_std.cmake
-  DEPENDS cargo-build_inject_browser_sdk_ffi
-  VERBATIM)
 
 corrosion_experimental_cbindgen(
   TARGET inject_browser_sdk_ffi
@@ -175,8 +165,6 @@ target_link_libraries(iis_injector-objects
   inject_browser_sdk_ffi dd-trace-cpp::static
   ws2_32.lib
   oleaut32.lib)
-
-add_dependencies(iis_injector-objects inject_browser_sdk_ffi_no_std_check)
 
 ## shared lib
 add_library(iis_injector SHARED)

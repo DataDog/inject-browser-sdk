@@ -23,16 +23,10 @@ serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 rustix = { version = "1.0", default-features = false, features = ["fs", "stdio"] }
 libdd-library-config.workspace = true
 
-# The Windows stable-configuration reader calls Win32 directly to stay no_std.
+# On Windows: libdd-library-config needs `std` because its StdConfigRead reader
+# uses std::fs.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
-  "Win32_Foundation",
-  "Win32_Security",
-  "Win32_Storage_FileSystem",
-  "Win32_System_Environment",
-  "Win32_System_IO",
-  "Win32_UI_Shell",
-] }
+libdd-library-config = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true

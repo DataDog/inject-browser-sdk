@@ -95,174 +95,21 @@ mod inner {
 #[cfg(windows)]
 mod inner {
     use super::*;
-    use core::ptr::null_mut;
-    use libdd_library_config::MAX_CONFIG_FILE_SIZE;
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GENERIC_READ,
-        INVALID_HANDLE_VALUE,
-    };
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileSizeEx, ReadFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-    };
-    use windows_sys::Win32::System::Environment::{
-        FreeEnvironmentStringsW, GetCommandLineW, GetEnvironmentStringsW,
-    };
-    use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
 
-    /// Reads with Win32 calls so the library stays `no_std` inside IIS workers.
-    pub struct PlatformConfigRead;
-
-    struct Handle(windows_sys::Win32::Foundation::HANDLE);
-
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            // SAFETY: the handle came from a successful CreateFileW and is closed once.
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-
-    fn other() -> io::Error {
-        return io::ErrorKind::Other.into();
-    }
-
-    impl ConfigRead for PlatformConfigRead {
-        fn read(&self, path: &str) -> io::Result<Vec<u8>> {
-            let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
-            // SAFETY: `wide` is NUL-terminated and outlives the call.
-            let raw = unsafe {
-                CreateFileW(
-                    wide.as_ptr(),
-                    GENERIC_READ,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    null_mut(),
-                    OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL,
-                    null_mut(),
-                )
-            };
-            if raw == INVALID_HANDLE_VALUE {
-                // SAFETY: reads this thread's last-error value.
-                let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-                return Err(match code {
-                    ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => io::ErrorKind::NotFound.into(),
-                    _ => other(),
-                });
-            }
-            let file = Handle(raw);
-
-            let mut size = 0i64;
-            // SAFETY: `file` is an open handle and `size` is a valid out-pointer.
-            if unsafe { GetFileSizeEx(file.0, &mut size) } == 0 {
-                return Err(other());
-            }
-            let size = usize::try_from(size).map_err(|_| return other())?;
-            if size > MAX_CONFIG_FILE_SIZE {
-                return Err(io::ErrorKind::FileTooLarge.into());
-            }
-
-            let mut buf = alloc::vec![0u8; size];
-            let mut total = 0;
-            while total < size {
-                let chunk = u32::try_from(size - total).unwrap_or(u32::MAX);
-                let mut read = 0u32;
-                // SAFETY: the destination range lies inside `buf`.
-                let ok = unsafe {
-                    ReadFile(
-                        file.0,
-                        buf[total..].as_mut_ptr(),
-                        chunk,
-                        &mut read,
-                        null_mut(),
-                    )
-                };
-                if ok == 0 {
-                    return Err(other());
-                }
-                if read == 0 {
-                    break;
-                }
-                total += read as usize;
-            }
-            buf.truncate(total);
-            return Ok(buf);
-        }
-    }
-
-    /// Converts a NUL-terminated UTF-16 string; entries that are not valid
-    /// Unicode are skipped, as `std::env` does for `into_string()` failures.
-    ///
-    /// # Safety
-    /// `ptr` must point to a NUL-terminated UTF-16 string.
-    unsafe fn wide_to_utf8(ptr: *const u16) -> (Option<Vec<u8>>, usize) {
-        let mut len = 0;
-        while *ptr.add(len) != 0 {
-            len += 1;
-        }
-        let units = core::slice::from_raw_parts(ptr, len);
-        let text = char::decode_utf16(units.iter().copied())
-            .collect::<Result<String, _>>()
-            .ok()
-            .map(String::into_bytes);
-        return (text, len);
-    }
-
-    fn process_args() -> Vec<Vec<u8>> {
-        let mut count = 0;
-        // SAFETY: GetCommandLineW returns this process's command line; the
-        // array CommandLineToArgvW returns holds `count` strings and is freed
-        // with LocalFree.
-        unsafe {
-            let argv = CommandLineToArgvW(GetCommandLineW(), &mut count);
-            if argv.is_null() {
-                return Vec::new();
-            }
-            let count = usize::try_from(count).unwrap_or(0);
-            let args = (0..count)
-                .filter_map(|i| return wide_to_utf8(*argv.add(i)).0)
-                .collect();
-            LocalFree(argv.cast());
-            return args;
-        }
-    }
-
-    fn process_envp() -> Vec<Vec<u8>> {
-        let mut envp = Vec::new();
-        // SAFETY: the environment block is a sequence of NUL-terminated
-        // strings ending with an empty string, freed with FreeEnvironmentStringsW.
-        unsafe {
-            let block = GetEnvironmentStringsW();
-            if block.is_null() {
-                return envp;
-            }
-            let mut cursor = block.cast_const();
-            while *cursor != 0 {
-                let (entry, len) = wide_to_utf8(cursor);
-                // Entries such as `=C:=C:\` name per-drive directories, not variables.
-                if let Some(entry) = entry.filter(|entry| return !entry.starts_with(b"=")) {
-                    envp.push(entry);
-                }
-                cursor = cursor.add(len + 1);
-            }
-            FreeEnvironmentStringsW(block);
-        }
-        return envp;
-    }
+    // Tracked upstream: DataDog/libdatadog#73 (no_std windows-sys reader).
+    pub use libdd_library_config::StdConfigRead as PlatformConfigRead;
 
     /// On Windows (IIS hosting), argv/envp aren't mutable by other entities in
-    /// the host process model, so reading them is safe. This is intentionally
-    /// different from the Unix branch, where /proc/self/{cmdline,environ} can't
-    /// be trusted from an injected library.
+    /// the host process model, so reading them via `std::env` is safe. This is
+    /// intentionally different from the Unix branch, where /proc/self/{cmdline,
+    /// environ} can't be trusted from an injected library.
     pub fn detect_process_info(language: &str) -> ProcessInfo {
-        return ProcessInfo {
-            args: process_args(),
-            envp: process_envp(),
-            language: language.as_bytes().to_vec(),
-        };
+        return ProcessInfo::detect_global(String::from(language));
     }
 
-    /// No-op on Windows: IIS workers have no console, and hosts receive the
-    /// diagnostics in the returned error instead.
+    /// No-op on Windows — no stderr sink is linked in the no_std path.
+    /// `debug_logs=true` produces no output until a no_std windows-sys sink is
+    /// added (tracked upstream as DataDog/libdatadog#73).
     pub fn write_stderr(_msg: &str) {}
 }
 

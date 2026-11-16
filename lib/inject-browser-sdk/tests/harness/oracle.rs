@@ -38,8 +38,8 @@ const RAW_TEXT: &[&str] = &[
 /// A text node: where it is, its content, and whether it is in the data state.
 type TextNode = (Range<usize>, String, bool);
 
-/// Where an attribute value is, `Some(None)` for an attribute without one.
-type ValueLocation = Option<Option<Range<usize>>>;
+/// Where an attribute's name is, and its value, if it has one.
+type AttributeLocation = (Range<usize>, Option<Range<usize>>);
 
 /// A start tag directly within a `<head>`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -237,8 +237,8 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
     let depth: Rc<Cell<usize>> = Rc::default();
     let (template_depth, body_depth) = (depth.clone(), depth.clone());
     let root_depth = depth;
-    // Where the `charset`, `http-equiv` and `content` values of each head child are, see below.
-    let values: Rc<RefCell<Vec<[ValueLocation; 3]>>> = Rc::default();
+    // Where the attributes of each head child are, see below.
+    let values: Rc<RefCell<Vec<Vec<AttributeLocation>>>> = Rc::default();
     let child_values = values.clone();
     let settings = Settings::new()
         .append_element_content_handler(element!("head", move |el: &mut Element| {
@@ -260,23 +260,21 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
             return Ok(());
         }))
         .append_element_content_handler(element!("head > *", move |el: &mut Element| {
-            // lol_html decodes an attribute value as a document of its own, which drops a byte order
-            // mark starting it: where each value is, to read it as the browser does once the
-            // document is complete.
-            let value = |name: &str| {
-                return el
-                    .attributes()
-                    .iter()
-                    .find(|attribute| return attribute.name() == name)
-                    .map(|attribute| {
-                        return attribute
-                            .value_source_location()
-                            .map(|location| return location.bytes());
-                    });
-            };
-            values
-                .borrow_mut()
-                .push([value("charset"), value("http-equiv"), value("content")]);
+            // lol_html decodes an attribute's name and value as documents of their own, which drops
+            // a byte order mark starting either: where each is, to read them as the browser does
+            // once the document is complete.
+            let attributes = el
+                .attributes()
+                .iter()
+                .filter_map(|attribute| {
+                    let name = attribute.name_source_location()?.bytes();
+                    let value = attribute
+                        .value_source_location()
+                        .map(|location| return location.bytes());
+                    return Some((name, value));
+                })
+                .collect();
+            values.borrow_mut().push(attributes);
             let index = {
                 let mut observed = children.borrow_mut();
                 observed.head_children.push(HeadChild {
@@ -360,21 +358,23 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
 
     let mut observed = observed.borrow().clone();
     let document = chunks.concat();
-    let read = |value: &ValueLocation| {
-        return value.as_ref().map(|location| {
-            return location.as_ref().map_or_else(String::new, |location| {
-                return String::from_utf8_lossy(&document[location.clone()]).into_owned();
-            });
-        });
+    // The value of the first attribute named `name`, as the browser reads its name and value.
+    let read = |attributes: &[AttributeLocation], name: &str| {
+        let (_, value) = attributes.iter().find(|(location, _)| {
+            return document[location.clone()].eq_ignore_ascii_case(name.as_bytes());
+        })?;
+        return Some(value.as_ref().map_or_else(String::new, |location| {
+            return String::from_utf8_lossy(&document[location.clone()]).into_owned();
+        }));
     };
-    for (child, [charset, http_equiv, content]) in observed
+    for (child, attributes) in observed
         .head_children
         .iter_mut()
         .zip(child_values.borrow().iter())
     {
-        child.charset = read(charset);
-        child.http_equiv = read(http_equiv);
-        child.content = read(content);
+        child.charset = read(attributes, "charset");
+        child.http_equiv = read(attributes, "http-equiv");
+        child.content = read(attributes, "content");
     }
     let nodes = text_nodes(chunks)?;
     observed.text = nodes.text;
@@ -521,9 +521,11 @@ fn leading_blank(text: &str) -> usize {
         if bytes[index] != b'&' {
             break;
         }
+        // A `#` only starts a numeric reference's name: `&#32#32` is a space, then text.
         let length = bytes[index + 1..]
             .iter()
-            .position(|&b| return !(b.is_ascii_alphanumeric() || b == b'#'))
+            .enumerate()
+            .position(|(at, &b)| return !(b.is_ascii_alphanumeric() || (at == 0 && b == b'#')))
             .map_or(bytes.len() - index, |end| return end + 1);
         let end = match bytes.get(index + length) {
             Some(b';') => index + length + 1,
@@ -1174,6 +1176,27 @@ fn head_close_exception(
     return None;
 }
 
+/// The index of the `>` ending a tag whose attributes `tag` starts with, past the quoted values
+/// that may hold one.
+fn tag_end(tag: &[u8]) -> Option<usize> {
+    let mut index = 0;
+    let mut after_equals = false;
+    while index < tag.len() {
+        match tag[index] {
+            b'>' => return Some(index),
+            b'=' => after_equals = true,
+            quote @ (b'"' | b'\'') if after_equals => {
+                index += 1 + tag[index + 1..].iter().position(|&b| return b == quote)?;
+                after_equals = false;
+            }
+            byte if byte.is_ascii_whitespace() => {}
+            _ => after_equals = false,
+        }
+        index += 1;
+    }
+    return None;
+}
+
 /// Whether the name of `doctype`, the source of a doctype, starts with a byte order mark.
 fn name_starts_with_mark(doctype: &[u8]) -> bool {
     let rest = doctype.get(b"<!doctype".len()..).unwrap_or_default();
@@ -1191,7 +1214,7 @@ fn empty_attribute_value_on_raw_text(lower: &[u8]) -> bool {
             .filter(|(_, window)| return *window == open.as_slice())
             .any(|(at, _)| {
                 let tag = &lower[at + open.len()..];
-                let Some(end) = tag.iter().position(|&b| return b == b'>') else {
+                let Some(end) = tag_end(tag) else {
                     return false;
                 };
                 // A `/` after the name, not ending the tag, starts the attributes as whitespace does.

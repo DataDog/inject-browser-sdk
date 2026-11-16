@@ -35,8 +35,13 @@ Merging the release-please PR releases the IIS injector. See
 generated documents, none stored as files: real-world shaped fixtures written as the output they
 must produce, the markup fuzzing once found handled wrongly, reduced and written the same way
 (`tests/harness/fixtures.rs`), and random markup. Each runs as a single chunk and as random
-chunkings, and is checked against [lol_html](https://github.com/cloudflare/lol-html) as an oracle
-for where the snippet goes. A failure prints its `SEED`:
+chunkings, and is checked against two oracles for where the snippet goes:
+[lol_html](https://github.com/cloudflare/lol-html), which predicts its position
+(`tests/harness/oracle.rs`), and [html5ever](https://github.com/servo/html5ever), a spec-compliant
+tree builder, on whose trees of the document and the output, the snippet a
+`<script data-dd-probe>`, the injection must have properties of its own (`tree_verdict` in
+`tests/harness/input.rs`): the snippet parses as one `<script>`, in the head, behind the metas it
+must follow, and nothing else changes. A failure prints its `SEED`:
 
 ```bash
 SEED=<seed> cargo test -p inject-browser-sdk --test injection   # replay a failing run
@@ -55,11 +60,31 @@ cargo +nightly fuzz run oracle_differential corpus/oracle_differential seeds -- 
 ```
 
 libFuzzer writes the inputs it generates into the first directory and only reads the others;
-`corpus/` and `seeds/` are ignored by git. `chunking_invariance`, `injector_c_api` and
-`fuzz-html-scanner` run the same way, and `.github/workflows/fuzz.yml` runs each for a minute
-nightly. Once an input a fuzzer finds handled wrongly (its `artifacts/` crash file) is fixed, reduce
-it to the construct at fault and add it to `regressions()` with the output it must produce. A
-deliberate difference from lol_html belongs in `tests/harness/oracle.rs` as an `Exception`.
+`corpus/` and `seeds/` are ignored by git. `tree_oracle` (html5ever, same input format),
+`chunking_invariance`, `injector_c_api` and `fuzz-html-scanner` run the same way, and
+`.github/workflows/fuzz.yml` runs each for a minute nightly. Once an input a fuzzer finds handled
+wrongly (its `artifacts/` crash file) is fixed, reduce it to the construct at fault and add it to
+`regressions()` with the output it must produce. A deliberate difference from lol_html belongs in
+`tests/harness/oracle.rs` as an `Exception`; html5ever's properties allow none.
+
+Crash files and corpora also replay in a real browser, `chrome-headless-shell`, which checks the
+same properties on Chrome's trees and html5ever's trees against Chrome's
+(`tools/browser-oracle/check.py`; nightly, the `browser-oracle` job does it). From the repository
+root:
+
+```bash
+uv run --with playwright==1.64.1 playwright install --only-shell chromium   # once
+uv run tools/browser-oracle/check.py fuzz/seeds fuzz/artifacts/tree_oracle fuzz/corpus/tree_oracle
+uv run tools/browser-oracle/check.py --raw page.html   # documents, under every strategy
+```
+
+Without Chrome, the `oracle_dump` test replays inputs through html5ever's checks alone, reporting
+every failure rather than the first:
+
+```bash
+ORACLE_DUMP_INPUT=fuzz/artifacts/tree_oracle cargo test -p inject-browser-sdk --test injection \
+  oracle_dump -- --nocapture
+```
 
 ## Linting
 

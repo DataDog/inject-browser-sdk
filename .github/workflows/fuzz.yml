@@ -3,6 +3,12 @@ name: fuzz
 # A short nightly run of every fuzz target, seeded with the corpus tests' fixtures and regressions,
 # which the job generates. A crash uploads the input that reproduces it: once fixed, reduce it to
 # the construct at fault and add it to `regressions()` in lib/inject-browser-sdk/tests/harness/fixtures.rs.
+#
+# Two oracles say where the snippet goes: lol_html (`oracle_differential`, the position it predicts,
+# short of documented exceptions) and html5ever (`tree_oracle`, properties of the browser's tree).
+# Then `browser-oracle` replays the crashes and the corpora of both in headless Chrome
+# (tools/browser-oracle/check.py), which checks the same properties on a real browser's tree and
+# html5ever's trees against it. See CONTRIBUTING.md to run either locally.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -14,6 +20,7 @@ on:
       - "lib/inject-browser-sdk/src/injector.rs"
       - "lib/inject-browser-sdk/tests/harness/**"
       - "lib/inject-browser-sdk/tests/injection.rs"
+      - "tools/browser-oracle/**"
       - ".github/workflows/fuzz.yml"
 
 permissions:
@@ -35,6 +42,7 @@ jobs:
           - fuzz-html-scanner
           - chunking_invariance
           - oracle_differential
+          - tree_oracle
           - injector_c_api
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -62,3 +70,64 @@ jobs:
         with:
           name: fuzz-${{ matrix.target }}
           path: artifacts/
+      # For the browser oracle, and to start a longer run from.
+      - name: Upload the corpus
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: corpus-${{ matrix.target }}
+          path: corpus/
+          if-no-files-found: ignore
+
+  browser-oracle:
+    needs: fuzz
+    # Nightly and on dispatch, whatever the fuzzers found; on a pull request only when it changes
+    # the oracles themselves, so that changes to the job are rehearsed before they run nightly.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          run=true
+          if [ "$EVENT" = pull_request ] && ! git diff --name-only "$BASE" HEAD | grep -qE \
+              '^(tools/browser-oracle/|lib/inject-browser-sdk/tests/harness/|fuzz/|\.github/workflows/fuzz\.yml$)'; then
+            run=false
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+      - name: Download the crashes and corpora of the oracles
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "{fuzz,corpus}-{oracle_differential,tree_oracle}"
+          path: inputs
+      - name: Install uv and chrome-headless-shell
+        if: steps.decide.outputs.run == 'true'
+        run: |
+          pipx install uv==0.13.6
+          uv run --with playwright==1.64.1 playwright install --with-deps --only-shell chromium
+      - name: Generate the seeds
+        if: steps.decide.outputs.run == 'true'
+        run: FUZZ_SEEDS_DIR=$PWD/seeds cargo test -p inject-browser-sdk --test injection write_fuzz_seeds
+      - name: Check in Chrome
+        if: steps.decide.outputs.run == 'true'
+        # Each artifact downloads to a directory of its own, one for each target's crashes, if it
+        # had any, and corpus.
+        run: |
+          shopt -s nullglob
+          uv run tools/browser-oracle/check.py seeds inputs/*/ --report browser-oracle.json
+      - name: Upload the report
+        if: always() && steps.decide.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: browser-oracle-report
+          path: browser-oracle.json
+          if-no-files-found: ignore

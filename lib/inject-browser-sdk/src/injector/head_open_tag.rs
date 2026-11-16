@@ -31,7 +31,7 @@ pub(super) enum Target {
 /// whose head an earlier error closed, a server warning printed ahead of it for instance: the
 /// locator then reads on as the browser does, within the body, and stops right before the first
 /// `<html>` or `<body>` start tag, `breaks` set, or gives up at foreign content (`<svg>`,
-/// `<math>`), which it does not follow. A `<head>` tag is not enough there: partial responses
+/// `<math>`), which it does not follow, or at a `<frameset>`, where the snippet would be dropped. A `<head>` tag is not enough there: partial responses
 /// hold one for a client to merge into the page's head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct HeadOpenTag {
@@ -258,7 +258,7 @@ pub(super) struct HeadOpenTagLocator {
     /// `<html>` or `<body>` start tag. See [`HeadOpenTag`].
     body_mode: bool,
 
-    /// Offset just past the last `<!DOCTYPE html>` or `<html>` start tag that only comments,
+    /// Offset just past the last doctype or `<html>` start tag that only comments,
     /// doctypes and whitespace precede, and whether no other markup was read yet: the earliest
     /// point the snippet may go within a head whose start tag is omitted.
     prologue_end: usize,
@@ -770,6 +770,11 @@ impl HeadOpenTagLocator {
 
             State::BogusComment => match byte {
                 b'>' => {
+                    // The browser ignores a doctype past any other markup: the snippet goes past
+                    // every one that opens the document, whatever its name.
+                    if self.is_doctype() && self.template_depth == 0 && self.prologue_open {
+                        self.prologue_end = offset + 1;
+                    }
                     if self.is_html_doctype() {
                         if self.significant_html_evidence.is_none() {
                             self.significant_html_evidence = Some(self.markup_start - self.free);
@@ -809,8 +814,9 @@ impl HeadOpenTagLocator {
                 self.found_breaks = true;
                 return Some(State::Found);
             }
-            // Foreign content is not followed.
-            if names(&[b"svg", b"math"]) {
+            // Foreign content is not followed, nor a frameset: the browser drops the snippet in
+            // one, and stops tokenizing raw text and RCDATA elements it ignores.
+            if names(&[b"svg", b"math", b"frameset"]) {
                 return Some(State::PastHead);
             }
             return None;
@@ -831,7 +837,14 @@ impl HeadOpenTagLocator {
                 self.significant_html_evidence = Some(self.markup_start - self.free);
             }
         }
-        return self.head_closes(self.markup_start, true);
+        let state = self.head_closes(self.markup_start, true);
+        // Not read on within the body from foreign content or a frameset, see above.
+        if state.is_none()
+            && (self.name_is(b"svg") || self.name_is(b"math") || self.name_is(b"frameset"))
+        {
+            return Some(State::PastHead);
+        }
+        return state;
     }
 
     /// The state following the `>` of a start tag, self-closing when `self_closing`, at `offset`.
@@ -1075,6 +1088,12 @@ impl HeadOpenTagLocator {
             *slot = byte.to_ascii_lowercase();
         }
         self.declaration_length += taken;
+    }
+
+    /// Whether the `<!` declaration just read is a doctype, which the tokenizer ends at its first `>`.
+    fn is_doctype(&self) -> bool {
+        return self.declaration_open
+            && self.declaration[..self.declaration_length].starts_with(b"doctype");
     }
 
     /// Whether the `<!` declaration just read is an HTML doctype: `doctype`, then the name `html`,

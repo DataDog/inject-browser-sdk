@@ -54,6 +54,10 @@ struct ServerConfig {
 
 std::string wstring_to_utf8(const std::wstring& wstr);
 
+// Points stable configuration at the given files instead of the machine's. For tests only, and
+// only before the first configuration read: the worker reads stable configuration once.
+void set_stable_config_paths_for_testing(std::string local_path, std::string fleet_path);
+
 ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& logger);
 
 std::optional<ServerConfig> read_server_conf(const IHttpServer& server, Logger& logger);

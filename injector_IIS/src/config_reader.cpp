@@ -24,23 +24,23 @@ constexpr const char* kStableInjectionStrategy = "DD_RUM_INJECTION_STRATEGY";
 constexpr const char* kStableInjectStaticFiles = "DD_RUM_INJECT_STATIC_FILES";
 constexpr const char* kStableLogLevel = "DD_RUM_IIS_LOG_LEVEL";
 
-std::optional<std::string> read_environment(LPCWSTR name) {
-  const DWORD size = GetEnvironmentVariableW(name, nullptr, 0);
-  if (size == 0) return std::nullopt;
-  std::wstring value(size, L'\0');
-  value.resize(GetEnvironmentVariableW(name, value.data(), size));
-  return wstring_to_utf8(value);
+// Set only by tests, before the first read. Empty uses the standard path.
+std::string& test_stable_config_path(bool fleet) {
+  static std::string local_path;
+  static std::string fleet_path;
+  return fleet ? fleet_path : local_path;
+}
+
+const char* path_or_default(const std::string& path) {
+  return path.empty() ? nullptr : path.c_str();
 }
 
 // Stable configuration is read once per worker: every application sees one snapshot, and a
-// change to the YAML takes a recycle. The paths can be overridden for isolated tests.
+// change to the YAML takes a recycle.
 StableConfig* stable_config_for_worker() {
-  static StableConfig* config = [] {
-    const auto local = read_environment(L"DD_IIS_RUM_STABLE_CONFIG_LOCAL");
-    const auto fleet = read_environment(L"DD_IIS_RUM_STABLE_CONFIG_FLEET");
-    return stable_config_read_with_paths("browser-sdk", false, local ? local->c_str() : nullptr,
-                                         fleet ? fleet->c_str() : nullptr);
-  }();
+  static StableConfig* config = stable_config_read_with_paths(
+      "browser-sdk", false, path_or_default(test_stable_config_path(false)),
+      path_or_default(test_stable_config_path(true)));
   return config;
 }
 
@@ -244,6 +244,11 @@ Snippet* make_snippet(const RumConfig& config, Logger& logger) {
 }
 
 }  // namespace
+
+void set_stable_config_paths_for_testing(std::string local_path, std::string fleet_path) {
+  test_stable_config_path(false) = std::move(local_path);
+  test_stable_config_path(true) = std::move(fleet_path);
+}
 
 std::string wstring_to_utf8(const std::wstring& wstr) {
   if (wstr.empty()) return {};

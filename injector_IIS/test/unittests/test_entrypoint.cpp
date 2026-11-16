@@ -4,12 +4,15 @@
 //
 // Copyright 2025-Present Datadog, Inc.
 
+#include "config_reader.h"
 #include "entrypoint.h"
 #include "mocks.h"
 #include "gtest/gtest.h"
 #include <string>
 
 namespace {
+// Keeps the tests off the machine's stable configuration: every worker-level read sees files that
+// do not exist.
 class StableConfigTestIsolation final : public testing::Environment {
  public:
   void SetUp() override {
@@ -17,14 +20,10 @@ class StableConfigTestIsolation final : public testing::Environment {
     const DWORD length = GetTempPathW(MAX_PATH, temp_path);
     ASSERT_GT(length, 0);
     ASSERT_LT(length, MAX_PATH);
-    const std::wstring prefix = std::wstring(temp_path, length) + L"iis-rum-test-missing-" +
-                                std::to_wstring(GetCurrentProcessId());
-    ASSERT_NE(SetEnvironmentVariableW(L"DD_IIS_RUM_STABLE_CONFIG_LOCAL",
-                                      (prefix + L"-local.yaml").c_str()),
-              0);
-    ASSERT_NE(SetEnvironmentVariableW(L"DD_IIS_RUM_STABLE_CONFIG_FLEET",
-                                      (prefix + L"-fleet.yaml").c_str()),
-              0);
+    const std::string prefix = datadog::rum::wstring_to_utf8(std::wstring(temp_path, length)) +
+                               "iis-rum-test-missing-" + std::to_string(GetCurrentProcessId());
+    datadog::rum::set_stable_config_paths_for_testing(prefix + "-local.yaml",
+                                                      prefix + "-fleet.yaml");
   }
 };
 

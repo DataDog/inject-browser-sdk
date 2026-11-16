@@ -945,10 +945,9 @@ pub fn exception(
         }
     }
     // A `</head>` before the head lol_html sees closed the head the browser opened for it: the
-    // `<head>` tag that follows is ignored.
-    if oracle.is_some()
-        && first_head(observed).is_some_and(|head| return contains(&lower[..head.start], b"</head"))
-    {
+    // `<head>` tag that follows is ignored, the injector reading on in the body when that head
+    // closed ahead of any evidence.
+    if first_head(observed).is_some_and(|head| return contains(&lower[..head.start], b"</head")) {
         return Some(Exception::HeadStartOmitted);
     }
     let window = &lower[..lower.len().min(WINDOW)];

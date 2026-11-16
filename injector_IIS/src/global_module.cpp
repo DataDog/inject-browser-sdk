@@ -62,50 +62,66 @@ void GlobalModule::update_server_log_level() {
   }
 }
 
-void GlobalModule::Terminate() { delete this; }
+void GlobalModule::Terminate() {
+  delete this;
+  release_module_id_claim();
+}
 
 GLOBAL_NOTIFICATION_STATUS
 GlobalModule::OnGlobalApplicationStart(IHttpApplicationStartProvider* provider) {
-  assert(server_ != nullptr);
+  PrepareApp(provider->GetApplication());
+  return GL_NOTIFICATION_CONTINUE;
+}
 
-  auto ctx = std::make_unique<ModuleContext>();
-  ctx->logger = logger_.get();
-  ctx->server = server_;
-
-  auto* app = provider->GetApplication();
+HRESULT GlobalModule::PrepareApp(IHttpApplication* app) {
   if (app == nullptr) {
-    logger_->error("Application is null in OnGlobalApplicationStart");
-    return GL_NOTIFICATION_CONTINUE;
+    logger_->error("Application is null while preparing RUM context");
+    return E_POINTER;
+  }
+  const auto* config_path = app->GetAppConfigPath();
+  auto* app_container = app->GetModuleContextContainer();
+  if (config_path == nullptr || app_container == nullptr) {
+    logger_->error("Application config path or context container is null");
+    return E_POINTER;
   }
 
-  const auto* config_path = app->GetAppConfigPath();
-  if (!config_path) {
-    logger_->error("Application config path is null, cannot initialize RUM");
-    return GL_NOTIFICATION_CONTINUE;
+  const std::lock_guard lock(configurations_mutex_);
+  if (auto* existing = app_container->GetModuleContext(g_module_id); existing != nullptr) {
+    configurations_.insert_or_assign(
+        config_path, ConfigurationEntry{app, static_cast<ModuleContext*>(existing)});
+    return S_OK;
   }
+
   const auto* app_id = app->GetApplicationId();
   logger_->info(std::format("Parsing configuration \"{}\" for app (id: {})",
                             wstring_to_utf8(config_path),
                             wstring_to_utf8(app_id ? app_id : L"(unknown)")));
-
+  auto ctx = std::make_unique<ModuleContext>();
+  ctx->logger = logger_.get();
+  ctx->server = server_;
   update_module_context(*ctx, *server_, config_path, *logger_);
-  auto* app_container = app->GetModuleContextContainer();
-  if (!app_container) {
-    logger_->error("Module context container is null for application");
-    return GL_NOTIFICATION_CONTINUE;
+
+  const HRESULT hr = app_container->SetModuleContext(ctx.get(), g_module_id);
+  if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_ASSIGNED)) {
+    auto* winner = app_container->GetModuleContext(g_module_id);
+    if (winner == nullptr) {
+      logger_->error("Application RUM context race had no winner");
+      return hr;
+    }
+    configurations_.insert_or_assign(config_path,
+                                     ConfigurationEntry{app, static_cast<ModuleContext*>(winner)});
+    return S_OK;
   }
-  const auto hr = app_container->SetModuleContext(ctx.get(), g_module_id);
   if (FAILED(hr)) {
     logger_->error(
         std::format("Failed to set app module context: {}", std::system_category().message(hr)));
-    return GL_NOTIFICATION_CONTINUE;
+    return hr;
   }
 
-  // NOTE(@dmehala): Keep a reference on the module context for
-  // `OnGlobalConfigurationChange` event.
-  configurations_.insert_or_assign(config_path, ctx.release());
-
-  return GL_NOTIFICATION_CONTINUE;
+  // The container now owns the context; retain only an observer for config changes.
+  auto* stored = ctx.release();
+  configurations_.insert_or_assign(config_path, ConfigurationEntry{app, stored});
+  return S_OK;
 }
 
 GLOBAL_NOTIFICATION_STATUS
@@ -119,13 +135,12 @@ GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider* provider) {
     return GL_NOTIFICATION_CONTINUE;
   }
 
-  // Null the observer pointer instead of erasing: IIS owns the ModuleContext
-  // and will free it via CleanupStoredContext(). Setting to nullptr ensures
-  // OnGlobalConfigurationChange won't dereference a dangling pointer if it
-  // fires after stop for the same application during shutdown.
+  // IIS owns the context. An older application can stop after a replacement
+  // starts with the same config path, so retire only the matching app entry.
+  const std::lock_guard lock(configurations_mutex_);
   const auto it = configurations_.find(cfg_path);
-  if (it != configurations_.end()) {
-    it->second = nullptr;
+  if (it != configurations_.end() && it->second.application == app) {
+    it->second.context = nullptr;
   }
   return GL_NOTIFICATION_CONTINUE;
 }
@@ -153,10 +168,11 @@ GLOBAL_NOTIFICATION_STATUS GlobalModule::OnGlobalConfigurationChange(
   // skips unrelated leading entries.
   // TODO(@dmehala): Report a telemetry log when ctx is null (stopped app).
   std::wstring_view const change_path(cfg_path);
+  const std::lock_guard lock(configurations_mutex_);
   for (auto it = configurations_.lower_bound(std::wstring(change_path));
        it != configurations_.end() && std::wstring_view(it->first).starts_with(change_path); ++it) {
-    if (it->second != nullptr) {
-      update_module_context(*it->second, *server_, it->first.c_str(), *logger_);
+    if (it->second.context != nullptr) {
+      update_module_context(*it->second.context, *server_, it->first.c_str(), *logger_);
     }
   }
 

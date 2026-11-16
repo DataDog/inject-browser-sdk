@@ -57,9 +57,15 @@ $buildCmd = 'call "' + $vsDevCmd + '" -arch=amd64 && cmake --build ' + $BuildDir
 cmd /c $buildCmd
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$testExe = Join-Path $BuildDir "test\unittests\iis_injector_tests.exe"
+$testExes = @(
+    (Join-Path $BuildDir "test\unittests\iis_injector_tests.exe"),
+    (Join-Path $BuildDir "bootstrap\ddiisrum-package-selector-test.exe"))
 # Run in the same developer environment so the matching ASAN runtime DLL is
 # on PATH when an instrumented binary starts.
-$testCmd = 'call "' + $vsDevCmd + '" -arch=amd64 && "' + $testExe + '"'
-cmd /c $testCmd
-exit $LASTEXITCODE
+foreach ($testExe in $testExes) {
+    $testCmd = 'call "' + $vsDevCmd + '" -arch=amd64 && "' + $testExe + '"'
+    cmd /c $testCmd
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+& (Join-Path $PSScriptRoot "..\..\test\lifecycle\Test-IisRumBundleContract.ps1")
+if (-not $?) { exit 1 }

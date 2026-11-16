@@ -14,6 +14,7 @@
 #include "entrypoint.h"
 #include "http_module.h"
 #include "module_context.h"
+#include "global_module.h"
 #include "mocks.h"
 #include "gtest/gtest.h"
 
@@ -621,6 +622,49 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
   EXPECT_NE(output.find("test-client-token"), std::string::npos);
   EXPECT_NE(output.find("test-service"), std::string::npos);
   EXPECT_NE(output.find("</head>"), std::string::npos);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+TEST(InjectionPipeline, LazyPrepareAppIsIdempotent) {
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  const auto mod = registerModule(mockServer);
+  auto* runtime = static_cast<GlobalModule*>(mod.global);
+  MockAppWithContext app;
+  ASSERT_EQ(runtime->PrepareApp(&app), S_OK);
+  auto* first = app.GetModuleContextContainer()->GetModuleContext(nullptr);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(static_cast<ModuleContext*>(first)->snippet, nullptr);
+
+  ASSERT_EQ(runtime->PrepareApp(&app), S_OK);
+  EXPECT_EQ(app.GetModuleContextContainer()->GetModuleContext(nullptr), first);
+  MockAppStartProvider appStart(app);
+  EXPECT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+  EXPECT_EQ(app.GetModuleContextContainer()->GetModuleContext(nullptr), first);
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+TEST(InjectionPipeline, LazyPrepareAppUsesRaceWinner) {
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  const auto mod = registerModule(mockServer);
+  auto* runtime = static_cast<GlobalModule*>(mod.global);
+  MockAppWithContext app;
+  auto* winner = new ModuleContext;
+  static_cast<MockModuleContextContainer*>(app.GetModuleContextContainer())
+      ->SimulateRaceWith(winner);
+  EXPECT_EQ(runtime->PrepareApp(&app), S_OK);
+  EXPECT_EQ(app.GetModuleContextContainer()->GetModuleContext(nullptr), winner);
 
   mod.factory->Terminate();
   mod.global->Terminate();

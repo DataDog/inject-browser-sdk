@@ -1,8 +1,7 @@
 ---
 # Child pipeline started by injector_IIS_oci (.gitlab/oci.yml).
 include:
-  # The libdatadog-build campaign updates this file. It points to the WIP
-  # template of DataDog/libdatadog-build#298 until that PR ships.
+  # The libdatadog-build campaign updates this file.
   - local: .gitlab/one-pipeline.locked.yml
 
 variables:

@@ -17,20 +17,17 @@ namespace {
 
 namespace fs = std::filesystem;
 
-void write_file(const fs::path &path, const std::string &bytes) {
+void write_file(const fs::path& path, const std::string& bytes) {
   std::ofstream file(path, std::ios::binary);
   file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
 
-bool check(bool condition, const char *name) {
-  if (!condition)
-    std::cerr << "FAILED: " << name << '\n';
+bool check(bool condition, const char* name) {
+  if (!condition) std::cerr << "FAILED: " << name << '\n';
   return condition;
 }
 
-}  // namespace
-
-int main() {
+int run_tests() {
   wchar_t temp_path[MAX_PATH]{};
   wchar_t temp_file[MAX_PATH]{};
   if (!GetTempPathW(MAX_PATH, temp_path) || !GetTempFileNameW(temp_path, L"DDR", 0, temp_file)) {
@@ -58,7 +55,7 @@ int main() {
     write_file(stable / L"version", "");
     okay &= check(!datadog::iis_rum::select_package(), "empty version canary");
 
-    write_file(stable / L"version", std::string("1\0.0", 5));
+    write_file(stable / L"version", std::string("1\0.0", 4));
     okay &= check(!datadog::iis_rum::select_package(), "NUL in version canary");
 
     write_file(stable / L"version", "1.0.0\n");
@@ -85,7 +82,7 @@ int main() {
     write_file(experiment / L"version", std::string(257, 'x'));
     selected = datadog::iis_rum::select_package();
     okay &= check(selected && selected->slot == L"stable", "malformed experiment fallback");
-  } catch (const std::exception &error) {
+  } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     okay = false;
   }
@@ -97,4 +94,14 @@ int main() {
   std::error_code cleanup_error;
   fs::remove_all(root, cleanup_error);
   return okay && !cleanup_error ? 0 : 1;
+}
+
+}  // namespace
+
+int main() {
+  try {
+    return run_tests();
+  } catch (...) {
+    return 1;  // Reporting could throw again; the exit code fails the run.
+  }
 }

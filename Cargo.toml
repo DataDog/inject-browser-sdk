@@ -13,8 +13,7 @@ version = "1.2.1-dev"
 rust-version = "1.91.0"
 
 [workspace.dependencies]
-# Published crate. `default-features = false` keeps it no_std + alloc; the core
-# library turns `std` back on for Windows.
+# Published crate; `default-features = false` keeps it no_std + alloc.
 libdd-library-config = { version = "5.0.1", default-features = false }
 
 [workspace.lints.clippy]

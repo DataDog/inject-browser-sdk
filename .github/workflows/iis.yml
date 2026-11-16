@@ -41,17 +41,6 @@ jobs:
           name: iis-build
           path: injector_IIS/build
           include-hidden-files: true
-      - name: Stage unsigned bootstrap bundle
-        run: |
-          python3 injector_IIS/scripts/auto/package_bundle.py \
-            --bootstrap-dll injector_IIS/build/bootstrap/ddiisrum-bootstrap.dll \
-            --bundle-version "$(cat injector_IIS/VERSION)" \
-            --out-dir injector_IIS/bundle-out
-      - name: Upload unsigned bootstrap bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: iis-rum-bootstrap-unsigned
-          path: injector_IIS/bundle-out/*
 
   test-iis:
     needs: build-iis
@@ -67,13 +56,7 @@ jobs:
           name: iis-build
           path: injector_IIS/build
       - name: Run Unit Tests
-        run: |
-          .\injector_IIS\build\test\unittests\iis_injector_tests.exe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\injector_IIS\build\bootstrap\ddiisrum-package-selector-test.exe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\injector_IIS\test\lifecycle\Test-IisRumBundleContract.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        run: .\injector_IIS\build\test\unittests\iis_injector_tests.exe
       - name: Install Dependencies
         run: |
           choco install -y wixtoolset

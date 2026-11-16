@@ -7,11 +7,9 @@
 """
 IIS namespaced tasks
 """
-
 from __future__ import print_function
 import os
 import shutil
-import subprocess
 import sys
 
 from invoke import task
@@ -55,7 +53,7 @@ def build(ctx, out_dir="../build_out", debug=False, vstudio_root=None, test_dir=
         f"cmake --preset=ci-native -B build -DCMAKE_BUILD_TYPE={build_type} ."
     )
 
-    ctx.run(
+    result = ctx.run(
         f'call "{vs_env_bat}" -arch=amd64 && {cmake_configure_cmd}',
         env=env,
         hide=False,
@@ -63,7 +61,7 @@ def build(ctx, out_dir="../build_out", debug=False, vstudio_root=None, test_dir=
     )
 
     cmake_build_cmd = "cmake --build build -j 4"
-    ctx.run(
+    result = ctx.run(
         f'call "{vs_env_bat}" -arch=amd64 && {cmake_build_cmd}',
         env=env,
         hide=False,
@@ -84,44 +82,6 @@ def build(ctx, out_dir="../build_out", debug=False, vstudio_root=None, test_dir=
         raise Exit(code=1)
 
     sign_binary(ctx, dllpath)
-
-    bootstrap = os.path.join(
-        PROJECT_DIR, "build", "bootstrap", "ddiisrum-bootstrap.dll"
-    )
-    if not os.path.isfile(bootstrap):
-        print(f"Could not find the IIS RUM bootstrap at {bootstrap}")
-        raise Exit(code=1)
-    sign_binary(ctx, bootstrap)
-
-    # Sign copies so the source checkout stays pristine. The archive is made
-    # after signing, and the SHA256 belongs to the exact signed archive.
-    assets = os.path.join(out_dir, "iis-rum-bundle-input")
-    os.makedirs(assets, exist_ok=True)
-    for name in ("Invoke-IisRumLifecycle.ps1", "Install-IisRum.ps1"):
-        shutil.copy2(os.path.join(PROJECT_DIR, "scripts", "auto", name), assets)
-    shutil.copy2(os.path.join(PROJECT_DIR, "resources", "RUM_schema.xml"), assets)
-    for name in ("Invoke-IisRumLifecycle.ps1", "Install-IisRum.ps1"):
-        sign_binary(ctx, os.path.join(assets, name))
-    with open(os.path.join(PROJECT_DIR, "VERSION"), encoding="utf-8") as version_file:
-        bundle_version = version_file.read().strip()
-    subprocess.run(
-        [
-            sys.executable,
-            os.path.join(PROJECT_DIR, "scripts", "auto", "package_bundle.py"),
-            "--bootstrap-dll",
-            bootstrap,
-            "--assets-dir",
-            assets,
-            "--bundle-version",
-            bundle_version,
-            "--out-dir",
-            out_dir,
-        ],
-        check=True,
-    )
-    print(
-        f"IIS RUM bundle signing enabled: {bool(os.environ.get('SIGN_WINDOWS_DD_WCS'))}"
-    )
 
     package(ctx, out_dir, iis_dll=dllpath, debug=debug, vstudio_root=vstudio_root)
 
@@ -168,7 +128,7 @@ def package(ctx, out_dir="../build_out", iis_dll="", debug=False, vstudio_root=N
     msi_cmd = f'msbuild {installer_proj_file} -m:4 -p:Configuration={build_type};Platform=x64;InjectorDll="{dllpath}"'
 
     print(f"Executing: {msi_cmd}")
-    ctx.run(
+    result = ctx.run(
         f'call "{vs_env_bat}" -arch=amd64 && {msi_cmd}',
         hide=False,
         pty=False,
@@ -224,3 +184,5 @@ def sign_binary(ctx, path):
         )
     else:
         print(f"Skipping code signing for {path} (SIGN_WINDOWS_DD_WCS not set)")
+
+

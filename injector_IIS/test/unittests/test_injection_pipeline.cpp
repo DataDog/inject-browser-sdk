@@ -13,14 +13,12 @@
 
 #include "config_reader.h"
 #include "entrypoint.h"
-#include "global_module.h"
 #include "http_module.h"
 #include "module_context.h"
 #include "mocks.h"
 #include "gtest/gtest.h"
 
 #include <array>
-#include <cstring>
 #include <functional>
 #include <map>
 #include <optional>
@@ -65,10 +63,6 @@ class MockAppHostProperty : public IAppHostProperty {
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
   void SetSchemaDefault(bool value) { schema_default_ = value; }
-  void SetValue(VARIANT value) {
-    VariantClear(&value_);
-    value_ = value;
-  }
 
   HRESULT STDMETHODCALLTYPE get_Name(BSTR* pName) override {
     *pName = SysAllocString(name_);
@@ -230,7 +224,6 @@ class MockRumConfigElement : public IAppHostElement {
   void SetEnabledPropertyMissing(bool missing) { enabled_lookup_fails_ = missing; }
   void SetEnabledIsSchemaDefault(bool value) { enabled_prop_.SetSchemaDefault(value); }
   void SetVersionIsSchemaDefault(bool value) { version_prop_.SetSchemaDefault(value); }
-  void SetVersion(int value) { version_prop_.SetValue(int_variant(value)); }
   void SetInjectionStrategy(InjectionStrategy strategy) {
     injection_strategy_prop_.emplace(L"injectionStrategy", int_variant(static_cast<int>(strategy)));
   }
@@ -639,49 +632,6 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
   EXPECT_NE(output.find("test-client-token"), std::string::npos);
   EXPECT_NE(output.find("test-service"), std::string::npos);
   EXPECT_NE(output.find("</head>"), std::string::npos);
-
-  mod.factory->Terminate();
-  mod.global->Terminate();
-}
-
-TEST(InjectionPipeline, LazyPrepareAppIsIdempotent) {
-  MockRumConfigElement rumConfig;
-  MockAdminManager adminManager(&rumConfig);
-  MockServer mockServer;
-  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
-
-  const auto mod = registerModule(mockServer);
-  auto* runtime = static_cast<GlobalModule*>(mod.global);
-  MockAppWithContext app;
-  ASSERT_EQ(runtime->PrepareApp(&app), S_OK);
-  auto* first = app.GetModuleContextContainer()->GetModuleContext(nullptr);
-  ASSERT_NE(first, nullptr);
-  ASSERT_NE(static_cast<ModuleContext*>(first)->snippet, nullptr);
-
-  ASSERT_EQ(runtime->PrepareApp(&app), S_OK);
-  EXPECT_EQ(app.GetModuleContextContainer()->GetModuleContext(nullptr), first);
-  MockAppStartProvider appStart(app);
-  EXPECT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
-  EXPECT_EQ(app.GetModuleContextContainer()->GetModuleContext(nullptr), first);
-
-  mod.factory->Terminate();
-  mod.global->Terminate();
-}
-
-TEST(InjectionPipeline, LazyPrepareAppUsesRaceWinner) {
-  MockRumConfigElement rumConfig;
-  MockAdminManager adminManager(&rumConfig);
-  MockServer mockServer;
-  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
-
-  const auto mod = registerModule(mockServer);
-  auto* runtime = static_cast<GlobalModule*>(mod.global);
-  MockAppWithContext app;
-  auto* winner = new ModuleContext;
-  static_cast<MockModuleContextContainer*>(app.GetModuleContextContainer())
-      ->SimulateRaceWith(winner);
-  EXPECT_EQ(runtime->PrepareApp(&app), S_OK);
-  EXPECT_EQ(app.GetModuleContextContainer()->GetModuleContext(nullptr), winner);
 
   mod.factory->Terminate();
   mod.global->Terminate();

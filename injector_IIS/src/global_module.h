@@ -16,7 +16,6 @@
 #include <datadog/telemetry/configuration.h>
 #include <datadog/telemetry/telemetry.h>
 #include <map>
-#include <mutex>
 
 namespace datadog::rum {
 
@@ -24,12 +23,7 @@ class GlobalModule final : public CGlobalModule {
   HTTP_MODULE_ID module_id_;
   IHttpServer* server_;
   std::shared_ptr<Logger> logger_;
-  struct ConfigurationEntry {
-    IHttpApplication* application;
-    ModuleContext* context;  // IIS owns this pointer and calls CleanupStoredContext.
-  };
-  std::mutex configurations_mutex_;
-  std::map<std::wstring, ConfigurationEntry> configurations_;
+  std::map<std::wstring, ModuleContext*> configurations_;
 
  public:
   GlobalModule(IHttpServer* server, DWORD server_version, std::shared_ptr<Logger> logger);
@@ -41,10 +35,6 @@ class GlobalModule final : public CGlobalModule {
 
   GLOBAL_NOTIFICATION_STATUS
   OnGlobalApplicationStart(IHttpApplicationStartProvider* provider) override;
-
-  // The bootstrap can load this DLL after IIS has already started an application.
-  // Both entry points share one idempotent context initialization path.
-  HRESULT PrepareApp(IHttpApplication* app);
 
   GLOBAL_NOTIFICATION_STATUS
   OnGlobalApplicationStop(IHttpApplicationStopProvider* provider) override;

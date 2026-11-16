@@ -471,6 +471,23 @@ pub fn regressions() -> Vec<Fixture> {
                 "<html><head>{OPEN}<meta http-equiv=\"\u{feff}X-UA-Compatible\" content=IE=edge>{CLOSE}</head>"
             ),
         ),
+        // A byte order mark starting an attribute name is part of it: no `charset` attribute.
+        Fixture::new(
+            "byte-order-mark-in-attribute-name",
+            format!("<html><head>{OPEN}<meta \u{feff}charset=utf-8>{CLOSE}</head>"),
+        ),
+        // A `#` only starts a numeric reference's name: `&#32#32` is a space, then text, which
+        // closes the head before the `X-UA-Compatible` meta.
+        Fixture::new(
+            "numeric-reference-followed-by-number-sign",
+            format!("<html><head><meta charset=utf-8>{OPEN}&#32{CLOSE}#32{XUA}</head>"),
+        ),
+        // An empty attribute value ends a raw text element's start tag at its `>`, past a quoted
+        // value holding one.
+        Fixture::new(
+            "empty-attribute-value-after-quoted-greater-than",
+            format!("<html><head>{OPEN}<script src=\"a>b\" c=><c>;</script>{CLOSE}</head>"),
+        ),
         // An empty attribute value ends a raw text element's start tag at its `>`, after a `/` too.
         Fixture::new(
             "empty-attribute-value-after-slash",

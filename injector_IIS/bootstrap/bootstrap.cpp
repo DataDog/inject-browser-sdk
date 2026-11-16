@@ -12,7 +12,6 @@
 #include <string.h>
 
 #include <atomic>
-#include <cstring>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -31,7 +30,7 @@ constexpr DWORD kGlobalNotifications =
 
 void diagnostic(const wchar_t* message) { OutputDebugStringW(message); }
 
-void disable_output_cache(IHttpResponse* response) {
+void disable_output_cache(IHttpResponse* response) noexcept {
   if (response == nullptr) return;
   response->DisableKernelCache();
   if (auto* policy = response->GetCachePolicy()) policy->DisableUserCache();
@@ -39,7 +38,7 @@ void disable_output_cache(IHttpResponse* response) {
 
 // IIS output caches can serve a response without invoking any native module.
 // Prevent a cached HTML response from surviving package publication/removal.
-void disable_html_output_cache(IHttpContext* context) {
+void disable_html_output_cache(IHttpContext* context) noexcept {
   if (context == nullptr) return;
   auto* response = context->GetResponse();
   if (response == nullptr) return;
@@ -61,7 +60,7 @@ class RuntimeState {
   const DatadogRumRuntimeV1* active_runtime(IHttpApplication* application) {
     if (!runtime_enabled_.load(std::memory_order_acquire)) return nullptr;
     auto selected = select_package();
-    std::lock_guard lock(mutex_);
+    const std::lock_guard lock(mutex_);
     if (!selected) {
       failed_package_.reset();
       return nullptr;
@@ -79,12 +78,12 @@ class RuntimeState {
     // A package may be removed or its active junction retargeted while its DLL
     // is loading. Recheck before handing its objects to request processing.
     auto current = select_package();
-    if (!current || !loaded_package_->same_identity(*current)) return nullptr;
+    if (!current || !loaded_package_ || !loaded_package_->same_identity(*current)) return nullptr;
     if (application == nullptr) return nullptr;
     auto* container = application->GetModuleContextContainer();
     if (container == nullptr) return nullptr;
     if (container->GetModuleContext(module_id_) == nullptr) {
-      std::unique_lock callback_lock(callback_mutex_);
+      const std::unique_lock callback_lock(callback_mutex_);
       const HRESULT hr = runtime_.prepare_app(runtime_.runtime, application);
       if (FAILED(hr) || container->GetModuleContext(module_id_) == nullptr) return nullptr;
     }
@@ -96,8 +95,8 @@ class RuntimeState {
   // releases, so application stops must keep arriving.
   template <typename Notify>
   GLOBAL_NOTIFICATION_STATUS notify(Notify notify) {
-    std::lock_guard lock(mutex_);
-    std::unique_lock callback_lock(callback_mutex_);
+    const std::lock_guard lock(mutex_);
+    const std::unique_lock callback_lock(callback_mutex_);
     return loaded_package_ ? notify(*runtime_.global_module) : GL_NOTIFICATION_CONTINUE;
   }
 
@@ -129,10 +128,10 @@ class RuntimeState {
       diagnostic(L"Datadog IIS RUM bootstrap: package lacks runtime ABI v1.\n");
       return false;
     }
-    // GetProcAddress returns FARPROC, whose generic signature differs from this export.
-    DatadogRumCreateRuntimeV1Fn create = nullptr;
-    static_assert(sizeof(create) == sizeof(proc));
-    std::memcpy(&create, &proc, sizeof(create));
+    // GetProcAddress returns FARPROC, whose generic signature differs from this
+    // export; `void (*)()` is the portable intermediate between function types.
+    const auto create =
+        reinterpret_cast<DatadogRumCreateRuntimeV1Fn>(reinterpret_cast<void (*)()>(proc));
     DatadogRumRuntimeV1 created{};
     created.size = sizeof(created);
     created.version = kDatadogRumRuntimeAbiVersion;
@@ -175,19 +174,13 @@ class RequestProxy final : public CHttpModule {
 
   REQUEST_NOTIFICATION_STATUS
   OnUpdateRequestCache(IHttpContext* context, IHttpEventProvider*) override {
-    try {
-      disable_html_output_cache(context);
-    } catch (...) {
-    }
+    disable_html_output_cache(context);
     return RQ_NOTIFICATION_CONTINUE;
   }
 
   REQUEST_NOTIFICATION_STATUS
   OnSendResponse(IHttpContext* context, ISendResponseProvider* provider) override {
-    try {
-      disable_html_output_cache(context);
-    } catch (...) {
-    }
+    disable_html_output_cache(context);
     return forward(context,
                    [&](CHttpModule& target) { return target.OnSendResponse(context, provider); });
   }
@@ -205,7 +198,7 @@ class RequestProxy final : public CHttpModule {
     try {
       auto* target = delegate_for(context);
       if (target == nullptr) return RQ_NOTIFICATION_CONTINUE;
-      auto callback_lock = state_->request_callback_lock();
+      const auto callback_lock = state_->request_callback_lock();
       if (!state_->package_still_active()) return RQ_NOTIFICATION_CONTINUE;
       return call(*target);
     } catch (...) {
@@ -289,8 +282,8 @@ extern "C" __declspec(dllexport) HRESULT __stdcall RegisterModule(
     DWORD server_version, IHttpModuleRegistrationInfo* registration, IHttpServer* server) {
   if (registration == nullptr || server == nullptr) return S_OK;
   try {
-    auto state = std::make_shared<datadog::iis_rum::RuntimeState>(server_version, server,
-                                                                  registration->GetId());
+    const auto state = std::make_shared<datadog::iis_rum::RuntimeState>(server_version, server,
+                                                                        registration->GetId());
     auto* global = new (std::nothrow) datadog::iis_rum::GlobalProxy(state);
     if (global == nullptr) return S_OK;
     const HRESULT global_hr =

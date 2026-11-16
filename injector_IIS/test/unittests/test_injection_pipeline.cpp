@@ -650,7 +650,7 @@ TEST(InjectionPipeline, LazyPrepareAppIsIdempotent) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   auto* runtime = static_cast<GlobalModule*>(mod.global);
   MockAppWithContext app;
   ASSERT_EQ(runtime->PrepareApp(&app), S_OK);
@@ -674,7 +674,7 @@ TEST(InjectionPipeline, LazyPrepareAppUsesRaceWinner) {
   MockServer mockServer;
   EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
 
-  auto mod = registerModule(mockServer);
+  const auto mod = registerModule(mockServer);
   auto* runtime = static_cast<GlobalModule*>(mod.global);
   MockAppWithContext app;
   auto* winner = new ModuleContext;
@@ -2795,10 +2795,10 @@ TEST(InjectionPipeline, MissingEnabledAttributePreservesExistingConfig) {
 
 RumConfig read_default_site(MockRumConfigElement& config) {
   MockAdminManager admin(&config);
-  MockServer server;
+  const MockServer server;
   EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
   Logger logger;
-  auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  const auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
   EXPECT_EQ(result.status, ReadConfStatus::Ok);
   return result.config.value_or(RumConfig{});
 }
@@ -2836,7 +2836,7 @@ TEST(InjectionPipeline, InvalidOptionValueIsSkipped) {
                                      {L"clientToken", L"test-client-token"},
                                      {L"sessionSampleRate", L"not-a-number"}});
   MockAdminManager admin(&config);
-  MockServer server;
+  const MockServer server;
   EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
   Logger logger;
   ModuleContext ctx;
@@ -2854,7 +2854,7 @@ TEST(InjectionPipeline, NoConfigurationClearsTheSnippet) {
   config.SetEnabledIsSchemaDefault(true);
   config.SetVersionIsSchemaDefault(true);
   MockAdminManager admin(&config);
-  MockServer server;
+  const MockServer server;
   EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
   Logger logger;
   ModuleContext ctx;

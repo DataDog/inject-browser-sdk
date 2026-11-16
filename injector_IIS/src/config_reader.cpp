@@ -347,6 +347,11 @@ void update_module_context(ModuleContext& ctx, const IHttpServer& server, PCWSTR
     return;
   }
 
+  if (!result.config) {
+    // ReadConfResult::ok is the only way to get here, and it always carries a config.
+    logger.error("Config read reported success without a config; keeping previous config");
+    return;
+  }
   const auto& config = *result.config;
   Snippet* snippet = make_snippet(config, logger);
   if (snippet == nullptr) {

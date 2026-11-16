@@ -102,7 +102,7 @@ extern "C" __declspec(dllexport) HRESULT __stdcall DatadogRumCreateRuntimeV1(
     return HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
   }
   try {
-    auto logger = std::make_shared<datadog::rum::Logger>();
+    const auto logger = std::make_shared<datadog::rum::Logger>();
     auto global = std::make_unique<datadog::rum::GlobalModule>(server, server_version, logger);
     auto factory = std::make_unique<datadog::rum::HttpModuleFactory>();
     runtime->size = sizeof(DatadogRumRuntimeV1);

@@ -14,7 +14,7 @@ class StableConfigTestIsolation final : public testing::Environment {
  public:
   void SetUp() override {
     wchar_t temp_path[MAX_PATH];
-    DWORD length = GetTempPathW(MAX_PATH, temp_path);
+    const DWORD length = GetTempPathW(MAX_PATH, temp_path);
     ASSERT_GT(length, 0);
     ASSERT_LT(length, MAX_PATH);
     const std::wstring prefix = std::wstring(temp_path, length) + L"iis-rum-test-missing-" +
@@ -28,6 +28,8 @@ class StableConfigTestIsolation final : public testing::Environment {
   }
 };
 
+// gtest registers environments this way; an allocation failure at startup aborts the run anyway.
+// NOLINTNEXTLINE(bugprone-throwing-static-initialization)
 [[maybe_unused]] testing::Environment* const stable_config_test_isolation =
     testing::AddGlobalTestEnvironment(new StableConfigTestIsolation());
 }  // namespace
@@ -52,7 +54,7 @@ TEST(TestRegisterModule, TestRegistersForBeginRequestAndSendResponseNotification
       .WillOnce(DoAll(SaveArg<0>(&factory), Return(S_OK)));
   EXPECT_CALL(module, GetId()).Times(1);
 
-  auto result = RegisterModule(0, &module, &server);
+  const auto result = RegisterModule(0, &module, &server);
 
   EXPECT_EQ(result, S_OK);
   ASSERT_NE(global, nullptr);

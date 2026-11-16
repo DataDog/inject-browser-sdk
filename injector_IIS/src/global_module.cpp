@@ -138,7 +138,7 @@ GlobalModule::OnGlobalApplicationStop(IHttpApplicationStopProvider* provider) {
   // IIS owns the context. An older application can stop after a replacement
   // starts with the same config path, so retire only the matching app entry.
   const std::lock_guard lock(configurations_mutex_);
-  auto it = configurations_.find(cfg_path);
+  const auto it = configurations_.find(cfg_path);
   if (it != configurations_.end() && it->second.application == app) {
     it->second.context = nullptr;
   }

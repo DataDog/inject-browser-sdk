@@ -503,6 +503,16 @@ pub fn regressions() -> Vec<Fixture> {
                 "<meta name=a>".repeat(80)
             ),
         ),
+        // A tag ends the character reference before it: a bare `&` is text, closing the head, and
+        // a numeric reference to whitespace needs no `;`.
+        Fixture::new(
+            "ampersand-before-tag",
+            format!("<html><head><meta charset=utf-8>{MARK}&{XUA}</head>"),
+        ),
+        Fixture::new(
+            "whitespace-reference-before-tag",
+            format!("<html><head><meta charset=utf-8>&#32{XUA}{MARK}</head>"),
+        ),
         // An AMP document opens with its `<html>` tag. One past where the snippet goes is not looked
         // for, in the head or past it, though the browser merges its attributes into the root.
         Fixture::new(

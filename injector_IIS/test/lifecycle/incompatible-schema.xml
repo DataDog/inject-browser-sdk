@@ -1,0 +1,10 @@
+<configSchema>
+  <sectionSchema name="system.webServer/datadogRum">
+    <attribute name="enabled" type="bool" />
+    <attribute name="version" type="int" />
+    <collection addElement="option" removeElement="remove" clearElement="clear" allowDuplicates="false">
+      <attribute name="name" type="string" isUniqueKey="true" required="true" validationType="nonEmptyString" />
+      <attribute name="value" type="int" required="true" validationType="nonEmptyString" />
+    </collection>
+  </sectionSchema>
+</configSchema>

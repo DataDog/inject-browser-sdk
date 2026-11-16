@@ -581,5 +581,24 @@ pub fn regressions() -> Vec<Fixture> {
                 "a".repeat(1100)
             ),
         ),
+        // Found by html5ever's checks, see `check_tree`. A doctype of any name opens the document:
+        // the browser ignores one the snippet precedes, so a head whose start tag is omitted is
+        // walked from past it.
+        Fixture::new(
+            "doctype-not-named-html",
+            format!("<!DOCTYPE md>{OPEN}<title>t</title><html>{CLOSE}<p>"),
+        ),
+        // Foreign content closing the head ahead of any evidence: the `<html>` tag that follows is
+        // foreign content too, the snippet would be a MathML `<script>` there.
+        Fixture::new(
+            "foreign-content-closing-the-head-ahead-of-evidence",
+            "<math><html><head><title>t</title></head>",
+        ),
+        // So does a `<frameset>`: the browser drops the snippet in one, and ignores the
+        // `<textarea>` tag, the `<!--` that follows opening a comment.
+        Fixture::new(
+            "frameset-closing-the-head-ahead-of-evidence",
+            "<frameset><textarea><!--</textarea><body>-->",
+        ),
     ];
 }

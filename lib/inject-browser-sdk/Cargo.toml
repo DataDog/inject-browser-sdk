@@ -37,6 +37,9 @@ workspace = true
 lol_html = "3.0.3"
 # What the oracle resolves `charset` labels with, independently of the injector's own table.
 encoding_rs = "0.8.44"
+# The second oracle, a spec-compliant tree builder: where the browser really puts the snippet, see
+# tests/harness/tree.rs.
+html5ever = "0.40.1"
 pretty_assertions = { version = "1.4.0", features = ["unstable"] }
 rand = "0.10.0"
 serde = { version = "1.0", features = ["std"] }

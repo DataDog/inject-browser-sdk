@@ -9,3 +9,4 @@
 pub mod fixtures;
 pub mod input;
 pub mod oracle;
+pub mod tree;

@@ -6,7 +6,8 @@
 
 //! Corpus tests of the injector, after lol_html's own (cloudflare/lol-html `tests/`): every
 //! document runs as a single chunk and as random chunkings, each run checked against the single
-//! one and against lol_html as an oracle for where the snippet goes.
+//! one, against lol_html as an oracle for where the snippet goes, and on html5ever's tree of the
+//! output for where the browser puts it, see [`input::check_tree`].
 //!
 //! The documents are generated: real-world shaped fixtures written as the output they must
 //! produce (`harness/fixtures.rs`), the markup fuzzing once found handled wrongly, reduced and
@@ -41,14 +42,16 @@ fn seed() -> u64 {
 #[derive(Default)]
 struct Stats {
     documents: usize,
+    /// Documents injected, whose trees [`input::check_tree`] checked.
+    tree_checked: usize,
     exceptions: BTreeMap<String, usize>,
 }
 
 impl Stats {
     fn report(&self, name: &str) {
         eprintln!(
-            "{name}: {} documents, exceptions {:?}",
-            self.documents, self.exceptions
+            "{name}: {} documents, {} injected and tree checked, exceptions {:?}",
+            self.documents, self.tree_checked, self.exceptions
         );
     }
 }
@@ -81,6 +84,9 @@ fn check_strategy(
 ) -> Run {
     let single = input::run(strategy, &[document]);
     stats.documents += 1;
+    if input::check_tree(strategy, document) {
+        stats.tree_checked += 1;
+    }
     if let Some(exception) = input::check_oracle(strategy, document, &single) {
         *stats
             .exceptions
@@ -191,6 +197,105 @@ fn write_fuzz_seeds() {
             fs::write(path, [[selector].as_slice(), &fixture.document()].concat()).unwrap();
         }
     }
+}
+
+/// Replays inputs through html5ever's checks, see [`input::tree_verdict`], without stopping at a
+/// failure, and writes what the browser oracle (`tools/browser-oracle/check.py`) needs to check
+/// them in a real browser; does nothing without `ORACLE_DUMP_INPUT`, a `:` separated list of files
+/// and directories:
+///
+/// ```text
+/// ORACLE_DUMP_INPUT=artifacts/tree_oracle:corpus/tree_oracle ORACLE_DUMP_OUT=dump.jsonl \
+///     cargo test -p inject-browser-sdk --test injection oracle_dump -- --nocapture
+/// ```
+///
+/// Inputs are in the fuzz targets' format, a byte picking the strategy then the document, unless
+/// `ORACLE_DUMP_RAW` is set: each file is then a document, run under every strategy. Each line of
+/// `ORACLE_DUMP_OUT` is a JSON object, with the documents as strings of one character per byte
+/// (U+0000 to U+00FF). Fails if any input fails a property.
+#[test]
+fn oracle_dump() {
+    let Some(inputs) = std::env::var_os("ORACLE_DUMP_INPUT") else {
+        return;
+    };
+    let raw = std::env::var_os("ORACLE_DUMP_RAW").is_some();
+    let mut files = Vec::new();
+    for path in std::env::split_paths(&inputs) {
+        match path.is_dir() {
+            true => {
+                let mut entries: Vec<_> = fs::read_dir(&path)
+                    .unwrap()
+                    .map(|entry| return entry.unwrap().path())
+                    .filter(|path| return path.is_file())
+                    .collect();
+                entries.sort();
+                files.extend(entries);
+            }
+            false => files.push(path),
+        }
+    }
+    let bytes = |bytes: &[u8]| {
+        return bytes
+            .iter()
+            .map(|&b| return char::from(b))
+            .collect::<String>();
+    };
+    let mut out = std::env::var_os("ORACLE_DUMP_OUT").map(|path| {
+        return std::io::BufWriter::new(fs::File::create(path).unwrap());
+    });
+    let (mut checked, mut injected, mut failed) = (0, 0, 0);
+    for file in &files {
+        let data = fs::read(file).unwrap();
+        let runs: Vec<(InjectionStrategy, &[u8])> = match raw {
+            true => input::STRATEGIES
+                .iter()
+                .map(|&strategy| return (strategy, data.as_slice()))
+                .collect(),
+            false => match data.split_first() {
+                Some((&selector, document)) => vec![(
+                    input::STRATEGIES[usize::from(selector) % input::STRATEGIES.len()],
+                    document,
+                )],
+                None => continue,
+            },
+        };
+        for (strategy, document) in runs {
+            let verdict = input::tree_verdict(strategy, document);
+            checked += 1;
+            injected += usize::from(verdict.run.injected_at.is_some());
+            if !verdict.failures.is_empty() {
+                failed += 1;
+                eprintln!(
+                    "{} {strategy:?} at {:?}: {}",
+                    file.display(),
+                    verdict.run.injected_at,
+                    verdict.failures.join("; ")
+                );
+            }
+            if let Some(out) = &mut out {
+                let line = serde_json::json!({
+                    "file": file.display().to_string(),
+                    "strategy": format!("{strategy:?}"),
+                    "document": bytes(document),
+                    "output": bytes(&verdict.run.output),
+                    "injected_at": verdict.run.injected_at,
+                    "document_tree": verdict.document_tree,
+                    "output_tree": verdict.output_tree,
+                    "required_metas": verdict.required_metas,
+                    "head_closed_at": verdict.head_closed_at,
+                    "closed_tail": verdict.closed_tail,
+                    "failures": verdict.failures,
+                });
+                serde_json::to_writer(&mut *out, &line).unwrap();
+                std::io::Write::write_all(out, b"\n").unwrap();
+            }
+        }
+    }
+    eprintln!(
+        "oracle dump: {checked} runs of {} files, {injected} injected, {failed} failing",
+        files.len()
+    );
+    assert_eq!(failed, 0, "inputs failing a property");
 }
 
 /// Documents made of random markup fragments, in the spirit of the fuzz targets, but small and

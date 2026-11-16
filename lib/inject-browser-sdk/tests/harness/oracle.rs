@@ -155,7 +155,7 @@ pub fn observe<T: AsRef<[u8]>>(chunks: &[T]) -> Option<Observed> {
 
 /// `document` decoded as UTF-8, with U+FFFD for every maximal subpart of a sequence that is not, as
 /// the WHATWG decoder does, and where each of its bytes comes from in `document`, its length last.
-fn decode(document: &[u8]) -> (Vec<u8>, Vec<usize>) {
+pub fn decode(document: &[u8]) -> (Vec<u8>, Vec<usize>) {
     let mut decoded = Vec::with_capacity(document.len());
     let mut origin = Vec::with_capacity(document.len() + 1);
     let mut at = 0;
@@ -827,26 +827,36 @@ fn head_open_point(observed: &Observed) -> Option<usize> {
 /// spec's prescan, or is `X-UA-Compatible` or `Content-Security-Policy` (the enforcing one: a
 /// report-only policy is ignored in a meta).
 fn is_relevant(meta: &HeadChild) -> bool {
-    let known = |label: &str| return encoding_rs::Encoding::for_label(label.as_bytes()).is_some();
     // The parser decodes character references in attribute values.
     let http_equiv = meta.http_equiv.as_deref().map(decode_references);
+    return is_relevant_meta(
+        meta.charset.as_deref(),
+        http_equiv.as_deref(),
+        meta.content.as_deref(),
+    );
+}
+
+/// [`is_relevant`] on the values of a meta's `charset`, `http-equiv` (character references decoded)
+/// and `content` attributes.
+pub fn is_relevant_meta(
+    charset: Option<&str>,
+    http_equiv: Option<&str>,
+    content: Option<&str>,
+) -> bool {
+    let known = |label: &str| return encoding_rs::Encoding::for_label(label.as_bytes()).is_some();
     // Only ASCII whitespace is stripped, as the injector does: a no-break space is part of the value.
-    let http_equiv = http_equiv.as_deref().map(str::trim_ascii);
+    let http_equiv = http_equiv.map(str::trim_ascii);
     if http_equiv.is_some_and(|value| {
         return value.eq_ignore_ascii_case("x-ua-compatible")
             || value.eq_ignore_ascii_case("content-security-policy");
     }) {
         return true;
     }
-    if let Some(charset) = &meta.charset {
+    if let Some(charset) = charset {
         return known(charset);
     }
     return http_equiv.is_some_and(|value| return value.eq_ignore_ascii_case("content-type"))
-        && meta
-            .content
-            .as_deref()
-            .and_then(charset_parameter)
-            .is_some_and(known);
+        && content.and_then(charset_parameter).is_some_and(known);
 }
 
 /// The HTML spec's algorithm for extracting a character encoding from a meta element, on a

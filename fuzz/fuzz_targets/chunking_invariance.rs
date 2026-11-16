@@ -14,6 +14,9 @@ mod input;
 #[path = "../../lib/inject-browser-sdk/tests/harness/oracle.rs"]
 #[allow(dead_code)]
 mod oracle;
+#[path = "../../lib/inject-browser-sdk/tests/harness/tree.rs"]
+#[allow(dead_code)]
+mod tree;
 
 use libfuzzer_sys::fuzz_target;
 

@@ -459,6 +459,57 @@ pub fn regressions() -> Vec<Fixture> {
                 "<html><head>{OPEN}<meta http-equiv='\u{a0}X-UA-Compatible\u{a0}' content=IE=edge>{CLOSE}</head>"
             ),
         ),
+        // A byte order mark starting an attribute value is part of it, as a no-break space is: no
+        // encoding label, nor `X-UA-Compatible`. lol_html's own decoding drops it.
+        Fixture::new(
+            "byte-order-mark-in-charset",
+            format!("<html><head>{OPEN}<meta charset=\u{feff}utf-8>{CLOSE}</head>"),
+        ),
+        Fixture::new(
+            "byte-order-mark-in-http-equiv",
+            format!(
+                "<html><head>{OPEN}<meta http-equiv=\"\u{feff}X-UA-Compatible\" content=IE=edge>{CLOSE}</head>"
+            ),
+        ),
+        // An empty attribute value ends a raw text element's start tag at its `>`, after a `/` too.
+        Fixture::new(
+            "empty-attribute-value-after-slash",
+            format!("<html><head>{OPEN}<script/\0=><c>;</script>{CLOSE}</head>"),
+        ),
+        // Text before the `<head>` tag closes the head the browser opens, wherever lol_html can or
+        // cannot tell what follows: a `<frameset>` it reads as markup within a script it took for
+        // ended.
+        Fixture::new(
+            "text-before-head-with-frameset-in-script",
+            "><head><script c=><frameset><script>",
+        ),
+        // Within a template, an end tag for an element opened before it is ignored: the template
+        // keeps what follows inert, an `<html>` tag past a head closed before any evidence too.
+        Fixture::new(
+            "end-tag-of-element-before-template",
+            format!("<p><head><template></p><html></template>{MARK}<html>"),
+        ),
+        // A byte order mark starting a doctype's name is part of it: no `<!DOCTYPE html>` then.
+        Fixture::new(
+            "byte-order-mark-in-doctype-name",
+            format!("<!DOCTYPE\u{feff}html><h><head>{MARK}<body>"),
+        ),
+        // A character reference to whitespace between `<meta>` tags is whitespace: the run goes on
+        // past the window, to the `X-UA-Compatible` one.
+        Fixture::new(
+            "whitespace-reference-in-meta-run",
+            format!(
+                "<html><head><meta charset=utf-8> &#32;{}{XUA}{MARK}</head>",
+                "<meta name=a>".repeat(80)
+            ),
+        ),
+        // An AMP document opens with its `<html>` tag. One past where the snippet goes is not looked
+        // for, in the head or past it, though the browser merges its attributes into the root.
+        Fixture::new(
+            "amp-html-tag-in-head",
+            format!("<html><head>{OPEN}<html amp></head>"),
+        ),
+        Fixture::new("amp-html-tag-past-head", format!("<head>{MARK}t<html amp>")),
         // Foreign content ends the walk. lol_html is not run on it: some makes 3.0.3 panic.
         Fixture::new(
             "foreign-content-in-head",

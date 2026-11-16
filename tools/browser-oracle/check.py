@@ -406,11 +406,17 @@ def check_chrome(record, sniffed, utf8, output_utf8, output_sniffed):
     if utf8["shadowRoots"] or output_utf8 and output_utf8["shadowRoots"]:
         # html5ever attaches no declarative shadow root: the template stays.
         return failures, divergences, "declarative shadow root"
-    if not same_tree(record["document_tree"], utf8["tree"]):
+    # A UTF-16 byte order mark wins over the HTTP charset: Chrome decodes UTF-16 then, html5ever is
+    # fed UTF-8. Its trees are not comparable, but the snippet must still survive in Chrome's.
+    utf16 = record["document"].encode("latin1")[:2] in (b"\xff\xfe", b"\xfe\xff")
+    if utf16:
+        if output_utf8 is None:
+            return failures, divergences, "UTF-16 byte order mark"
+    elif not same_tree(record["document_tree"], utf8["tree"]):
         divergences.append(f"document:\n{diff(record['document_tree'], utf8['tree'])}")
     if output_utf8 is None:
         return failures, divergences, None
-    if not same_tree(record["output_tree"], output_utf8["tree"]):
+    if not utf16 and not same_tree(record["output_tree"], output_utf8["tree"]):
         divergences.append(f"output:\n{diff(record['output_tree'], output_utf8['tree'])}")
     # Without a declaration where the prescan looks, Chrome guesses from the content, which the
     # snippet sways: only a declared encoding has to survive it. Chrome's prescan tokenizes, and

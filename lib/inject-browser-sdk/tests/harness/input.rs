@@ -263,8 +263,9 @@ pub struct TreeVerdict {
 /// * P5: under [`InjectionStrategy::HeadCloseTag`], nothing but whitespace text follows it in the
 ///   head, but for what the parser added to the head once closed.
 ///
-/// A document the injector leaves alone, or that holds the probe's mark already, has nothing to
-/// check.
+/// A document the injector leaves alone has nothing to check. One may hold the probe's mark
+/// already, fuzzers find it: the probe is the element its own tag makes, and the mark shows up once
+/// more than in the document.
 pub fn tree_verdict(strategy: InjectionStrategy, document: &[u8]) -> TreeVerdict {
     let run = run_with_probe(strategy, &[document]);
     let original = tree::parse(document);
@@ -294,12 +295,18 @@ pub fn tree_verdict(strategy: InjectionStrategy, document: &[u8]) -> TreeVerdict
     let Some(at) = verdict.run.injected_at else {
         return verdict;
     };
-    if contains(document, PROBE_MARK.as_bytes()) {
-        return verdict;
-    }
     let output = tree::parse(&verdict.run.output);
     verdict.output_tree = output.serialize(None);
-    verdict.failures = tree_failures(strategy, document, &significant, &verdict, &output, at);
+    let document_probes = original.elements_with("data-dd-probe").len();
+    verdict.failures = tree_failures(
+        strategy,
+        document,
+        &significant,
+        document_probes,
+        &verdict,
+        &output,
+        at,
+    );
     return verdict;
 }
 
@@ -323,6 +330,7 @@ fn tree_failures(
     strategy: InjectionStrategy,
     document: &[u8],
     significant: &str,
+    document_probes: usize,
     verdict: &TreeVerdict,
     output: &Tree,
     at: usize,
@@ -339,7 +347,7 @@ fn tree_failures(
             .iter()
             .any(|child| return child.is_html("frameset"));
     });
-    if probes.is_empty()
+    if probes.len() == document_probes
         && frameset
         && verdict
             .head_closed_at
@@ -352,8 +360,18 @@ fn tree_failures(
         }
         return failures;
     }
-    let [probe] = probes.as_slice() else {
-        failures.push(format!("P1: {} probe elements", probes.len()));
+    // Made of its own tag: elements the parser created before it end before, the ones after past
+    // it.
+    let own: Vec<&Handle> = probes
+        .iter()
+        .filter(|probe| return probe.offset == at + PROBE_START_TAG.len())
+        .collect();
+    let ([probe], true) = (own.as_slice(), probes.len() == document_probes + 1) else {
+        failures.push(format!(
+            "P1: {} probe elements, {} made of its own tag, the document holding {document_probes}",
+            probes.len(),
+            own.len()
+        ));
         return failures;
     };
     if !probe.is_html("script") {
@@ -362,15 +380,13 @@ fn tree_failures(
     if probe.in_template() {
         failures.push(String::from("P1: the probe is within a template"));
     }
-    if probe.offset != at + PROBE_START_TAG.len() {
-        failures.push(format!(
-            "P1: the probe element comes from a tag ending at {}, not its own",
-            probe.offset
-        ));
-    }
     let marks = verdict.output_tree.matches(PROBE_MARK).count();
-    if marks != 1 {
-        failures.push(format!("P1: the probe shows up {marks} times in the tree"));
+    let document_marks = verdict.document_tree.matches(PROBE_MARK).count();
+    if marks != document_marks + 1 {
+        failures.push(format!(
+            "P1: the probe shows up {} times in the tree",
+            marks - document_marks.min(marks)
+        ));
     }
     // P2.
     if output.serialize_significant(Some(probe)) != significant {
@@ -517,10 +533,4 @@ fn required_metas(strategy: InjectionStrategy, tree: &Tree, head: &Handle) -> Ve
         }
     }
     return required;
-}
-
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    return haystack
-        .windows(needle.len())
-        .any(|window| return window == needle);
 }

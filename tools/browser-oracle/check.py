@@ -196,15 +196,19 @@ def dump(inputs, raw):
         )
         if raw:
             env["ORACLE_DUMP_RAW"] = "1"
-        # Fails when html5ever finds a property failing, which the records hold.
-        subprocess.run(
+        # Fails when html5ever finds a property failing, which the records hold: failing otherwise,
+        # it did not get through the inputs.
+        result = subprocess.run(
             ["cargo", "test", "-q", "-p", "inject-browser-sdk", "--test", "injection", "oracle_dump",
              "--", "--nocapture"],
             cwd=ROOT, env=env, check=False,
         )
-        if not out.exists():
-            sys.exit("oracle_dump wrote nothing: did it build?")
-        return [json.loads(line) for line in out.read_text().split("\n") if line]
+        records = []
+        if out.exists():
+            records = [json.loads(line) for line in out.read_text().split("\n") if line]
+        if result.returncode != 0 and not any(record["failures"] for record in records):
+            sys.exit(f"oracle_dump failed (exit {result.returncode}) before getting through the inputs")
+        return records
 
 
 WHITESPACE = b"\t\n\x0c\r "

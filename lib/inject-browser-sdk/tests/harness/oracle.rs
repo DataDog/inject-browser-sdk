@@ -38,6 +38,9 @@ const RAW_TEXT: &[&str] = &[
 /// A text node: where it is, its content, and whether it is in the data state.
 type TextNode = (Range<usize>, String, bool);
 
+/// Where an attribute value is, `Some(None)` for an attribute without one.
+type ValueLocation = Option<Option<Range<usize>>>;
+
 /// A start tag directly within a `<head>`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct HeadChild {
@@ -86,6 +89,8 @@ pub struct Observed {
     pub body_starts: Vec<usize>,
     /// Whether an `<html>` tag makes the document an AMP one, which the snippet stays out of.
     pub amp: bool,
+    /// Start of the first `<html>` tag making the document an AMP one.
+    pub first_amp_html: Option<usize>,
     /// Start of every start tag, wherever it is.
     pub start_tags: Vec<usize>,
     /// Every `<template>` element, from its start tag to the start of its end tag, if it has one.
@@ -208,6 +213,7 @@ impl Observed {
             html_starts: positions(self.html_starts),
             body_starts: positions(self.body_starts),
             amp: self.amp,
+            first_amp_html: self.first_amp_html.map(map),
             start_tags: positions(self.start_tags),
             templates: self
                 .templates
@@ -231,6 +237,9 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
     let depth: Rc<Cell<usize>> = Rc::default();
     let (template_depth, body_depth) = (depth.clone(), depth.clone());
     let root_depth = depth;
+    // Where the `charset`, `http-equiv` and `content` values of each head child are, see below.
+    let values: Rc<RefCell<Vec<[ValueLocation; 3]>>> = Rc::default();
+    let child_values = values.clone();
     let settings = Settings::new()
         .append_element_content_handler(element!("head", move |el: &mut Element| {
             let first = heads.borrow().heads.is_empty();
@@ -251,15 +260,29 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
             return Ok(());
         }))
         .append_element_content_handler(element!("head > *", move |el: &mut Element| {
+            // lol_html decodes an attribute value as a document of its own, which drops a byte order
+            // mark starting it: where each value is, to read it as the browser does once the
+            // document is complete.
+            let value = |name: &str| {
+                return el
+                    .attributes()
+                    .iter()
+                    .find(|attribute| return attribute.name() == name)
+                    .map(|attribute| {
+                        return attribute
+                            .value_source_location()
+                            .map(|location| return location.bytes());
+                    });
+            };
+            values
+                .borrow_mut()
+                .push([value("charset"), value("http-equiv"), value("content")]);
             let index = {
                 let mut observed = children.borrow_mut();
                 observed.head_children.push(HeadChild {
                     name: el.tag_name().to_ascii_lowercase(),
                     location: el.source_location().bytes(),
-                    end: None,
-                    charset: el.get_attribute("charset"),
-                    http_equiv: el.get_attribute("http-equiv"),
-                    content: el.get_attribute("content"),
+                    ..HeadChild::default()
                 });
                 observed.head_children.len() - 1
             };
@@ -309,9 +332,13 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
             match el.tag_name().eq_ignore_ascii_case("html") {
                 true => {
                     observed.html_starts.push(start);
-                    observed.amp |= AMP_ATTRIBUTES
+                    let amp = AMP_ATTRIBUTES
                         .iter()
                         .any(|name| return el.has_attribute(name));
+                    observed.amp |= amp;
+                    if amp && observed.first_amp_html.is_none() {
+                        observed.first_amp_html = Some(start);
+                    }
                 }
                 false => observed.body_starts.push(start),
             }
@@ -332,7 +359,24 @@ fn observe_decoded(chunks: &[&[u8]]) -> Option<Observed> {
     rewriter.end().ok()?;
 
     let mut observed = observed.borrow().clone();
-    let nodes = text_nodes(chunks);
+    let document = chunks.concat();
+    let read = |value: &ValueLocation| {
+        return value.as_ref().map(|location| {
+            return location.as_ref().map_or_else(String::new, |location| {
+                return String::from_utf8_lossy(&document[location.clone()]).into_owned();
+            });
+        });
+    };
+    for (child, [charset, http_equiv, content]) in observed
+        .head_children
+        .iter_mut()
+        .zip(child_values.borrow().iter())
+    {
+        child.charset = read(charset);
+        child.http_equiv = read(http_equiv);
+        child.content = read(content);
+    }
+    let nodes = text_nodes(chunks)?;
     observed.text = nodes.text;
     observed.data_text = nodes.data_text;
     observed.blank_data = nodes.blank_data;
@@ -355,13 +399,17 @@ struct TextNodes {
     doctype_html: Option<usize>,
 }
 
-fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> TextNodes {
+fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> Option<TextNodes> {
     // Text nodes come in chunks, which the ones of the input decide: joined up, so that what is
     // observed does not depend on them. Comments and doctypes come from the same run, which
     // tokenizes everything.
     let nodes: Rc<RefCell<Vec<TextNode>>> = Rc::default();
     let markup: Rc<RefCell<TextNodes>> = Rc::default();
     let (text, comments, doctypes) = (nodes.clone(), markup.clone(), markup.clone());
+    let source: Vec<u8> = chunks
+        .iter()
+        .flat_map(|chunk| return chunk.as_ref().to_vec())
+        .collect();
     let settings = Settings::new()
         .append_document_content_handler(doc_text!(move |chunk: &mut TextChunk| {
             let range = chunk.source_location().bytes();
@@ -386,9 +434,12 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> TextNodes {
         .append_document_content_handler(doctype!(move |doctype| {
             let location = doctype.source_location().bytes();
             let mut markup = doctypes.borrow_mut();
+            // lol_html decodes the name as a document of its own, which drops a byte order mark
+            // starting it: the browser reads one as part of the name, no `html` then.
             let html = doctype
                 .name()
-                .is_some_and(|name| return name.eq_ignore_ascii_case("html"));
+                .is_some_and(|name| return name.eq_ignore_ascii_case("html"))
+                && !name_starts_with_mark(&source[location.clone()]);
             if html && markup.doctype_html.is_none() {
                 markup.doctype_html = Some(location.start);
             }
@@ -396,14 +447,13 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> TextNodes {
             return Ok(());
         }));
     let mut rewriter = HtmlRewriter::new(settings, |_: &[u8]| {});
+    // A run that fails tells nothing, rather than that there is no text: lol_html gives up on
+    // markup whose tokenization it cannot tell, which a run tokenizing text runs into where the
+    // one of `observe_decoded` may not.
     for chunk in chunks {
-        if rewriter.write(chunk.as_ref()).is_err() {
-            return TextNodes::default();
-        }
+        rewriter.write(chunk.as_ref()).ok()?;
     }
-    if rewriter.end().is_err() {
-        return TextNodes::default();
-    }
+    rewriter.end().ok()?;
     let blank = |content: &str| return content.bytes().all(|b| return b.is_ascii_whitespace());
     // A chunk split within the byte order mark may move where its text starts by a byte or two.
     let without_mark = |range: &Range<usize>, content: &'_ str| -> String {
@@ -434,7 +484,12 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> TextNodes {
         if range.is_empty() {
             continue;
         }
-        if !blank(content) {
+        // In the data state a character reference to whitespace is whitespace; raw text keeps it.
+        let text = match data {
+            true => decode_references(content),
+            false => content.clone(),
+        };
+        if !blank(&text) {
             gathered.text.push(range.clone());
         }
         if *data {
@@ -451,7 +506,7 @@ fn text_nodes<T: AsRef<[u8]>>(chunks: &[T]) -> TextNodes {
             }
         }
     }
-    return gathered;
+    return Some(gathered);
 }
 
 /// How many bytes at the start of `text` are whitespace, or character references to it.
@@ -865,7 +920,7 @@ pub enum Exception {
     /// on it rather than hold back without bound.
     LongEndTag,
     /// A raw text or RCDATA element (`<script>`, `<title>`…) whose start tag ends in an empty
-    /// unquoted attribute value (`<script c=>`): lol_html 3.0.3 tokenizes it rightly when it only
+    /// unquoted attribute value (`<script c=>`, `<script/c=>`): lol_html 3.0.3 tokenizes it rightly when it only
     /// looks for tags, and reads on past its `>` when it tokenizes everything, as its text handler
     /// makes it, so the text nodes it reports past it are wrong. The browser, and the injector, end
     /// the tag at its `>`.
@@ -874,6 +929,10 @@ pub enum Exception {
     /// prescan honours, which lol_html knows nothing about: within a raw text or inert element
     /// (later point), or past where the head ends or within a tag the window ends in (no point).
     EncodingDeclaration,
+    /// An `<html>` tag past the `<head>` tag making the document an AMP one: the browser merges its
+    /// attributes into the root element, wherever it is. An AMP document opens with that tag,
+    /// which the injector stays out of, and does not look for one past where the snippet goes.
+    LateAmpRoot,
 }
 
 /// Returns the exception explaining why `ours` differs from `oracle` for `document`, which lol_html
@@ -886,6 +945,15 @@ pub fn exception(
     oracle: Option<usize>,
 ) -> Option<Exception> {
     let lower = document.to_ascii_lowercase();
+    if oracle.is_none()
+        && ours.is_some()
+        && observed
+            .first_amp_html
+            .zip(observed.heads.first())
+            .is_some_and(|(amp, head)| return amp > head.start)
+    {
+        return Some(Exception::LateAmpRoot);
+    }
     // As long as lol_html's tokenizer has it, quoted values hiding any `>` they hold.
     if observed.head_end_tags.iter().any(|tag| {
         return oracle == Some(tag.start) && tag.len() > MAX_PENDING_END_TAG;
@@ -945,10 +1013,9 @@ pub fn exception(
         }
     }
     // A `</head>` before the head lol_html sees closed the head the browser opened for it: the
-    // `<head>` tag that follows is ignored.
-    if oracle.is_some()
-        && first_head(observed).is_some_and(|head| return contains(&lower[..head.start], b"</head"))
-    {
+    // `<head>` tag that follows is ignored, the injector reading on in the body when that head
+    // closed ahead of any evidence.
+    if first_head(observed).is_some_and(|head| return contains(&lower[..head.start], b"</head")) {
         return Some(Exception::HeadStartOmitted);
     }
     let window = &lower[..lower.len().min(WINDOW)];
@@ -1034,6 +1101,19 @@ fn head_close_exception(
         {
             return Some(Exception::StrayEndTag);
         }
+        // lol_html closed a template on the end tag of an element opened before it, within the
+        // body: the browser, and the injector, ignore it, the template keeping what follows inert,
+        // where lol_html finds the point.
+        (_, Some(point))
+            if observed.templates.iter().any(|&(_, template_end)| {
+                return template_end.is_some_and(|template_end| {
+                    return template_end <= point
+                        && !lower[template_end..].starts_with(b"</template");
+                });
+            }) =>
+        {
+            return Some(Exception::StrayEndTag);
+        }
         // lol_html closed a template at a `</head>` within it, which the browser, and the
         // injector, ignore: the template it took the next `</template>` for still holds what
         // follows, until the one after.
@@ -1094,6 +1174,12 @@ fn head_close_exception(
     return None;
 }
 
+/// Whether the name of `doctype`, the source of a doctype, starts with a byte order mark.
+fn name_starts_with_mark(doctype: &[u8]) -> bool {
+    let rest = doctype.get(b"<!doctype".len()..).unwrap_or_default();
+    return rest.trim_ascii_start().starts_with("\u{feff}".as_bytes());
+}
+
 /// Whether a start tag of a raw text or RCDATA element in `lower` ends in an empty unquoted attribute
 /// value, see [`Exception::EmptyAttributeValue`].
 fn empty_attribute_value_on_raw_text(lower: &[u8]) -> bool {
@@ -1108,9 +1194,20 @@ fn empty_attribute_value_on_raw_text(lower: &[u8]) -> bool {
                 let Some(end) = tag.iter().position(|&b| return b == b'>') else {
                     return false;
                 };
+                // A `/` after the name, not ending the tag, starts the attributes as whitespace does.
                 let attributes = tag[..end].trim_ascii_end();
-                return tag.first().is_some_and(u8::is_ascii_whitespace)
-                    && attributes.ends_with(b"=");
+                let Some(name) = attributes.strip_suffix(b"=") else {
+                    return false;
+                };
+                // The `=` follows an attribute name, rather than starting one (`<script/=>`).
+                let name = name.trim_ascii_end();
+                return tag
+                    .first()
+                    .is_some_and(|&b| return b.is_ascii_whitespace() || b == b'/')
+                    && name
+                        .last()
+                        .is_some_and(|&b| return !b.is_ascii_whitespace() && b != b'/')
+                    && name.len() > 1;
             });
     });
 }

@@ -237,6 +237,11 @@ pub(super) struct HeadOpenTagLocator {
     /// comment, or blank lines, do not push the evidence out of reach.
     free: usize,
 
+    /// How many bytes of the byte order mark a UTF-8 document may start with have been read, all
+    /// of the document so far while it is shorter than the mark: whether they are the mark, or
+    /// text, takes what follows to tell when a chunk ends within it. See [`Self::text_start`].
+    mark_length: usize,
+
     /// The first bytes of the `<!` declaration being read, lower case, and whether the markup is one.
     declaration: [u8; MAX_DECLARATION],
     declaration_length: usize,
@@ -300,6 +305,7 @@ impl HeadOpenTagLocator {
             significant_head_start: None,
             strong_evidence: false,
             free: 0,
+            mark_length: 0,
             declaration: [0; MAX_DECLARATION],
             declaration_length: 0,
             declaration_open: false,
@@ -513,12 +519,13 @@ impl HeadOpenTagLocator {
             State::Data if self.template_depth > 0 || self.body_mode => found(memchr(b'<', rest)),
             State::Data => {
                 let skipped = found(memchr2(b'<', b'&', rest));
-                if let Some(text) = text_start(&rest[..skipped], position) {
-                    self.state = self
-                        .head_closes(position + text, false)
-                        .unwrap_or(State::PastHead);
+                let markup_follows = skipped < rest.len();
+                if let Some(text) = self.text_start(&rest[..skipped], position, markup_follows) {
+                    self.state = self.head_closes(text, false).unwrap_or(State::PastHead);
                     return match self.state {
-                        State::Found => text,
+                        // Text a broken byte order mark starts in a previous chunk is found at the
+                        // start of this one.
+                        State::Found => text.saturating_sub(position),
                         _ => rest.len(),
                     };
                 }
@@ -1177,22 +1184,39 @@ pub(super) fn is_whitespace_reference(name: &[u8], terminated: bool) -> bool {
     return matches!(number, Some(0x09 | 0x0A | 0x0C | 0x0D | 0x20));
 }
 
-/// The index of the first byte of `text`, read in the data state from `position` on, that is
-/// neither whitespace nor part of the byte order mark starting a UTF-8 document, if any.
-fn text_start(text: &[u8], position: usize) -> Option<usize> {
-    const BOM: &[u8] = b"\xEF\xBB\xBF";
-    let mut skipped = 0;
-    if let Some(mark) = BOM.get(position..) {
-        // The part of the mark this text may hold, from where the document is.
-        let common = text.len().min(mark.len());
-        if text[..common] == mark[..common] {
-            skipped = common;
+impl HeadOpenTagLocator {
+    /// The offset from the start of the document of the first byte of `text`, read in the data
+    /// state from `position` on, that is neither whitespace nor part of the byte order mark a UTF-8
+    /// document may start with, if any. `markup_follows` tells the text ends at a `<` or `&` rather
+    /// than with the chunk.
+    ///
+    /// The mark only counts whole: the bytes of one the text leaves incomplete wait for what
+    /// follows, in the next chunk, to tell. If it is not the rest of the mark, they are text, at the
+    /// start of the document, whatever the chunking.
+    fn text_start(&mut self, text: &[u8], position: usize, markup_follows: bool) -> Option<usize> {
+        const BOM: &[u8] = b"\xEF\xBB\xBF";
+        let mut skipped = 0;
+        // Only a mark the document starts with, all of the document so far.
+        if position == self.mark_length && position < BOM.len() {
+            let mark = &BOM[position..];
+            let common = text.len().min(mark.len());
+            let broken =
+                text[..common] != mark[..common] || (common < mark.len() && markup_follows);
+            match broken {
+                // What of it was read in previous chunks is text.
+                true if position > 0 => return Some(0),
+                true => {}
+                false => {
+                    self.mark_length += common;
+                    skipped = common;
+                }
+            }
         }
+        return text[skipped..]
+            .iter()
+            .position(|&byte| return !matches!(byte, b'\t' | b'\n' | b'\x0C' | b'\r' | b' '))
+            .map(|index| return position + skipped + index);
     }
-    return text[skipped..]
-        .iter()
-        .position(|&byte| return !matches!(byte, b'\t' | b'\n' | b'\x0C' | b'\r' | b' '))
-        .map(|index| return skipped + index);
 }
 
 #[cfg(test)]

@@ -459,10 +459,110 @@ pub fn regressions() -> Vec<Fixture> {
                 "<html><head>{OPEN}<meta http-equiv='\u{a0}X-UA-Compatible\u{a0}' content=IE=edge>{CLOSE}</head>"
             ),
         ),
+        // A byte order mark starting an attribute value is part of it, as a no-break space is: no
+        // encoding label, nor `X-UA-Compatible`. lol_html's own decoding drops it.
+        Fixture::new(
+            "byte-order-mark-in-charset",
+            format!("<html><head>{OPEN}<meta charset=\u{feff}utf-8>{CLOSE}</head>"),
+        ),
+        Fixture::new(
+            "byte-order-mark-in-http-equiv",
+            format!(
+                "<html><head>{OPEN}<meta http-equiv=\"\u{feff}X-UA-Compatible\" content=IE=edge>{CLOSE}</head>"
+            ),
+        ),
+        // An empty attribute value ends a raw text element's start tag at its `>`, after a `/` too.
+        Fixture::new(
+            "empty-attribute-value-after-slash",
+            format!("<html><head>{OPEN}<script/\0=><c>;</script>{CLOSE}</head>"),
+        ),
+        // Text before the `<head>` tag closes the head the browser opens, wherever lol_html can or
+        // cannot tell what follows: a `<frameset>` it reads as markup within a script it took for
+        // ended.
+        Fixture::new(
+            "text-before-head-with-frameset-in-script",
+            "><head><script c=><frameset><script>",
+        ),
+        // Within a template, an end tag for an element opened before it is ignored: the template
+        // keeps what follows inert, an `<html>` tag past a head closed before any evidence too.
+        Fixture::new(
+            "end-tag-of-element-before-template",
+            format!("<p><head><template></p><html></template>{MARK}<html>"),
+        ),
+        // A byte order mark starting a doctype's name is part of it: no `<!DOCTYPE html>` then.
+        Fixture::new(
+            "byte-order-mark-in-doctype-name",
+            format!("<!DOCTYPE\u{feff}html><h><head>{MARK}<body>"),
+        ),
+        // A character reference to whitespace between `<meta>` tags is whitespace: the run goes on
+        // past the window, to the `X-UA-Compatible` one.
+        Fixture::new(
+            "whitespace-reference-in-meta-run",
+            format!(
+                "<html><head><meta charset=utf-8> &#32;{}{XUA}{MARK}</head>",
+                "<meta name=a>".repeat(80)
+            ),
+        ),
+        // A tag ends the character reference before it: a bare `&` is text, closing the head, and
+        // a numeric reference to whitespace needs no `;`.
+        Fixture::new(
+            "ampersand-before-tag",
+            format!("<html><head><meta charset=utf-8>{MARK}&{XUA}</head>"),
+        ),
+        Fixture::new(
+            "whitespace-reference-before-tag",
+            format!("<html><head><meta charset=utf-8>&#32{XUA}{MARK}</head>"),
+        ),
+        // An AMP document opens with its `<html>` tag. One past where the snippet goes is not looked
+        // for, in the head or past it, though the browser merges its attributes into the root.
+        Fixture::new(
+            "amp-html-tag-in-head",
+            format!("<html><head>{OPEN}<html amp></head>"),
+        ),
+        Fixture::new("amp-html-tag-past-head", format!("<head>{MARK}t<html amp>")),
         // Foreign content ends the walk. lol_html is not run on it: some makes 3.0.3 panic.
         Fixture::new(
             "foreign-content-in-head",
             format!("<html><head><meta charset=utf-8>{MARK}<svg><style></style></svg>{XUA}</head>"),
+        ),
+        // The start of a byte order mark that does not go on to the whole of it is text, ahead of
+        // any evidence: the head closes there, whether a chunk ends within the mark or not.
+        Fixture::new(
+            "broken-byte-order-mark",
+            b"\xEF\xBB\n<html><head><title>t</title></head>".as_slice(),
+        ),
+        Fixture::new(
+            "byte-order-mark-cut-by-markup",
+            b"\xEF\xBB<html><head><title>t</title></head>".as_slice(),
+        ),
+        // An end tag closing the head ahead of any evidence, longer than any held back and ending
+        // past the head window: the scan goes on in the body whatever the chunking, to the
+        // `<html>` tag, rather than giving up when a chunk ends within the tag.
+        Fixture::new(
+            "long-end-tag-closing-the-head-ahead-of-evidence",
+            format!(
+                "</head {}>{OPEN}<html><head><title>t</title></head>",
+                "a".repeat(1100)
+            ),
+        ),
+        // A `</head>` closing the head a `<title>` opened, ahead of any evidence: the `<head>` tag
+        // that follows, past the window, is ignored, and the snippet goes before the `<html>` one
+        // the body holds.
+        Fixture::new(
+            "head-tag-after-head-closed-ahead-of-evidence",
+            format!(
+                "<title>{}</title>{CLOSE}</head><head>x{OPEN}<html>",
+                "t".repeat(1010)
+            ),
+        ),
+        // Nor does the snippet go before such an end tag closing a head the document has evidence
+        // for, as it does not before such a `</head>` tag.
+        Fixture::new(
+            "long-end-tag-closing-the-head",
+            format!(
+                "<html><head>{OPEN}<title>t</title></body {}><p>",
+                "a".repeat(1100)
+            ),
         ),
     ];
 }

@@ -636,7 +636,8 @@ impl<'snippet> Injector<'snippet> {
             ]);
         }
         if pending.is_some() {
-            self.injector_state = InjectorState::PassingThrough;
+            // See `give_up_pending`, which the window and tail borrowing `self` rule out here.
+            self.flushed_up_to = self.head_locator.offset();
         }
         let padding = match eof {
             true => &self.padding_spaces[..],
@@ -668,8 +669,10 @@ impl<'snippet> Injector<'snippet> {
                 true => Some(self.head_locator.found_significant()),
                 false => self.head_locator.significant_evidence(),
             };
-            return evidence
-                .is_some_and(|start| return start < EVIDENCE_LIMIT)
+            // An end tag closing the head longer than could be held back is given up on, whatever
+            // the chunking, as `</head>` is below. Text is found where it starts, so it never is.
+            return (evidence.is_some_and(|start| return start < EVIDENCE_LIMIT)
+                && (chunk_start + head.end).saturating_sub(head.start) <= MAX_PENDING_END_TAG)
                 .then_some(head.start);
         }
         return match self.strategy {
@@ -745,12 +748,20 @@ impl<'snippet> Injector<'snippet> {
                 return self.hold_from(start, held_start, chunk_start, chunk);
             }
         } else if pending.is_some() {
-            self.injector_state = InjectorState::PassingThrough;
+            self.give_up_pending();
         }
         return self.create_result(&[
             BytesSlice::new(&self.incomplete_data_public_ref, false),
             BytesSlice::new(chunk, true),
         ]);
+    }
+
+    /// The tag the snippet may go before has outgrown any that is held back: it goes out, so the
+    /// snippet cannot go before it, nor anywhere else in what was scanned. The search goes on, as
+    /// it does when a single chunk holds the whole tag: one that closes the head ahead of any
+    /// evidence only moves the scan into the body, where the snippet may still go.
+    fn give_up_pending(&mut self) {
+        self.flushed_up_to = self.head_locator.offset();
     }
 
     /// Emits what was held back and `chunk` up to `start`, an offset from the start of the

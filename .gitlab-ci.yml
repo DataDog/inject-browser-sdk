@@ -7,6 +7,7 @@ include:
   - local: .gitlab/images.yml
   - local: .gitlab/windows-default-image.yml
   - local: .gitlab/iis.yml
+  - local: .gitlab/oci.yml
   - local: .gitlab/java.yml
   - local: .gitlab/installer.yml
   - local: .gitlab/cmake.yml

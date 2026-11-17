@@ -26,6 +26,10 @@ copy /y %outdir%\*.msi %BUILD_OUTDIR% || exit /b 6
 copy /y %outdir%\*.dll %BUILD_OUTDIR% || exit /b 7
 copy /y %outdir%\injector_IIS.version %BUILD_OUTDIR% || exit /b 8
 copy /y %outdir%\injector_IIS.release %BUILD_OUTDIR% || exit /b 8
+:: Files for the OCI package (.gitlab/prepare-oci-package.sh).
+for %%f in (RUMTools.ps1 Datadog.RUM.psm1 Datadog.RUM.psd1 RUM_schema.xml) do (
+    copy /y %outdir%\%%f %BUILD_OUTDIR% || exit /b 9
+)
 
 goto :EOF
 

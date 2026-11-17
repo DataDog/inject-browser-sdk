@@ -1,0 +1,51 @@
+---
+# Child pipeline started by injector_IIS_oci (.gitlab/oci.yml).
+include:
+  # The libdatadog-build campaign updates this file.
+  - local: .gitlab/one-pipeline.locked.yml
+
+variables:
+  OCI_PACKAGE_NAME: datadog-apm-library-iis-rum
+  OCI_AGENT_REGISTRY_PACKAGE_NAME: apm-library-iis-rum-package
+  AGENT_REPO_PRODUCT_NAME: auto_inject-iis-rum
+  LIB_INJECTION_NAME: dd-lib-iis-rum-init
+  # The lib-init image is built from Linux packages. IIS is Windows only.
+  LIB_INJECTION_IMAGE_ENABLED: "false"
+  # system-tests has no IIS RUM scenario yet.
+  DANGEROUSLY_SKIP_SHARED_PIPELINE_TESTS: "true"
+
+stages:
+  - shared-pipeline-build
+  - shared-pipeline-test
+  - shared-pipeline-publish
+
+package-oci:
+  needs:
+    - pipeline: $PARENT_PIPELINE_ID
+      job: injector_IIS_build
+
+# No requirements.json: the package is not for Linux SSI.
+requirements_json_test:
+  rules:
+    - when: never
+
+deploy_to_reliability_env:
+  rules:
+    - when: never
+
+# Only iis-X.Y.Z tag pipelines sign. Never promote an unsigned package.
+.iis_release_promote:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^iis-[0-9]+\.[0-9]+\.[0-9]+$/
+      when: manual
+      allow_failure: true
+    - when: never
+
+promote-oci-to-staging:
+  rules: !reference [.iis_release_promote, rules]
+
+promote-oci-to-prod-beta:
+  rules: !reference [.iis_release_promote, rules]
+
+promote-oci-to-prod:
+  rules: !reference [.iis_release_promote, rules]

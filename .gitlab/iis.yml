@@ -99,6 +99,10 @@ variables:
           - .gitlab-ci.yml
           - .gitlab/iis.yml
           - .gitlab/windows-default-image.yml
+          - .gitlab/oci.yml
+          - .gitlab/oci-package.yml
+          - .gitlab/one-pipeline.locked.yml
+          - .gitlab/prepare-oci-package.sh
     - changes:
         - injector_IIS/**/*
         - lib/**/*
@@ -107,6 +111,10 @@ variables:
         - .gitlab-ci.yml
         - .gitlab/iis.yml
         - .gitlab/windows-default-image.yml
+        - .gitlab/oci.yml
+        - .gitlab/oci-package.yml
+        - .gitlab/one-pipeline.locked.yml
+        - .gitlab/prepare-oci-package.sh
     # Changes to the release path build and test the IIS injector too.
     - if: $CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
       changes:

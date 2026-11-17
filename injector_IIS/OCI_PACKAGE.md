@@ -28,8 +28,7 @@ The package is built by libdatadog-build one-pipeline, in a child pipeline
   up to date.
 
 The public name is `oci://install.datadoghq.com/apm-library-iis-rum-package:<version>`.
-It only resolves after the product is registered in `agent-release-management`
-and a promotion succeeds.
+It only resolves after a promotion succeeds.
 
 Release references:
 
@@ -179,11 +178,6 @@ process.
 
 - **No `apmPackageDefaultVersions` pin** for `iis-rum`, so an opted-in customer
   without an explicit version gets `latest`.
-- **Release-management onboarding must be completed** in
-  `DataDog/agent-release-management`: the product (`auto_inject-iis-rum`),
-  package flavor, component, and platform matrix must agree on
-  `datadog-apm-library-iis-rum` and its public repository name
-  `apm-library-iis-rum-package`.
 - **No e2e coverage** of the fleet install path.
 
 ### 6. File permissions on application_monitoring.yaml

@@ -11,18 +11,10 @@ if [ "${OS:-}" != "windows" ] || [ "${ARCH:-}" != "amd64" ]; then
 fi
 
 artifacts=../artifacts
-version="$(tr -d '\r\n' < "$artifacts/injector_IIS.release")"
-if [ -z "$version" ]; then
-  echo "empty version in $artifacts/injector_IIS.release" >&2
-  exit 1
-fi
-# Only signed iis-X.Y.Z tag builds may publish X.Y.Z. The release-please
-# branch builds X.Y.Z unsigned, so it gets a dev version too.
-if [[ $version != *-* && ! ${CI_COMMIT_TAG:-} =~ ^iis-[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  # MAJ.MIN.<parent pipeline IID>
-  build="$(tr -d '\r\n' < "$artifacts/injector_IIS.version")"
-  version="$version-dev.${build##*.}"
-fi
+# Only signed iis-X.Y.Z tag builds may publish X.Y.Z. Other builds, including
+# the unsigned release-please branch, get a dev version.
+version="$(PACKAGE_TAG_PREFIX=iis- PACKAGE_PIPELINE_ID="${PARENT_PIPELINE_ID:?}" \
+  ../.gitlab/package-version.sh)"
 
 mkdir -p sources/library sources/installer sources/modules/Datadog.RUM sources/schema
 cp "$artifacts/injector_IIS.dll" sources/library/

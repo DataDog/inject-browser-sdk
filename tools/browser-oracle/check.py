@@ -213,8 +213,22 @@ def dump(inputs, raw):
 
 WHITESPACE = b"\t\n\x0c\r "
 
-# A U+0000, or a numeric character reference to it.
-NUL = re.compile(rb"\x00|&#[xX]0+(?![0-9a-fA-F])|&#0+(?![0-9])")
+# A numeric character reference, which the tokenizer reads up to its first non-digit.
+REFERENCE = re.compile(rb"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+))")
+
+
+def holds_nul_or_replacement(document):
+    """Whether `document`, read as UTF-8, holds a U+0000 or a U+FFFD: written as is, as bytes that
+    are not UTF-8, or as a numeric reference the tokenizer turns into one (to U+0000, U+FFFD, a
+    surrogate, or past U+10FFFF)."""
+    text = document.decode("utf-8", "replace")
+    if "\x00" in text or "\ufffd" in text:
+        return True
+    for match in REFERENCE.finditer(document):
+        code = int(match[1], 16) if match[1] else int(match[2])
+        if code in (0, 0xFFFD) or 0xD800 <= code <= 0xDFFF or code > 0x10FFFF:
+            return True
+    return False
 
 
 def prescan(document):
@@ -400,11 +414,12 @@ def check_record(record, sniffed, utf8, output_utf8, output_sniffed):
     """The failures of one record, html5ever's, the encoding's and Chrome's, its divergences, and
     why they are a known difference between Chrome and html5ever, if they are."""
     failures, divergences, known = check_chrome(record, sniffed, utf8, output_utf8, output_sniffed)
-    if known is None and divergences and NUL.search(record["document"].encode("latin1")):
-        # Chrome ignores U+0000, a reference to it too, where the spec, html5ever and the injector
-        # take it for content, closing the head or making a frameset ignored: Chrome's tree, and its
-        # properties, differ then.
-        known = "U+0000"
+    document = record["document"].encode("latin1")
+    if known is None and divergences and holds_nul_or_replacement(document):
+        # Chrome takes U+0000 and U+FFFD for whitespace, however they are written, where the spec,
+        # html5ever and the injector take them for content, closing the head or making a frameset
+        # ignored: Chrome's tree, and its properties, differ then.
+        known = "U+0000 or U+FFFD"
     if known is not None:
         failures = [failure for failure in failures if failure.startswith(("html5ever", "encoding"))]
     return failures, divergences, known

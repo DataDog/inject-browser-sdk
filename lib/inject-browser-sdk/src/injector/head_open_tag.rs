@@ -31,8 +31,9 @@ pub(super) enum Target {
 /// whose head an earlier error closed, a server warning printed ahead of it for instance: the
 /// locator then reads on as the browser does, within the body, and stops right before the first
 /// `<html>` or `<body>` start tag, `breaks` set, or gives up at foreign content (`<svg>`,
-/// `<math>`), which it does not follow, or at a `<frameset>`, where the snippet would be dropped. A `<head>` tag is not enough there: partial responses
-/// hold one for a client to merge into the page's head.
+/// `<math>`), which it does not follow, or at a `<frameset>`, where the snippet would be dropped.
+/// A `<head>` tag is not enough there: partial responses hold one for a client to merge into the
+/// page's head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct HeadOpenTag {
     /// Offset of its `<` from the start of the document, across every chunk scanned: where the

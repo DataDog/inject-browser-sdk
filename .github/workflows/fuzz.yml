@@ -82,8 +82,8 @@ jobs:
   browser-oracle:
     needs: fuzz
     # Nightly and on dispatch, whatever the fuzzers found; on a pull request only when it changes
-    # the oracles themselves, so that changes to the job are rehearsed before they run nightly.
-    if: always()
+    # the injector or the oracles, so that changes to the job are rehearsed before they run nightly.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -99,7 +99,7 @@ jobs:
         run: |
           run=true
           if [ "$EVENT" = pull_request ] && ! git diff --name-only "$BASE" HEAD | grep -qE \
-              '^(tools/browser-oracle/|lib/inject-browser-sdk/tests/harness/|fuzz/|\.github/workflows/fuzz\.yml$)'; then
+              '^(tools/browser-oracle/|lib/inject-browser-sdk/src/|lib/inject-browser-sdk/tests/harness/|fuzz/|\.github/workflows/fuzz\.yml$)'; then
             run=false
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"

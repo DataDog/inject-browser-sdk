@@ -94,7 +94,7 @@ mod no_std_support {
     #[global_allocator]
     static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(any(target_arch = "wasm32", windows)))]
     #[panic_handler]
     fn panic(info: &core::panic::PanicInfo) -> ! {
         unsafe {
@@ -104,6 +104,20 @@ mod no_std_support {
             );
         }
         loop {}
+    }
+
+    /// Fail fast with FAST_FAIL_FATAL_APP_EXIT, as `std::process::abort` does
+    /// on Windows: an IIS worker must not keep running after a panic.
+    #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+    #[panic_handler]
+    fn panic(_info: &core::panic::PanicInfo) -> ! {
+        unsafe { core::arch::asm!("int 0x29", in("ecx") 7, options(noreturn, nostack)) }
+    }
+
+    #[cfg(all(windows, target_arch = "aarch64"))]
+    #[panic_handler]
+    fn panic(_info: &core::panic::PanicInfo) -> ! {
+        unsafe { core::arch::asm!("brk 0xf003", in("x0") 7, options(noreturn, nostack)) }
     }
 
     #[cfg(target_arch = "wasm32")]

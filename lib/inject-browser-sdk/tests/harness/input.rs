@@ -6,13 +6,24 @@
 
 //! Runs a document through the injector the way lol_html's own harness runs its cases: as a single
 //! chunk, then split into chunks, and checks every run against the single one and against the
-//! oracle.
+//! oracles: lol_html's position ([`check_oracle`]) and html5ever's tree ([`check_tree`]).
 
 use inject_browser_sdk::injector::{InjectionStrategy, Injector};
 
-use super::oracle;
+use super::oracle::{self, WALK_LIMIT, WINDOW};
+use super::tree::{self, Handle, Tree};
 
 pub const SNIPPET: &[u8] = b"{{SNIPPET}}";
+
+/// The snippet [`check_tree`] injects: one that parses as an element, so that the tree tells where
+/// it went.
+pub const PROBE: &[u8] = b"<script data-dd-probe></script>";
+
+/// The start tag of [`PROBE`], at whose end the parser creates the element.
+const PROBE_START_TAG: &[u8] = b"<script data-dd-probe>";
+
+/// What gives the probe away, in the tree's serialization or in a document.
+const PROBE_MARK: &str = "dd-probe";
 
 /// Every strategy, each document runs under all of them.
 pub const STRATEGIES: [InjectionStrategy; 2] = [
@@ -45,7 +56,16 @@ pub fn split<'a>(document: &'a [u8], points: &[usize]) -> Vec<&'a [u8]> {
 /// flagged `from_incoming_chunk` point into the chunk just written and the others do not, every
 /// byte comes out exactly once, and what is held back is reported. Panics on a violation.
 pub fn run(strategy: InjectionStrategy, chunks: &[&[u8]]) -> Run {
-    let mut injector = Injector::with_strategy(SNIPPET, strategy);
+    return run_snippet(SNIPPET, strategy, chunks);
+}
+
+/// [`run`] injecting [`PROBE`].
+pub fn run_with_probe(strategy: InjectionStrategy, chunks: &[&[u8]]) -> Run {
+    return run_snippet(PROBE, strategy, chunks);
+}
+
+fn run_snippet(snippet: &'static [u8], strategy: InjectionStrategy, chunks: &[&[u8]]) -> Run {
+    let mut injector = Injector::with_strategy(snippet, strategy);
     let mut output = Vec::new();
     let mut injected_at = None;
     let mut written = 0;
@@ -66,7 +86,7 @@ pub fn run(strategy: InjectionStrategy, chunks: &[&[u8]]) -> Run {
                 slice.from_incoming_chunk, in_chunk,
                 "from_incoming_chunk flag"
             );
-            if slice.bytes.as_ptr() == SNIPPET.as_ptr() {
+            if slice.bytes.as_ptr() == snippet.as_ptr() {
                 assert!(injected_at.is_none(), "injected twice");
                 injected_at = Some(output.len());
             } else {
@@ -86,7 +106,7 @@ pub fn run(strategy: InjectionStrategy, chunks: &[&[u8]]) -> Run {
     assert_eq!(injector.held_back(), 0, "data held back after the end");
     assert_eq!(
         output.len(),
-        written + injected_at.map_or(0, |_| return SNIPPET.len())
+        written + injected_at.map_or(0, |_| return snippet.len())
     );
 
     return Run {
@@ -210,4 +230,307 @@ pub fn check_oracle_chunking(document: &[u8], points: &[usize]) {
         without_text(single),
         "lol_html split at {points:?}"
     );
+}
+
+/// What the browser makes of a document and of the injector's output with [`PROBE`] as the
+/// snippet, according to html5ever, see [`check_tree`].
+pub struct TreeVerdict {
+    pub run: Run,
+    /// html5ever's trees of the document and of the output, serialized.
+    pub document_tree: String,
+    pub output_tree: String,
+    /// Indexes among the element children of the document's head of the metas the probe must
+    /// follow, see [`required_metas`].
+    pub required_metas: Vec<usize>,
+    /// Where the document's head closed, if it did: past there, a snippet can only go in the body.
+    pub head_closed_at: Option<usize>,
+    /// How many of the head's last children the parser added once it had closed the head: an
+    /// element the head may hold, after `</head>`, goes there all the same.
+    pub closed_tail: usize,
+    /// Every property the output fails, empty when not injected.
+    pub failures: Vec<String>,
+}
+
+/// Injects [`PROBE`] into `document` and checks the properties any injection must have, whatever
+/// the document, on html5ever's trees of the document (D) and of the output (O):
+/// * P1: O holds exactly one probe, a `<script>` of the HTML namespace outside template contents,
+///   made of the probe's own tag; the probe shows up nowhere else, in text, a comment, an attribute.
+/// * P2: O without the probe is D.
+/// * P3: the probe is a child of the document's head.
+/// * P4: it follows every meta of the head declaring the character encoding, `X-UA-Compatible`, or
+///   an enforcing `Content-Security-Policy`, short of the ones past where the injector walks, see
+///   [`required_metas`].
+/// * P5: under [`InjectionStrategy::HeadCloseTag`], nothing but whitespace text follows it in the
+///   head, but for what the parser added to the head once closed.
+///
+/// A document the injector leaves alone has nothing to check. One may hold the probe's mark
+/// already, fuzzers find it: the probe is the element its own tag makes, and the mark shows up once
+/// more than in the document.
+pub fn tree_verdict(strategy: InjectionStrategy, document: &[u8]) -> TreeVerdict {
+    let run = run_with_probe(strategy, &[document]);
+    let original = tree::parse(document);
+    let document_tree = original.serialize(None);
+    let significant = original.serialize_significant(None);
+    let head = original.head().expect("the parser always makes a head");
+    let required_metas = required_metas(strategy, &original, &head);
+    let closed_tail = head
+        .children()
+        .iter()
+        .filter(|child| {
+            return head
+                .popped
+                .get()
+                .is_some_and(|popped| return child.id >= popped);
+        })
+        .count();
+    let mut verdict = TreeVerdict {
+        output_tree: document_tree.clone(),
+        document_tree,
+        required_metas,
+        head_closed_at: head.popped_at.get(),
+        closed_tail,
+        failures: Vec::new(),
+        run,
+    };
+    let Some(at) = verdict.run.injected_at else {
+        return verdict;
+    };
+    let output = tree::parse(&verdict.run.output);
+    verdict.output_tree = output.serialize(None);
+    let document_probes = original.elements_with("data-dd-probe").len();
+    verdict.failures = tree_failures(
+        strategy,
+        document,
+        &significant,
+        document_probes,
+        &verdict,
+        &output,
+        at,
+    );
+    return verdict;
+}
+
+/// Asserts the properties of [`tree_verdict`]. Returns whether the snippet was injected.
+pub fn check_tree(strategy: InjectionStrategy, document: &[u8]) -> bool {
+    let verdict = tree_verdict(strategy, document);
+    assert!(
+        verdict.failures.is_empty(),
+        "{strategy:?} injected at {:?}: {}, in:\n{}\noutput:\n{}\nD:\n{}O:\n{}",
+        verdict.run.injected_at,
+        verdict.failures.join("; "),
+        String::from_utf8_lossy(document),
+        String::from_utf8_lossy(&verdict.run.output),
+        verdict.document_tree,
+        verdict.output_tree,
+    );
+    return verdict.run.injected_at.is_some();
+}
+
+fn tree_failures(
+    strategy: InjectionStrategy,
+    document: &[u8],
+    significant: &str,
+    document_probes: usize,
+    verdict: &TreeVerdict,
+    output: &Tree,
+    at: usize,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    // P1.
+    let probes = output.elements_with("data-dd-probe");
+    // Where markup ahead of the document closed the head, the snippet goes in the body, see P3,
+    // which a later `<frameset>` replaces, snippet included: nothing the injector can tell there,
+    // and nothing else may change.
+    let frameset = output.root().is_some_and(|root| {
+        return root
+            .children()
+            .iter()
+            .any(|child| return child.is_html("frameset"));
+    });
+    if probes.len() == document_probes
+        && frameset
+        && verdict
+            .head_closed_at
+            .is_some_and(|closed| return closed <= at)
+    {
+        if output.serialize_significant(None) != significant {
+            failures.push(String::from(
+                "P2: the output differs from the document, a frameset dropping the probe",
+            ));
+        }
+        return failures;
+    }
+    // Made of its own tag: elements the parser created before it end before, the ones after past
+    // it.
+    let own: Vec<&Handle> = probes
+        .iter()
+        .filter(|probe| return probe.offset == at + PROBE_START_TAG.len())
+        .collect();
+    let ([probe], true) = (own.as_slice(), probes.len() == document_probes + 1) else {
+        failures.push(format!(
+            "P1: {} probe elements, {} made of its own tag, the document holding {document_probes}",
+            probes.len(),
+            own.len()
+        ));
+        return failures;
+    };
+    if !probe.is_html("script") {
+        failures.push(format!("P1: the probe is a {:?}", probe.name()));
+    }
+    if probe.in_template() {
+        failures.push(String::from("P1: the probe is within a template"));
+    }
+    let marks = verdict.output_tree.matches(PROBE_MARK).count();
+    let document_marks = verdict.document_tree.matches(PROBE_MARK).count();
+    if marks != document_marks + 1 {
+        failures.push(format!(
+            "P1: the probe shows up {} times in the tree",
+            marks - document_marks.min(marks)
+        ));
+    }
+    // P2.
+    if output.serialize_significant(Some(probe)) != significant {
+        failures.push(String::from(
+            "P2: the output without the probe differs from the document",
+        ));
+    }
+    // P3, short of markup printed ahead of the document, error messages for instance, which closed
+    // the head the browser opened: the snippet goes in the body, right before the `<html>` or
+    // `<body>` tag starting the document.
+    let parent = probe.parent();
+    let Some(head) = output.head().filter(|head| {
+        return parent
+            .as_ref()
+            .is_some_and(|parent| return std::rc::Rc::ptr_eq(parent, head));
+    }) else {
+        let lower = document[at..].to_ascii_lowercase();
+        let in_body = || {
+            let mut node = parent.clone();
+            while let Some(element) = node {
+                if element.is_html("body") {
+                    return element
+                        .parent()
+                        .is_some_and(|root| return root.is_html("html"));
+                }
+                node = element.parent();
+            }
+            return false;
+        };
+        let document_start = [b"<html".as_slice(), b"<body"].iter().any(|tag| {
+            return lower.starts_with(tag)
+                && lower
+                    .get(tag.len())
+                    .is_none_or(|&b| return b.is_ascii_whitespace() || b == b'/' || b == b'>');
+        });
+        if !(verdict
+            .head_closed_at
+            .is_some_and(|closed| return closed <= at)
+            && document_start
+            && in_body())
+        {
+            failures.push(String::from("P3: the probe is not a child of the head"));
+        }
+        return failures;
+    };
+    // P4: the output's head is the document's with the probe, P2 checks.
+    let children = head.children();
+    let index = children
+        .iter()
+        .position(|child| return std::rc::Rc::ptr_eq(child, probe))
+        .expect("a child of its parent");
+    let elements: Vec<&Handle> = children
+        .iter()
+        .filter(|child| return child.name().is_some() && !std::rc::Rc::ptr_eq(child, probe))
+        .collect();
+    let before = children[..index]
+        .iter()
+        .filter(|child| return child.name().is_some())
+        .count();
+    for &meta in &verdict.required_metas {
+        if meta >= before {
+            failures.push(format!(
+                "P4: the probe precedes the meta {:?}",
+                elements
+                    .get(meta)
+                    .map(|meta| return meta.attributes.borrow().clone())
+            ));
+        }
+    }
+    // P5.
+    if strategy == InjectionStrategy::HeadCloseTag {
+        let open_end = children.len().saturating_sub(verdict.closed_tail);
+        if let Some(child) = children
+            .get(index + 1..open_end.max(index + 1))
+            .unwrap_or_default()
+            .iter()
+            .find(|child| return !child.is_blank_text())
+        {
+            failures.push(format!(
+                "P5: {:?} follows the probe in the head",
+                child.kind
+            ));
+        }
+    }
+    return failures;
+}
+
+/// The metas of `head`, by index among its element children, that the snippet must follow, see
+/// [`oracle::is_relevant_meta`]: under [`InjectionStrategy::HeadCloseTag`], every one the head held
+/// while open; under [`InjectionStrategy::HeadOpenTag`], the ones of them the injector walks to,
+/// from a `<head>` tag ending within the window, up to [`WALK_LIMIT`], and past the window as long
+/// as every element before is a `<meta>` or a `<title>`, and short of a `<![CDATA[`.
+fn required_metas(strategy: InjectionStrategy, tree: &Tree, head: &Handle) -> Vec<usize> {
+    let walk = strategy == InjectionStrategy::HeadOpenTag;
+    let mut required = Vec::new();
+    if walk && head.offset > WINDOW {
+        return required;
+    }
+    // The walk stops at a `<![CDATA[`, whose end it cannot tell without tracking foreign content:
+    // a bogus comment wherever it is, the head or ahead of it.
+    let cdata = tree
+        .nodes()
+        .iter()
+        .filter(|node| {
+            return matches!(node.kind, tree::Kind::Comment)
+                && node.text.borrow().starts_with("[CDATA[");
+        })
+        .map(|node| return node.id)
+        .min()
+        .unwrap_or(usize::MAX);
+    let open = |child: &Handle| {
+        return head
+            .popped
+            .get()
+            .is_none_or(|popped| return child.id < popped);
+    };
+    let mut leading = true;
+    let mut elements = 0;
+    for child in head.children() {
+        if !open(&child) {
+            break;
+        }
+        if walk && child.id > cdata {
+            break;
+        }
+        if child.name().is_none() {
+            continue;
+        }
+        let (element, index) = (child, elements);
+        elements += 1;
+        leading &= element.is_html("meta") || element.is_html("title");
+        // Where its tag ends: one starting within the window and ending past it is not required.
+        if walk && ((element.offset > WINDOW && !leading) || element.offset > WALK_LIMIT) {
+            break;
+        }
+        let relevant = element.is_html("meta")
+            && oracle::is_relevant_meta(
+                element.attribute("charset").as_deref(),
+                element.attribute("http-equiv").as_deref(),
+                element.attribute("content").as_deref(),
+            );
+        if relevant {
+            required.push(index);
+        }
+    }
+    return required;
 }

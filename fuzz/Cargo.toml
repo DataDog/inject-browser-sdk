@@ -11,6 +11,8 @@ libfuzzer-sys = "0.4"
 # The oracle of `oracle_differential`, shared with the corpus tests.
 lol_html = "3.0.3"
 encoding_rs = "0.8.44"
+# The oracle of `tree_oracle`, see lib/inject-browser-sdk/tests/harness/tree.rs.
+html5ever = "0.40.1"
 
 [dependencies.inject-browser-sdk]
 path = "../lib/inject-browser-sdk"
@@ -35,6 +37,13 @@ bench = false
 [[bin]]
 name = "oracle_differential"
 path = "fuzz_targets/oracle_differential.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tree_oracle"
+path = "fuzz_targets/tree_oracle.rs"
 test = false
 doc = false
 bench = false

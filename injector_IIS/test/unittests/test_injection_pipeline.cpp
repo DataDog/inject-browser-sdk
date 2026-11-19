@@ -11,6 +11,7 @@
 // Uses mock IAppHost* COM interfaces to feed configuration, and a mock
 // HTTP response containing an HTML body with <head></head>.
 
+#include "config_reader.h"
 #include "entrypoint.h"
 #include "http_module.h"
 #include "module_context.h"
@@ -41,6 +42,7 @@ using ::testing::StrEq;
 class MockAppHostProperty : public IAppHostProperty {
   BSTR name_;
   VARIANT value_;
+  bool schema_default_ = false;
 
  public:
   MockAppHostProperty(LPCWSTR name, VARIANT val) : value_(val) { name_ = SysAllocString(name); }
@@ -60,6 +62,7 @@ class MockAppHostProperty : public IAppHostProperty {
   ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
+  void SetSchemaDefault(bool value) { schema_default_ = value; }
 
   HRESULT STDMETHODCALLTYPE get_Name(BSTR* pName) override {
     *pName = SysAllocString(name_);
@@ -70,7 +73,13 @@ class MockAppHostProperty : public IAppHostProperty {
   }
   HRESULT STDMETHODCALLTYPE put_Value(VARIANT) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE get_Schema(IAppHostPropertySchema**) override { return E_NOTIMPL; }
-  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR, VARIANT*) override { return E_NOTIMPL; }
+  HRESULT STDMETHODCALLTYPE GetMetadata(BSTR name, VARIANT* out) override {
+    if (_wcsicmp(name, L"isDefaultValue") != 0) return E_NOTIMPL;
+    VariantInit(out);
+    out->vt = VT_BOOL;
+    out->boolVal = schema_default_ ? VARIANT_TRUE : VARIANT_FALSE;
+    return S_OK;
+  }
   HRESULT STDMETHODCALLTYPE SetMetadata(BSTR, VARIANT) override { return E_NOTIMPL; }
   HRESULT STDMETHODCALLTYPE get_Exception(IAppHostPropertyException**) override {
     return E_NOTIMPL;
@@ -213,6 +222,8 @@ class MockRumConfigElement : public IAppHostElement {
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
   void SetCollectionResult(HRESULT hr) { collection_result_ = hr; }
   void SetEnabledPropertyMissing(bool missing) { enabled_lookup_fails_ = missing; }
+  void SetEnabledIsSchemaDefault(bool value) { enabled_prop_.SetSchemaDefault(value); }
+  void SetVersionIsSchemaDefault(bool value) { version_prop_.SetSchemaDefault(value); }
   void SetInjectionStrategy(InjectionStrategy strategy) {
     injection_strategy_prop_.emplace(L"injectionStrategy", int_variant(static_cast<int>(strategy)));
   }
@@ -2730,4 +2741,75 @@ TEST(InjectionPipeline, MissingEnabledAttributePreservesExistingConfig) {
 
   mod.factory->Terminate();
   mod.global->Terminate();
+}
+
+RumConfig read_default_site(MockRumConfigElement& config) {
+  MockAdminManager admin(&config);
+  const MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+  const auto result = read_conf(server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+  EXPECT_EQ(result.status, ReadConfStatus::Ok);
+  return result.config.value_or(RumConfig{});
+}
+
+// Schema defaults are set by no web.config, so they leave stable configuration in force.
+TEST(InjectionPipeline, SchemaDefaultsAreNotExplicitValues) {
+  MockRumConfigElement config;
+  config.SetEnabledIsSchemaDefault(true);
+  config.SetVersionIsSchemaDefault(true);
+
+  const auto result = read_default_site(config);
+  EXPECT_FALSE(result.enabled);
+  EXPECT_FALSE(result.version);
+  EXPECT_FALSE(result.injection_strategy);
+  EXPECT_FALSE(result.inject_static_files);
+  EXPECT_EQ(result.sdk_options.at("applicationId"), "test-app-id");
+}
+
+// Values a web.config sets override stable configuration.
+TEST(InjectionPipeline, ExplicitValuesOverrideStableConfiguration) {
+  MockRumConfigElement config;
+  config.SetInjectionStrategy(InjectionStrategy::HeadOpenTag);
+  config.SetInjectStaticFiles(false);
+
+  const auto result = read_default_site(config);
+  EXPECT_EQ(result.enabled, true);
+  EXPECT_EQ(result.version, 5);
+  EXPECT_EQ(result.injection_strategy, InjectionStrategy::HeadOpenTag);
+  EXPECT_EQ(result.inject_static_files, false);
+}
+
+// An option whose value does not fit its type is skipped, and the rest still configure RUM.
+TEST(InjectionPipeline, InvalidOptionValueIsSkipped) {
+  MockRumConfigElement config(true, {{L"applicationId", L"test-app-id"},
+                                     {L"clientToken", L"test-client-token"},
+                                     {L"sessionSampleRate", L"not-a-number"}});
+  MockAdminManager admin(&config);
+  const MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+  ModuleContext ctx;
+
+  update_module_context(ctx, server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+
+  ASSERT_NE(ctx.snippet, nullptr);
+  EXPECT_EQ(ctx.snippet->error_code, 0);
+  EXPECT_EQ(ctx.application_id_tag, "application_id:test-app-id");
+}
+
+// Without web.config options or stable configuration there is nothing to inject.
+TEST(InjectionPipeline, NoConfigurationClearsTheSnippet) {
+  MockRumConfigElement config(true, {});
+  config.SetEnabledIsSchemaDefault(true);
+  config.SetVersionIsSchemaDefault(true);
+  MockAdminManager admin(&config);
+  const MockServer server;
+  EXPECT_CALL(server, GetAdminManager()).WillRepeatedly(Return(&admin));
+  Logger logger;
+  ModuleContext ctx;
+
+  update_module_context(ctx, server, L"MACHINE/WEBROOT/APPHOST/Default Web Site", logger);
+
+  EXPECT_EQ(ctx.snippet, nullptr);
 }

@@ -11,6 +11,7 @@ claim_pattern:
   pipeline_source: push
   project_path: DataDog/inject-browser-sdk
   ref_type: branch
+  ref_protected: "true"
 
 permissions:
   contents: read

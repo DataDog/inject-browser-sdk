@@ -9,6 +9,7 @@ claim_pattern:
   ref_type: "branch"
   ref_path: "refs/heads/.+"
   pipeline_source: "push"
+  ref_protected: "true"
   ci_config_ref_uri: "gitlab\\.ddbuild\\.io/DataDog/inject-browser-sdk//\\.gitlab-ci\\.yml@refs/heads/.+"
 
 permissions:

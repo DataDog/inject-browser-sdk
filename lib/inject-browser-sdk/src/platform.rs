@@ -104,7 +104,7 @@ mod inner {
     /// intentionally different from the Unix branch, where /proc/self/{cmdline,
     /// environ} can't be trusted from an injected library.
     pub fn detect_process_info(language: &str) -> ProcessInfo {
-        ProcessInfo::detect_global(String::from(language))
+        return ProcessInfo::detect_global(String::from(language));
     }
 
     /// No-op on Windows — no stderr sink is linked in the no_std path.
@@ -169,6 +169,23 @@ pub fn read_stable_configs(language: &str, debug_logs: bool) -> Result<StableCon
     return read_stable_configs_with_reader(&PlatformConfigRead, language, debug_logs);
 }
 
+/// Read the same stable configuration format from explicit paths. `None` keeps
+/// the library's normal local or fleet path; IIS uses this for isolated tests.
+pub fn read_stable_configs_with_paths(
+    language: &str,
+    debug_logs: bool,
+    local_path: Option<&str>,
+    fleet_path: Option<&str>,
+) -> Result<StableConfigRead, String> {
+    return read_stable_configs_with_reader_at_paths(
+        &PlatformConfigRead,
+        language,
+        debug_logs,
+        local_path.unwrap_or(Configurator::LOCAL_STABLE_CONFIGURATION_PATH),
+        fleet_path.unwrap_or(Configurator::FLEET_STABLE_CONFIGURATION_PATH),
+    );
+}
+
 /// Variant of [`read_stable_configs`] that accepts a caller-supplied reader.
 /// Intended for tests that need to exercise populated YAML input without
 /// touching the real filesystem.
@@ -177,11 +194,24 @@ pub fn read_stable_configs_with_reader<R: ConfigRead>(
     language: &str,
     debug_logs: bool,
 ) -> Result<StableConfigRead, String> {
+    return read_stable_configs_with_reader_at_paths(
+        reader,
+        language,
+        debug_logs,
+        Configurator::LOCAL_STABLE_CONFIGURATION_PATH,
+        Configurator::FLEET_STABLE_CONFIGURATION_PATH,
+    );
+}
+
+fn read_stable_configs_with_reader_at_paths<R: ConfigRead>(
+    reader: &R,
+    language: &str,
+    debug_logs: bool,
+    local_path: &str,
+    fleet_path: &str,
+) -> Result<StableConfigRead, String> {
     let process_info = detect_process_info(language);
     let configurator = Configurator::new(debug_logs);
-
-    let local_path = Configurator::LOCAL_STABLE_CONFIGURATION_PATH;
-    let fleet_path = Configurator::FLEET_STABLE_CONFIGURATION_PATH;
 
     let recording = PresenceRecordingReader {
         inner: reader,

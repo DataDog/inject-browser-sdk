@@ -59,6 +59,37 @@ kernel-mode fast path:
 </system.webServer>
 ```
 
+## Stable configuration
+
+Defaults can also come from the Datadog stable configuration files, read once per worker process:
+
+* `C:\ProgramData\Datadog\application_monitoring.yaml`
+* `C:\ProgramData\Datadog\managed\datadog-agent\stable\application_monitoring.yaml` (fleet-managed,
+  takes precedence)
+
+Rules there can select workers by their process arguments and environment, so app pools can get
+different defaults. A value the `datadogRum` section sets explicitly overrides stable
+configuration; schema defaults do not. The Browser SDK options use the `DD_RUM_*` keys
+(`DD_RUM_ENABLED`, `DD_RUM_MAJOR_VERSION`, `DD_RUM_APPLICATION_ID`, `DD_RUM_CLIENT_TOKEN`,
+`DD_RUM_SITE`, ...), and the module settings these:
+
+| Key                          | Values                              | IIS setting          |
+|------------------------------|-------------------------------------|----------------------|
+| `DD_RUM_INJECTION_STRATEGY`  | `head_close_tag`, `head_open_tag`   | `injectionStrategy`  |
+| `DD_RUM_INJECT_STATIC_FILES` | `true`, `false`                     | `injectStaticFiles`  |
+| `DD_RUM_IIS_LOG_LEVEL`       | `error`, `info`, `debug`            | `logLevel`           |
+
+```yaml
+apm_configuration_default:
+  DD_RUM_APPLICATION_ID: <application id>
+  DD_RUM_CLIENT_TOKEN: <client token>
+  DD_RUM_INJECTION_STRATEGY: head_open_tag
+```
+
+A change to these files takes effect when the worker recycles. An `option` whose value does not
+fit its type, such as a non-numeric `sessionSampleRate`, is skipped and logged; the rest still
+apply.
+
 ## Build/installation steps
 1. Configure the project
 ```sh

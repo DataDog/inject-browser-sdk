@@ -119,10 +119,12 @@ mod no_std_support {
 
 mod injector;
 mod snippet;
+mod snippet_config;
 mod stable_config;
 
 pub use injector::*;
 pub use snippet::*;
+pub use snippet_config::*;
 pub use stable_config::*;
 
 #[cfg(test)]

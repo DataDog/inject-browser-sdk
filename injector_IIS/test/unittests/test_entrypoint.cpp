@@ -4,9 +4,34 @@
 //
 // Copyright 2025-Present Datadog, Inc.
 
+#include "config_reader.h"
 #include "entrypoint.h"
 #include "mocks.h"
 #include "gtest/gtest.h"
+#include <string>
+
+namespace {
+// Keeps the tests off the machine's stable configuration: every worker-level read sees files that
+// do not exist.
+class StableConfigTestIsolation final : public testing::Environment {
+ public:
+  void SetUp() override {
+    wchar_t temp_path[MAX_PATH];
+    const DWORD length = GetTempPathW(MAX_PATH, temp_path);
+    ASSERT_GT(length, 0);
+    ASSERT_LT(length, MAX_PATH);
+    const std::string prefix = datadog::rum::wstring_to_utf8(std::wstring(temp_path, length)) +
+                               "iis-rum-test-missing-" + std::to_string(GetCurrentProcessId());
+    datadog::rum::set_stable_config_paths_for_testing(prefix + "-local.yaml",
+                                                      prefix + "-fleet.yaml");
+  }
+};
+
+// gtest registers environments this way; an allocation failure at startup aborts the run anyway.
+// NOLINTNEXTLINE(bugprone-throwing-static-initialization)
+[[maybe_unused]] testing::Environment* const stable_config_test_isolation =
+    testing::AddGlobalTestEnvironment(new StableConfigTestIsolation());
+}  // namespace
 
 using ::testing::_;  // NOLINT(bugprone-reserved-identifier) gtest idiom
 using ::testing::DoAll;
@@ -25,7 +50,7 @@ TEST(TestRegisterModule, TestRegistersForBeginRequestAndSendResponseNotification
   EXPECT_CALL(module, SetRequestNotifications(_, RQ_SEND_RESPONSE | RQ_BEGIN_REQUEST, _)).Times(1);
   EXPECT_CALL(module, GetId()).Times(1);
 
-  auto result = RegisterModule(0, &module, &server);
+  const auto result = RegisterModule(0, &module, &server);
 
   EXPECT_EQ(result, S_OK);
 }

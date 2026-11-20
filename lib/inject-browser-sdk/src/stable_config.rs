@@ -37,6 +37,29 @@ pub struct StableConfig {
 }
 
 impl StableConfig {
+    /// No stable configuration: snippets are built from the overlay alone.
+    pub fn empty() -> Self {
+        return StableConfig {
+            configs: Vec::new(),
+            logs: Vec::new(),
+            empty_file_present: false,
+        };
+    }
+
+    /// The value of a stable-configuration key matched for this process,
+    /// for host settings outside the Browser SDK configuration.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        return self.lookup(key);
+    }
+
+    /// Every matched key and value, in priority order.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        return self
+            .configs
+            .iter()
+            .map(|config| return (config.name.as_str(), config.value.as_str()));
+    }
+
     fn lookup(&self, key: &str) -> Option<&str> {
         return self
             .configs
@@ -109,7 +132,15 @@ impl StableConfig {
             return Ok(self.disabled_snippet(overlay.as_ref(), enabled));
         }
 
-        let mut config = Configuration::from_lookup(|key| return self.lookup(key))?;
+        let mut config = Configuration::from_lookup(|key| {
+            if overlay
+                .as_ref()
+                .is_some_and(|value| return value.overrides_stable_key(key))
+            {
+                return None;
+            }
+            return self.lookup(key);
+        })?;
 
         if let Some(o) = overlay {
             config.overlay(o);
@@ -153,6 +184,21 @@ fn stable_config_from_read(read: crate::platform::StableConfigRead) -> Result<St
 pub fn read_stable_config(language: &str, debug_logs: bool) -> Result<StableConfig, Error> {
     let read =
         crate::platform::read_stable_configs(language, debug_logs).map_err(Error::StableConfig)?;
+    return stable_config_from_read(read);
+}
+
+/// The standard reader with optional explicit local and fleet paths. `None`
+/// retains libdd-library-config's platform path for that source.
+pub fn read_stable_config_with_paths(
+    language: &str,
+    debug_logs: bool,
+    local_path: Option<&str>,
+    fleet_path: Option<&str>,
+) -> Result<StableConfig, Error> {
+    let read = crate::platform::read_stable_configs_with_paths(
+        language, debug_logs, local_path, fleet_path,
+    )
+    .map_err(Error::StableConfig)?;
     return stable_config_from_read(read);
 }
 
@@ -249,6 +295,41 @@ mod tests {
         assert_eq!(init["site"], Value::from("us3.datadoghq.com"));
         assert_eq!(init["applicationId"], Value::from("app-populated"));
         assert_eq!(init["clientToken"], Value::from("tok-populated"));
+    }
+
+    #[test]
+    fn explicit_overlay_skips_malformed_lower_priority_stable_values() {
+        use crate::configuration::RumConfiguration;
+
+        const STABLE: &[u8] = br#"apm_configuration_default:
+  DD_RUM_MAJOR_VERSION: invalid
+  DD_RUM_APPLICATION_ID: stable-app
+  DD_RUM_CLIENT_TOKEN: stable-token
+  DD_RUM_SESSION_SAMPLE_RATE: invalid
+"#;
+        let read = crate::platform::read_stable_configs_with_reader(
+            &ContentReader(Some(STABLE)),
+            "browser-sdk",
+            false,
+        )
+        .expect("stable config should parse");
+        let config = stable_config_from_read(read).expect("stable config should be usable");
+        let overlay = ConfigurationOverlay {
+            major_version: Some(5),
+            rum: RumConfiguration {
+                session_sample_rate: Some(10.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let snippet = config
+            .build_snippet(Some(overlay))
+            .expect("explicit values must override malformed stable values");
+        let text = core::str::from_utf8(&snippet.bytes).unwrap();
+        assert!(text.contains("/v5/datadog-rum.js"));
+        let init = extract_init_json(&snippet.bytes);
+        assert_eq!(init["sessionSampleRate"], Value::from(10.0));
     }
 
     /// Reader whose files always exceed the configurator's size gate, which reclassifies

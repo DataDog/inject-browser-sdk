@@ -18,14 +18,19 @@
 
 namespace datadog::rum {
 
+// The values web.config sets explicitly. Each one overrides stable configuration
+// (application_monitoring.yaml); unset ones fall back to it, then to the defaults.
 struct RumConfig {  // NOLINT(bugprone-exception-escape)
-  int version;
+  // Set only when `enabled="true"` is explicit: it then overrides a stable-config opt-out.
+  std::optional<bool> enabled;
+  // The Browser SDK major version, the `version` attribute.
+  std::optional<int> version;
+  // The `option` collection: Browser SDK init options by name, in their text form.
   std::unordered_map<std::string, std::string> sdk_options;
-  // Where the snippet is injected. Configures the module rather than the Browser SDK, so it is
-  // read as its own attribute instead of going through the `option` collection.
-  InjectionStrategy injection_strategy = InjectionStrategy::HeadCloseTag;
+  // Where the snippet is injected, the `injectionStrategy` attribute.
+  std::optional<InjectionStrategy> injection_strategy;
   // Whether static files are read to be injected, the `injectStaticFiles` attribute.
-  bool inject_static_files = true;
+  std::optional<bool> inject_static_files;
 };
 
 enum class ReadConfStatus {
@@ -48,6 +53,10 @@ struct ServerConfig {
 };
 
 std::string wstring_to_utf8(const std::wstring& wstr);
+
+// Points stable configuration at the given files instead of the machine's. For tests only, and
+// only before the first configuration read: the worker reads stable configuration once.
+void set_stable_config_paths_for_testing(std::string local_path, std::string fleet_path);
 
 ReadConfResult read_conf(const IHttpServer& server, PCWSTR cfg_path, Logger& logger);
 

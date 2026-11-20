@@ -1,0 +1,30 @@
+# GitLab caps the artifacts archive a trigger includes its child pipeline from
+# at 5 MiB. The template includes it from llm-cc-prepare, whose archive also
+# carries the growing score cache and outgrew the cap, so every child pipeline
+# failed to be created. Hand the trigger a job whose archive holds only the
+# child pipeline; the child's workers still fetch llm-cc-prepare's artifacts
+# through `needs:pipeline`, which has no such cap.
+llm-cc-child-config:
+  extends: .llm-cc-rules
+  stage: test
+  image: $_DD_LLM_CC_COORDINATOR_IMAGE
+  tags: ["arch:amd64"]
+  interruptible: true
+  allow_failure: true
+  needs:
+    - job: llm-cc-prepare
+      artifacts: true
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - test -s comparison/child.yml
+  artifacts:
+    paths: [comparison/child.yml]
+    expire_in: 30 days
+
+llm-cc-analyze:
+  needs: [llm-cc-child-config]
+  trigger:
+    include:
+      - artifact: comparison/child.yml
+        job: llm-cc-child-config

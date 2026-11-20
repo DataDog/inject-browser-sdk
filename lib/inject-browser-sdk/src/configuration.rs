@@ -28,7 +28,7 @@ pub struct Configuration {
 /// into it on deserialization and flattened back into the generated
 /// `DD_RUM.init({...})` JSON on serialization, so new Browser SDK init
 /// options pass through without a code change here.
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 #[allow(missing_docs)]
@@ -83,7 +83,7 @@ pub struct RumConfiguration {
 ///   overlay. This is the forward-compat path for new Browser SDK init
 ///   options; the trade-off is that typos inside `rum` are silently passed
 ///   through rather than rejected.
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 #[allow(missing_docs)]
@@ -92,6 +92,102 @@ pub struct ConfigurationOverlay {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub rum: RumConfiguration,
+}
+
+impl ConfigurationOverlay {
+    /// A present overlay value takes precedence even if the lower-priority
+    /// stable value is malformed. Skip parsing that stable value entirely.
+    pub(crate) fn overrides_stable_key(&self, key: &str) -> bool {
+        return match key {
+            "DD_RUM_MAJOR_VERSION" => self.major_version.is_some(),
+            "DD_RUM_APPLICATION_ID" => self.rum.application_id.is_some(),
+            "DD_RUM_CLIENT_TOKEN" => self.rum.client_token.is_some(),
+            "DD_RUM_SITE" => self.rum.site.is_some(),
+            "DD_RUM_SERVICE" => self.rum.service.is_some(),
+            "DD_RUM_ENVIRONMENT" => self.rum.env.is_some(),
+            "DD_RUM_VERSION" => self.rum.version.is_some(),
+            "DD_RUM_TRACK_USER_INTERACTIONS" | "DD_RUM_TRACK_USER_INTERACTION" => {
+                self.rum.track_user_interactions.is_some()
+            }
+            "DD_RUM_TRACK_RESOURCES" => self.rum.track_resources.is_some(),
+            "DD_RUM_TRACK_LONG_TASKS" => self.rum.track_long_tasks.is_some(),
+            "DD_RUM_DEFAULT_PRIVACY_LEVEL" => self.rum.default_privacy_level.is_some(),
+            "DD_RUM_SESSION_SAMPLE_RATE" => self.rum.session_sample_rate.is_some(),
+            "DD_RUM_SESSION_REPLAY_SAMPLE_RATE" => self.rum.session_replay_sample_rate.is_some(),
+            "DD_RUM_REMOTE_CONFIGURATION_ID" => self.rum.remote_configuration_id.is_some(),
+            _ => false,
+        };
+    }
+}
+
+/// Browser SDK options whose text form is a comma-separated list.
+const LIST_OPTIONS: &[&str] = &["allowedTracingUrls"];
+
+impl ConfigurationOverlay {
+    /// Set one setting by name, with the same reach as the JSON overlay:
+    /// `enabled` and `majorVersion` are top-level, every other name is a
+    /// Browser SDK init option, typed when known and passed through otherwise.
+    /// A value of the wrong type for a known name is rejected and leaves the
+    /// overlay unchanged.
+    pub fn set(&mut self, name: &str, value: Value) -> Result<(), Error> {
+        let mut entry = serde_json::Map::new();
+        entry.insert(String::from(name), value);
+        let entry = Value::Object(entry);
+        let partial = if name == "enabled" || name == "majorVersion" {
+            entry
+        } else {
+            serde_json::json!({ "rum": entry })
+        };
+        let partial: ConfigurationOverlay = serde_json::from_value(partial)
+            .map_err(|e| return Error::Json(format!("setting '{name}': {e}")))?;
+        overlay_field(&mut self.major_version, partial.major_version);
+        overlay_field(&mut self.enabled, partial.enabled);
+        self.rum.merge(partial.rum);
+        return Ok(());
+    }
+
+    /// Set a setting from its text form, as configuration files hold it: the
+    /// text is read as whatever type `name` takes (string, boolean or number),
+    /// and list options are split on commas.
+    pub fn set_text(&mut self, name: &str, text: &str) -> Result<(), Error> {
+        if LIST_OPTIONS.contains(&name) {
+            let items: alloc::vec::Vec<Value> = text
+                .split(',')
+                .map(str::trim)
+                .filter(|item| return !item.is_empty())
+                .map(Value::from)
+                .collect();
+            if items.is_empty() {
+                return Err(Error::Json(format!("setting '{name}': empty list")));
+            }
+            return self.set(name, Value::Array(items));
+        }
+        let typed = [
+            Some(Value::from(text)),
+            parse_bool(text, name).ok().map(Value::from),
+            text.parse::<u64>().ok().map(Value::from),
+            parse_f64(text, name).ok().map(Value::from),
+        ];
+        for value in typed.into_iter().flatten() {
+            if self.set(name, value).is_ok() {
+                return Ok(());
+            }
+        }
+        return Err(Error::Json(format!(
+            "setting '{name}': invalid value '{text}'"
+        )));
+    }
+
+    /// Append to a list option, creating it when absent.
+    pub fn append(&mut self, name: &str, value: Value) -> Result<(), Error> {
+        let mut items = match self.rum.other.get(name) {
+            Some(Value::Array(items)) => items.clone(),
+            Some(_) => return Err(Error::Json(format!("setting '{name}' is not a list"))),
+            None => alloc::vec::Vec::new(),
+        };
+        items.push(value);
+        return self.set(name, Value::Array(items));
+    }
 }
 
 fn overlay_field<T>(dst: &mut Option<T>, src: Option<T>) {

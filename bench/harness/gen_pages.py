@@ -35,7 +35,10 @@ def sized(prefix, filler, size, suffix=TAIL):
 def perf_pages():
     pages = {}
     for name, size in [("html_512.html", 512), ("html_2k.html", 2048), ("html_16k.html", 16384),
-                       ("html_100k.html", 102400), ("html_1m.html", 1 << 20), ("html_5m.html", 5 << 20)]:
+                       ("html_100k.html", 102400), ("html_1m.html", 1 << 20), ("html_5m.html", 5 << 20),
+                       # Where reading a file whole stops paying over sendfile past the prefix.
+                       ("html_4k.html", 4096), ("html_8k.html", 8192), ("html_32k.html", 32768),
+                       ("html_64k.html", 65536), ("html_256k.html", 262144)]:
         page = sized(HEAD, PARA, size)
         # 512 B: the template head alone is ~250 B, trim filler only.
         pages[name] = page

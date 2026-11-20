@@ -19,6 +19,9 @@
 //! pieces before being read. Once the snippet is in, the filter removes itself and leaves the
 //! rest of the brigade, and every later one, untouched (so the file past the injection point
 //! still goes out by sendfile).
+//!
+//! `RUM_INJECT_SCAN`, `RUM_INJECT_READ`, `RUM_INJECT_SPLIT` and `RUM_INJECT_SPLIT_SNIPPET` are the
+//! offset-based integration and its ablations, see the `scan` module.
 
 #![allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code)]
 #![allow(clippy::missing_safety_doc)]
@@ -27,6 +30,8 @@
 mod sys {
     include!(concat!(env!("OUT_DIR"), "/httpd.rs"));
 }
+
+mod scan;
 
 use core::ffi::{c_char, c_void, CStr};
 use core::{mem, ptr, slice};
@@ -78,6 +83,14 @@ unsafe extern "C" fn register_hooks(_pool: *mut apr_pool_t) {
             None,
             ap_filter_type_AP_FTYPE_RESOURCE,
         );
+        for (name, filter) in [
+            (c"RUM_INJECT_SCAN", scan::filter::<{ scan::MODE_SCAN }> as unsafe extern "C" fn(_, _) -> _),
+            (c"RUM_INJECT_READ", scan::filter::<{ scan::MODE_READ }>),
+            (c"RUM_INJECT_SPLIT", scan::filter::<{ scan::MODE_SPLIT }>),
+            (c"RUM_INJECT_SPLIT_SNIPPET", scan::filter::<{ scan::MODE_SPLIT_SNIPPET }>),
+        ] {
+            ap_register_output_filter(name.as_ptr(), Some(filter), None, ap_filter_type_AP_FTYPE_RESOURCE);
+        }
     }
 }
 
@@ -94,21 +107,21 @@ unsafe extern "C" fn drop_ctx(data: *mut c_void) -> apr_status_t {
 
 // --- APR ring / bucket macros -------------------------------------------------------------
 
-unsafe fn sentinel(bb: *mut apr_bucket_brigade) -> *mut apr_bucket {
+pub(crate) unsafe fn sentinel(bb: *mut apr_bucket_brigade) -> *mut apr_bucket {
     // APR_BRIGADE_SENTINEL: the list head poses as a bucket whose `link` is the head.
     unsafe { (&raw mut (*bb).list as *mut u8).sub(mem::offset_of!(apr_bucket, link)) as *mut apr_bucket }
 }
 
-unsafe fn first(bb: *mut apr_bucket_brigade) -> *mut apr_bucket {
+pub(crate) unsafe fn first(bb: *mut apr_bucket_brigade) -> *mut apr_bucket {
     unsafe { (*bb).list.next }
 }
 
-unsafe fn next(e: *mut apr_bucket) -> *mut apr_bucket {
+pub(crate) unsafe fn next(e: *mut apr_bucket) -> *mut apr_bucket {
     unsafe { (*e).link.next }
 }
 
 /// APR_BUCKET_INSERT_BEFORE(e, n)
-unsafe fn insert_before(e: *mut apr_bucket, n: *mut apr_bucket) {
+pub(crate) unsafe fn insert_before(e: *mut apr_bucket, n: *mut apr_bucket) {
     unsafe {
         (*n).link.next = e;
         (*n).link.prev = (*e).link.prev;
@@ -127,19 +140,19 @@ unsafe fn delete(e: *mut apr_bucket) {
     }
 }
 
-unsafe fn is_metadata(e: *mut apr_bucket) -> bool {
+pub(crate) unsafe fn is_metadata(e: *mut apr_bucket) -> bool {
     unsafe { (*(*e).type_).is_metadata == apr_bucket_type_t_APR_BUCKET_METADATA }
 }
 
-unsafe fn is_file(e: *mut apr_bucket) -> bool {
+pub(crate) unsafe fn is_file(e: *mut apr_bucket) -> bool {
     unsafe { ptr::eq((*e).type_, &raw const apr_bucket_type_file) }
 }
 
-unsafe fn is_eos(e: *mut apr_bucket) -> bool {
+pub(crate) unsafe fn is_eos(e: *mut apr_bucket) -> bool {
     unsafe { ptr::eq((*e).type_, &raw const apr_bucket_type_eos) }
 }
 
-fn header<'a>(table: *mut apr_table_t, name: &CStr) -> Option<&'a [u8]> {
+pub(crate) fn header<'a>(table: *mut apr_table_t, name: &CStr) -> Option<&'a [u8]> {
     unsafe {
         let value = apr_table_get(table, name.as_ptr());
         (!value.is_null()).then(|| CStr::from_ptr(value).to_bytes())

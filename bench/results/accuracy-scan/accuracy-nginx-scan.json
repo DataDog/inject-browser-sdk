@@ -1,0 +1,37 @@
+{
+ "server": "nginx/scan",
+ "summary": {
+  "static": {
+   "checked": 106,
+   "mismatches": 0,
+   "padded": 1
+  },
+  "cl": {
+   "checked": 1696,
+   "mismatches": 0,
+   "padded": 26
+  },
+  "chunked": {
+   "checked": 1696,
+   "mismatches": 0,
+   "padded": 0
+  },
+  "clb": {
+   "checked": 1696,
+   "mismatches": 0,
+   "padded": 16
+  },
+  "chunkedb": {
+   "checked": 1696,
+   "mismatches": 0,
+   "padded": 0
+  }
+ },
+ "failures": {
+  "static": [],
+  "cl": [],
+  "chunked": [],
+  "clb": [],
+  "chunkedb": []
+ }
+}

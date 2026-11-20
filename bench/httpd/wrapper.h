@@ -6,3 +6,4 @@
 #include <apr_buckets.h>
 #include <apr_tables.h>
 #include <apr_pools.h>
+#include <apr_portable.h>

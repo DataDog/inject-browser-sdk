@@ -16,6 +16,15 @@
 #
 # Only step 4 signs. Pull requests that change this path build in release
 # mode, check the release scripts against stubs, and dry-run step 1.
+#
+# Signing and S3 publishing authority: the Windows code signing key and the
+# rum-auto-instrumentation release prefixes (iis/, installer/) are granted only
+# to this repository's CI Identities trusted-jobs role, i.e. jobs on main and
+# on tags (ddoghq/ci-identities protected-refs.json; GitHub organization rulesets
+# protect both). Branch pipelines get untrusted-jobs, which can do neither, even
+# if they set IIS_SIGN or call the signer directly. Within trusted-jobs, that
+# only iis-X.Y.Z tag pipelines sign and publish is enforced by this reviewed
+# release implementation, not by KMS or S3 authorization.
 variables:
   IIS_RELEASE_BRANCH: release-please--branches--main--components--iis
   RELEASE_TOOLS_IMAGE_NAME: registry.ddbuild.io/ci/inject-browser-sdk/release-tools
@@ -91,10 +100,21 @@ variables:
     - if [ -s "$DDOCTOSTS_TOKEN_FILE" ]; then dd-octo-sts revoke -t "$(cat "$DDOCTOSTS_TOKEN_FILE")" || true; fi
     - rm -f "$DDOCTOSTS_TOKEN_FILE"
 
+# Request a CI Identities ID token. Jobs run their AWS commands through
+# `ci-identities-ci-job-client assume-role --`, which gets this repository's
+# trusted-jobs or untrusted-jobs role depending on the ref.
+.ci_identity:
+  id_tokens:
+    CI_IDENTITIES_GITLAB_ID_TOKEN:
+      aud: ci-identities
+
 # Build the release tools image once per content hash and export its name.
+# manual_installer_release (.gitlab/installer.yml) uses it too.
 release_tools_image:
   stage: build
-  extends: .release_tools_rules
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $RELEASE_TAG
+    - !reference [.release_tools_rules, rules]
   image: $NYDUS_DD_IMAGE
   tags: ["arch:amd64"]
   needs: []
@@ -245,6 +265,34 @@ check_injector_IIS_release_tree_access:
   script:
     - injector_IIS/scripts/release/check-release-tree.sh access
 
+# Branch pipelines that change the release path check that their CI Identity
+# is untrusted-jobs and cannot write release objects, which also rehearses the
+# assume-role path the publish jobs use. If the write ever succeeds this fails
+# (the object is not public-read).
+check_branch_publish_denied:
+  stage: test
+  extends: [.release_tools, .ci_identity]
+  rules:
+    - *release_path_push
+    - when: never
+  script:
+    - |
+      set -euo pipefail
+      arn="$(ci-identities-ci-job-client assume-role -- aws --region us-east-1 sts get-caller-identity --query Arn --output text)"
+      echo "CI Identity: $arn"
+      case "$arn" in
+        *@inject-browser-sdk@untrusted-jobs/*) ;;
+        *) echo "expected the untrusted-jobs role on a branch" >&2; exit 1 ;;
+      esac
+      key="iis/ci-canary/branch-write-must-be-denied"
+      if ci-identities-ci-job-client assume-role -- aws --region us-east-1 s3api put-object \
+        --bucket rum-auto-instrumentation --key "$key" --body /dev/null 2> err.txt; then
+        echo "branch job could write s3://rum-auto-instrumentation/$key" >&2
+        exit 1
+      fi
+      grep -q AccessDenied err.txt || { cat err.txt >&2; exit 1; }
+      echo "S3 write denied as expected"
+
 .publish_injector_IIS:
   stage: release
   interruptible: false
@@ -254,13 +302,14 @@ check_injector_IIS_release_tree_access:
 
 # Publish only what this tag pipeline built and signed, once every IIS test
 # passed on it. ASAN unit tests are allow_failure everywhere and stay out.
+# Writes go through the trusted-jobs CI Identity: the runner role cannot write
+# to the bucket.
 publish_injector_IIS_s3:
-  extends: .publish_injector_IIS
-  image: $IIS_AGENT_DEPLOY_IMAGE
-  tags: ["arch:amd64"]
+  extends: [.publish_injector_IIS, .release_tools, .ci_identity]
   # Serialize publishers so iis/latest only ever moves forward.
   resource_group: iis-latest
   needs:
+    - release_tools_image
     - injector_IIS_build
     - job: injector_IIS_unit_test
       artifacts: false
@@ -277,7 +326,7 @@ publish_injector_IIS_s3:
     ARCH: x64
   script:
     - injector_IIS/scripts/release/prepare-release.sh "$ARTIFACTS_DIR" dist
-    - injector_IIS/scripts/release/publish-s3.sh dist
+    - ci-identities-ci-job-client assume-role -- injector_IIS/scripts/release/publish-s3.sh dist
   artifacts:
     expire_in: 2 weeks
     paths:

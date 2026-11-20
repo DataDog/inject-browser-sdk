@@ -1,0 +1,21 @@
+[package]
+name = "bench-tools"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "oracle"
+path = "src/oracle.rs"
+
+[dependencies]
+inject-browser-sdk.workspace = true
+bench-common.workspace = true
+
+[[bin]]
+name = "microbench"
+path = "src/microbench.rs"
+
+[[bin]]
+name = "splitcheck"
+path = "src/splitcheck.rs"

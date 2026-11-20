@@ -1,0 +1,36 @@
+## profile-httpd-on-html_512.html (flat, self time)
+# by DSO
+    65.18%  [kernel.kallsyms]    
+    11.33%  libc.so.6            
+     8.23%  apache2              
+     7.25%  libapr-1.so.0.7.2    
+     3.27%  libmod_rum_inject.so 
+     3.12%  libaprutil-1.so.0.6.3
+     0.54%  mod_mpm_event.so     
+     0.34%  mod_mime.so          
+# by symbol
+     7.28%  [kernel.kallsyms]      [k] local_daif_restore                                                     -      -            
+     7.11%  [kernel.kallsyms]      [k] __wake_up_sync_key                                                     -      -            
+     6.31%  [kernel.kallsyms]      [k] wake_up_q                                                              -      -            
+     5.99%  [kernel.kallsyms]      [k] perf_iterate_ctx                                                       -      -            
+     2.10%  libc.so.6              [.] open64                                                                 -      -            
+     2.07%  [kernel.kallsyms]      [k] unmap_vmas                                                             -      -            
+     1.84%  [kernel.kallsyms]      [k] rwsem_spin_on_owner                                                    -      -            
+     1.77%  libapr-1.so.0.7.2      [.] apr_palloc                                                             -      -            
+     1.57%  [kernel.kallsyms]      [k] do_el0_svc                                                             -      -            
+     1.39%  [kernel.kallsyms]      [k] schedule                                                               -      -            
+     1.28%  [kernel.kallsyms]      [k] link_path_walk                                                         -      -            
+     1.15%  libmod_rum_inject.so   [.] inject_browser_sdk::injector::parser::next_markup                      -      -            
+     1.03%  [kernel.kallsyms]      [k] kmem_cache_free                                                        -      -            
+     1.00%  [kernel.kallsyms]      [k] _raw_spin_unlock_irqrestore                                            -      -            
+     0.96%  [kernel.kallsyms]      [k] __arch_copy_to_user                                                    -      -            
+     0.92%  [kernel.kallsyms]      [k] generic_permission                                                     -      -            
+     0.86%  libc.so.6              [.] read                                                                   -      -            
+     0.74%  [kernel.kallsyms]      [k] path_openat                                                            -      -            
+     0.73%  [kernel.kallsyms]      [k] percpu_counter_add_batch                                               -      -            
+     0.69%  [kernel.kallsyms]      [k] arch_counter_get_cntvct                                                -      -            
+     0.66%  [kernel.kallsyms]      [k] do_epoll_ctl                                                           -      -            
+     0.65%  [kernel.kallsyms]      [k] kmem_cache_alloc_noprof                                                -      -            
+     0.63%  libc.so.6              [.] epoll_ctl                                                              -      -            
+     0.62%  libmod_rum_inject.so   [.] inject_browser_sdk::injector::head_open_tag::HeadOpenTagLocator::scan  -      -            
+     0.57%  [kernel.kallsyms]      [k] fdget                                                                  -      -            

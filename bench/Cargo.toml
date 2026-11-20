@@ -1,0 +1,20 @@
+# Standalone workspace for the benchmark modules (not part of the root workspace).
+[workspace]
+resolver = "2"
+members = ["common", "nginx", "httpd", "tools"]
+
+[workspace.package]
+edition = "2021"
+version = "0.0.0"
+publish = false
+
+[workspace.dependencies]
+inject-browser-sdk = { path = "../lib/inject-browser-sdk", features = ["std"] }
+bench-common = { path = "common" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"   # keep symbols for perf

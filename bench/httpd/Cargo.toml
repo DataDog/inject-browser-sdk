@@ -1,0 +1,17 @@
+[package]
+name = "mod-rum-inject"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lib]
+name = "mod_rum_inject"
+crate-type = ["cdylib"]
+
+[dependencies]
+inject-browser-sdk.workspace = true
+bench-common.workspace = true
+
+[build-dependencies]
+bindgen = "0.72"

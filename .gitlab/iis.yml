@@ -4,7 +4,6 @@ variables:
   # rather than relying on a bespoke test-infra-definitions runner image
   # (mirrors DataDog/datadog-agent#42832).
   E2E_LINUX_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/linux:v113129110-33018b2a
-  IIS_AGENT_DEPLOY_IMAGE: registry.ddbuild.io/ci/datadog-agent-buildimages/gitlab_agent_deploy:v113129110-33018b2a
   ARTIFACTS_DIR: artifacts
 
 ########################################
@@ -135,9 +134,15 @@ injector_IIS_build:
       artifacts: false
       optional: true
 
+# Never in tag pipelines: IIS_SIGN is set there, and only injector_IIS_build,
+# gated on check_injector_IIS_release_tree, may sign.
 manual_injector_IIS_build:
   extends: .IIS_build
-  when: manual
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: manual
+      allow_failure: true
 
 injector_IIS_unit_test:
   stage: test

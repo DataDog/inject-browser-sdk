@@ -62,17 +62,52 @@ kernel-mode fast path:
 ### Compressed responses are not injected
 
 The module cannot read a compressed body. A response that already has a `Content-Encoding` header
-when the module sees it goes out untouched. This happens for example behind URL Rewrite + ARR used
-as a reverse proxy, when the backend compresses its responses: IIS forwards the client's
-`Accept-Encoding` header, so the backend sends gzip or brotli HTML.
+when the module sees it goes out untouched. IIS dynamic compression runs after the module, so it
+is fine: the page is injected, then compressed. Two other cases are not.
 
-To get the snippet in, make the backend send uncompressed HTML: turn compression off on the
-backend, or do not forward `Accept-Encoding` to it. With ARR, Microsoft describes how to remove this
-header in the inbound rule with the `HTTP_ACCEPT_ENCODING` server variable, and how to put it back
-for the client: see
-[dealing with 500.52 status codes](https://learn.microsoft.com/en-us/archive/blogs/friis/iis-with-url-rewrite-as-a-reverse-proxy-part-2-dealing-with-500-52-status-codes).
-Without compression from the backend, the response to the client is only compressed if IIS
-compresses it itself.
+IIS static compression serves a compressed copy of a static file to clients that accept gzip. These
+clients get the page without the snippet. Turn static compression off for the site and dynamic
+compression on (role service `Web-Dyn-Compression`). The page is then injected and still sent
+compressed:
+
+```xml
+<system.webServer>
+  <urlCompression doStaticCompression="false" doDynamicCompression="true" />
+</system.webServer>
+```
+
+With URL Rewrite + ARR as a reverse proxy, IIS forwards the client's `Accept-Encoding` header. A
+backend that compresses its responses then sends compressed HTML, which goes out untouched. Turn
+compression off on the backend and dynamic compression on in the proxy site, as above: the proxy
+injects the snippet, then compresses the page.
+
+If the backend must keep compression, clear `Accept-Encoding` in the proxy rule. The backend then
+sends uncompressed HTML and the snippet is injected, but IIS does not compress the response to the
+client, even with dynamic compression on. Putting the header back with an outbound rule, as in
+[dealing with 500.52 status codes](https://learn.microsoft.com/en-us/archive/blogs/friis/iis-with-url-rewrite-as-a-reverse-proxy-part-2-dealing-with-500-52-status-codes),
+does not change that.
+
+```xml
+<rewrite>
+  <rules>
+    <rule name="ReverseProxy" stopProcessing="true">
+      <match url="(.*)" />
+      <serverVariables>
+        <set name="HTTP_ACCEPT_ENCODING" value="" />
+      </serverVariables>
+      <action type="Rewrite" url="http://backend.example:8081/{R:1}" />
+    </rule>
+  </rules>
+</rewrite>
+```
+
+URL Rewrite only sets a server variable it is allowed to. Allow this one once per site:
+
+```powershell
+& "$env:windir\system32\inetsrv\appcmd.exe" set config "My Site" `
+  -section:system.webServer/rewrite/allowedServerVariables "/+[name='HTTP_ACCEPT_ENCODING']" `
+  /commit:apphost
+```
 
 ## Build/installation steps
 1. Configure the project

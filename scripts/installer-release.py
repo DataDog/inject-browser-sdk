@@ -11,15 +11,24 @@ This script automates the release process for the installer.
 Usage:
 ======
 To release the installer:
-./installer-release.py --github-token <GH_TOKEN> --gitlab-token <GITLAB_TOKEN> --version-tag installer-0.1.3 <GH_ACTIONS_RUN_ID>
+./installer-release.py --github-token <GH_TOKEN> --gitlab-token <GITLAB_TOKEN> --version-tag installer-0.1.3 --sha <COMMIT_SHA> <GH_ACTIONS_RUN_ID>
 
 The run id is the GitHub Actions workflow run that produced the installer
 artifacts (the `installer` workflow). Find it in the run URL, e.g.
 https://github.com/DataDog/inject-browser-sdk/actions/runs/<RUN_ID>.
+
+The run must be a successful `installer` run for a push to main of
+DataDog/inject-browser-sdk, at exactly <COMMIT_SHA>. Pull request and fork runs
+are rejected before anything is downloaded or signed. The version tag must not
+exist yet on GitHub or GitLab: both releases create it at <COMMIT_SHA>.
+
+The GitHub release is a draft. Its tag only exists once the draft is published:
+after publishing, check that the tag points to <COMMIT_SHA>.
 """
 
 import re
 import argparse
+import hashlib
 import itertools
 import json
 import os
@@ -29,6 +38,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
 import urllib.request
 import tarfile
 import zipfile
@@ -36,6 +47,8 @@ import zipfile
 project_id = "DataDog%2Finject-browser-sdk" # DataDog/inject-browser-sdk
 gh_repo = "DataDog/inject-browser-sdk"
 gh_api_url = "https://api.github.com"
+gitlab_api_url = "https://gitlab.ddbuild.io/api/v4"
+release_workflow_path = ".github/workflows/installer.yml"
 
 class VerboseDict(dict):
     """This makes debugging a little easier."""
@@ -81,12 +94,13 @@ def gh_request(url, method="GET", accept="application/vnd.github+json"):
         url,
         method=method,
         headers={
-            "Authorization": f"Bearer {github_token}",
             "Accept": accept,
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "inject-browser-sdk-release-script",
         },
     )
+    # Artifact downloads redirect to blob storage, which rejects the token.
+    request.add_unredirected_header("Authorization", f"Bearer {github_token}")
     print("+", request.get_method(), request.full_url)
     try:
         return urllib.request.urlopen(request)
@@ -118,26 +132,85 @@ def list_run_artifacts(run_id: str):
     return artifacts
 
 
-def verify_run_successful(run_id: str):
-    _, run = gh_request_json(f"/repos/{gh_repo}/actions/runs/{run_id}")
-    if run["status"] != "completed" or run["conclusion"] != "success":
-        raise Exception(
-            f'Run {run_id} must have status=completed and conclusion=success '
-            f'(got status={run["status"]}, conclusion={run["conclusion"]}).'
-        )
+def release_sha(value: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise argparse.ArgumentTypeError("must be a full 40-character lowercase commit SHA")
+    return value
+
+
+def check_release_run(run, sha: str):
+    """Raise unless run is a successful installer run for a push to main at sha."""
+    expected = {
+        "status": "completed",
+        "conclusion": "success",
+        "path": release_workflow_path,
+        "event": "push",
+        "head_branch": "main",
+        "head_sha": sha,
+    }
+    for field, value in expected.items():
+        if run[field] != value:
+            raise Exception(
+                f'Run {run["id"]} must have {field}={value!r} (got {run[field]!r}).'
+            )
+    for field in ("repository", "head_repository"):
+        name = run[field]["full_name"]
+        if name != gh_repo:
+            raise Exception(
+                f'Run {run["id"]} must have {field}={gh_repo!r} (got {name!r}).'
+            )
+
+
+def check_tag_absent(version_tag: str):
+    """Raise if version_tag already exists on GitHub or GitLab.
+
+    Both releases create the tag at the release SHA, but reuse an existing tag
+    whatever it points to.
+    """
+    tag_path = urllib.parse.quote(version_tag, safe="")
+    try:
+        gh_request(f"/repos/{gh_repo}/git/ref/tags/{tag_path}")
+    except Exception as error:
+        if not isinstance(error.__cause__, urllib.error.HTTPError) or error.__cause__.code != 404:
+            raise
+    else:
+        raise Exception(f"Tag {version_tag} already exists on GitHub.")
+
+    request = urllib.request.Request(
+        f"{gitlab_api_url}/projects/{project_id}/repository/tags/{tag_path}",
+        headers={"PRIVATE-TOKEN": gitlab_token},
+    )
+    try:
+        urllib.request.urlopen(request)
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+    else:
+        raise Exception(f"Tag {version_tag} already exists on GitLab.")
 
 
 def download_artifact(artifact, destination_dir: Path):
     """Download and extract a GitHub Actions artifact zip into destination_dir.
 
-    Returns the list of files extracted. Rejects any zip member whose path
-    resolves outside destination_dir (zip-slip guard).
+    Returns the list of files extracted. Rejects a zip whose SHA-256 does not
+    match the artifact digest, and any zip member whose path resolves outside
+    destination_dir (zip-slip guard).
     """
-    archive_url = artifact["archive_download_url"]
+    archive_url = f"/repos/{gh_repo}/actions/artifacts/{artifact['id']}/zip"
     zip_path = destination_dir / f"{artifact['name']}.zip"
     print(f"Downloading {archive_url} to {zip_path}")
+    digest = hashlib.sha256()
     with gh_request(archive_url) as response, open(zip_path, "wb") as output:
-        shutil.copyfileobj(response, output)
+        while chunk := response.read(1 << 16):
+            digest.update(chunk)
+            output.write(chunk)
+    actual = f"sha256:{digest.hexdigest()}"
+    if actual != artifact.get("digest"):
+        raise Exception(
+            f"Artifact '{artifact['name']}' ({artifact['id']}) digest mismatch: "
+            f"expected {artifact.get('digest')}, got {actual}."
+        )
+    print(f"Artifact '{artifact['name']}' id={artifact['id']} digest={actual}")
 
     dest_root = destination_dir.resolve()
     extracted = []
@@ -175,13 +248,12 @@ def sign_package(package_path: str) -> None:
 
 def upload_to_package_registry(package_path: str, package_name: str, version: str):
     """Upload a file to the GitLab Generic Package Registry."""
-    API_URL = "https://gitlab.ddbuild.io/api/v4"
     file_name = os.path.basename(package_path)
     
     with open(package_path, 'rb') as f:
         file_content = f.read()
     
-    url = f"{API_URL}/projects/{project_id}/packages/generic/{package_name}/{version}/{file_name}"
+    url = f"{gitlab_api_url}/projects/{project_id}/packages/generic/{package_name}/{version}/{file_name}"
     headers = {
         "PRIVATE-TOKEN": gitlab_token
     }
@@ -200,15 +272,14 @@ def upload_to_package_registry(package_path: str, package_name: str, version: st
     return url
 
 
-def create_gitlab_release(version_tag: str, package_urls: set):
+def create_gitlab_release(version_tag: str, sha: str, package_urls: set):
     """Create a GitLab release with links to the package files."""
-    API_URL = "https://gitlab.ddbuild.io/api/v4"
     headers = {
         "PRIVATE-TOKEN": gitlab_token,
         "Content-Type": "application/json"
     }
 
-    release_url = f"{API_URL}/projects/{project_id}/releases"
+    release_url = f"{gitlab_api_url}/projects/{project_id}/releases"
     assets = {
         "links": [
             {
@@ -223,7 +294,7 @@ def create_gitlab_release(version_tag: str, package_urls: set):
     release_data = {
         "tag_name": version_tag,
         "name": version_tag,
-        "ref": "main",
+        "ref": sha,
         "description": "Release created by automated script",
         "assets": assets
     }
@@ -275,7 +346,9 @@ def release_installer(args) -> int:
         - You must have a GitLab access token with appropriate permissions
         - You must have a GitHub token with `actions:read` scope on DataDog/inject-browser-sdk
     """
-    verify_run_successful(args.run_id)
+    _, run = gh_request_json(f"/repos/{gh_repo}/actions/runs/{args.run_id}")
+    check_release_run(run, args.sha)
+    check_tag_absent(args.version_tag)
     all_artifacts = list_run_artifacts(args.run_id)
     artifacts_by_name = {a["name"]: a for a in all_artifacts}
 
@@ -337,8 +410,12 @@ def release_installer(args) -> int:
             gh_exe,
             "release",
             "create",
+            "--repo",
+            gh_repo,
             "--prerelease",
             "--draft",
+            "--target",
+            args.sha,
             "--title",
             args.version_tag,
             "--notes",
@@ -348,7 +425,8 @@ def release_installer(args) -> int:
         ]
         run(command, check=True)
 
-        create_gitlab_release(args.version_tag, set(package_urls))
+        create_gitlab_release(args.version_tag, args.sha, set(package_urls))
+        print(f"After publishing the GitHub draft, check that {args.version_tag} points to {args.sha}.")
 
     return 0
 
@@ -358,7 +436,13 @@ if __name__ == "__main__":
         description="Build and publish a release of RUM injection installer.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--version-tag", )
+    parser.add_argument("--version-tag", required=True)
+    parser.add_argument(
+        "--sha",
+        required=True,
+        type=release_sha,
+        help="Full commit SHA on main to release. The run must have built exactly this commit.",
+    )
     parser.add_argument(
         "--github-token",
         help="GitHub API token with actions:read scope (defaults to `gh auth token`)",

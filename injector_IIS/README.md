@@ -59,6 +59,51 @@ kernel-mode fast path:
 </system.webServer>
 ```
 
+### Compressed responses are not injected
+
+The module cannot read a compressed body. A response that already has a `Content-Encoding` header
+when the module sees it goes out untouched. IIS dynamic compression runs after the module, so it
+is fine: the page is injected, then compressed. IIS may still skip compression, depending on its
+settings and CPU load (for example `dynamicCompressionDisableCpuUsage`). Two other cases are not
+fine.
+
+IIS static compression serves a compressed copy of a static file to clients that accept gzip. These
+clients get the page without the snippet. Turn static compression off for the site and dynamic
+compression on (role service `Web-Dyn-Compression`). The page is then injected, then compressed by
+dynamic compression:
+
+```xml
+<system.webServer>
+  <urlCompression doStaticCompression="false" doDynamicCompression="true" />
+</system.webServer>
+```
+
+With URL Rewrite + ARR as a reverse proxy, IIS forwards the client's `Accept-Encoding` header. A
+backend that compresses its responses then sends compressed HTML, which goes out untouched. Turn
+compression off on the backend and dynamic compression on in the proxy site, as above: the proxy
+injects the snippet, then compresses the page.
+
+If the backend must keep compression, clear `Accept-Encoding` in the existing proxy rules for the
+HTML routes: add this block inside each `<rule>`, and keep its match, conditions and action. The
+backend then sends uncompressed HTML and the snippet is injected, but IIS does not compress the
+response to the client, even with dynamic compression on. Putting the header back with an outbound rule, as in
+[dealing with 500.52 status codes](https://learn.microsoft.com/en-us/archive/blogs/friis/iis-with-url-rewrite-as-a-reverse-proxy-part-2-dealing-with-500-52-status-codes),
+does not change that.
+
+```xml
+<serverVariables>
+  <set name="HTTP_ACCEPT_ENCODING" value="" />
+</serverVariables>
+```
+
+URL Rewrite only sets a server variable it is allowed to. Allow this one once per site:
+
+```powershell
+& "$env:windir\system32\inetsrv\appcmd.exe" set config "My Site" `
+  -section:system.webServer/rewrite/allowedServerVariables "/+[name='HTTP_ACCEPT_ENCODING']" `
+  /commit:apphost
+```
+
 ## Build/installation steps
 1. Configure the project
 ```sh

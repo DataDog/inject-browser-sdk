@@ -62,11 +62,9 @@ kernel-mode fast path:
 ### Compressed responses are not injected
 
 The module cannot read a compressed body. A response that already has a `Content-Encoding` header
-when the module sees it goes out untouched. This happens for example:
-
-* behind ARR or URL Rewrite used as a reverse proxy, when the backend compresses its responses: IIS
-  forwards the client's `Accept-Encoding` header, so the backend sends gzip or brotli HTML;
-* when the HTML is compressed before it reaches the module.
+when the module sees it goes out untouched. This happens for example behind URL Rewrite + ARR used
+as a reverse proxy, when the backend compresses its responses: IIS forwards the client's
+`Accept-Encoding` header, so the backend sends gzip or brotli HTML.
 
 To get the snippet in, make the backend send uncompressed HTML: turn compression off on the
 backend, or do not forward `Accept-Encoding` to it. With ARR, Microsoft describes how to remove this

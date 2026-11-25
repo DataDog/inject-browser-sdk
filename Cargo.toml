@@ -13,11 +13,9 @@ version = "1.2.1-dev"
 rust-version = "1.91.0"
 
 [workspace.dependencies]
-# no_std library-config landed on DataDog/libdatadog main
-# (7717de8e "feat(library-config)!: make libdd-library-config no_std
-# compatible", PR #1770), so this pins upstream main instead of the former
-# stopgap on a personal branch.
-libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "278117feead185ad0f97863ee19af7e2b99ddfca", default-features = false }
+# Published crate. `default-features = false` keeps it no_std + alloc; the core
+# library turns `std` back on for Windows.
+libdd-library-config = { version = "5.0.1", default-features = false }
 
 [workspace.lints.clippy]
 implicit_return = "deny"

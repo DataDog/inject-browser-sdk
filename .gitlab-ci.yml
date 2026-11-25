@@ -1,6 +1,8 @@
 include:
   # Shared advisory LM-CC jobs, images, model, and scoring profile.
   - remote: https://gitlab-templates.ddbuild.io/dd-repo-tools/llm-cc/ca/21ecb7aa0c42481bd069c77f78a590a2a6849320/llm-cc.yml
+  # Keeps the child pipeline include under GitLab's artifact size cap.
+  - local: .gitlab/llm-cc.yml
   - local: .gitlab/devcontainer.yml
   - local: .adms/go/gitlab.yaml
   - local: .adms/python/gitlab.yaml

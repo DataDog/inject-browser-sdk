@@ -118,10 +118,12 @@ mod no_std_support {
 }
 
 mod injector;
+mod scanner;
 mod snippet;
 mod stable_config;
 
 pub use injector::*;
+pub use scanner::*;
 pub use snippet::*;
 pub use stable_config::*;
 

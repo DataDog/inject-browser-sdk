@@ -92,14 +92,24 @@ def first_diff(a, b):
 
 
 def check(args, sub, page, mode, seed):
+    expected_padded = None
     if mode == "static":
         path = f"/{sub}/{page}"
     else:
         prefix = "upb" if mode.endswith("b") else "up"
         path = f"/{prefix}/{mode.rstrip('b')}/{seed}/{sub}/{page}"
-    if page.endswith(".txt"):
+    if page.endswith(".txt") or args.expect == "original":
         with open(os.path.join(args.pages, sub, page), "rb") as f:
             expected = f.read()
+    elif args.expect == "exact":
+        # The headers wait for the decision: no padding, unless the module had to commit before
+        # it (a `<head>` past the window, an upstream flush) with a length the snippet counts in.
+        with open(os.path.join(args.expected, f"{page}.unpadded"), "rb") as f:
+            expected = f.read()
+        with open(os.path.join(args.expected, f"{page}.padded"), "rb") as f:
+            padded = f.read()
+        if padded != expected and not mode.startswith("chunked"):
+            expected_padded = padded
     else:
         kind = args.expect or ("unpadded" if mode.startswith("chunked") else "padded")
         with open(os.path.join(args.expected, f"{page}.{kind}"), "rb") as f:
@@ -111,6 +121,10 @@ def check(args, sub, page, mode, seed):
         return {"path": path, "problems": [f"exception: {error!r}"]}
     if status != 200:
         problems.append(f"status {status}")
+    if expected_padded is not None and body == expected_padded and body != expected:
+        # Committed early, never injected: padded, as announced.
+        return {"path": path, "padded": True} if not problems else {
+            "path": path, "framing": framing, "problems": problems}
     if body != expected:
         at = first_diff(body, expected)
         problems.append(
@@ -132,8 +146,11 @@ def main():
     parser.add_argument("--seeds", type=int, default=4)
     parser.add_argument("--buffered", action="store_true")
     parser.add_argument("--modes", default="static,cl,chunked", help="comma-separated subset")
-    parser.add_argument("--expect", choices=["padded", "unpadded"],
-                        help="force one expectation for every mode (IIS never pads: unpadded)")
+    parser.add_argument("--expect", choices=["padded", "unpadded", "exact", "original"],
+                        help="force one expectation for every mode (IIS never pads: unpadded); "
+                             "exact: unpadded, padding allowed only where a fixed-length upstream "
+                             "made the module commit before it decided; original: the page "
+                             "unchanged (the read and split ablations)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--out")
     args = parser.parse_args()
@@ -144,17 +161,23 @@ def main():
     jobs = [(sub, page, mode, seed) for sub, page in pages for mode in modes for seed in seeds[mode]]
 
     totals, failures = {m: 0 for m in modes}, {m: [] for m in modes}
+    padded = {m: 0 for m in modes}
     with concurrent.futures.ThreadPoolExecutor(16) as pool:
         futures = {pool.submit(check, args, *job): job for job in jobs}
         for future in concurrent.futures.as_completed(futures):
             mode = futures[future][2]
             totals[mode] += 1
             result = future.result()
-            if result:
+            if result and result.get("padded"):
+                padded[mode] += 1
+            elif result:
                 failures[mode].append(result)
 
-    summary = {m: {"checked": totals[m], "mismatches": len(failures[m])} for m in modes}
-    print(f"[{args.server}] " + ", ".join(f"{m}: {s['mismatches']}/{s['checked']}" for m, s in summary.items()))
+    summary = {m: {"checked": totals[m], "mismatches": len(failures[m]), "padded": padded[m]}
+               for m in modes}
+    print(f"[{args.server}] " + ", ".join(
+        f"{m}: {s['mismatches']}/{s['checked']}" + (f" ({s['padded']} padded)" if s["padded"] else "")
+        for m, s in summary.items()))
     for m in modes:
         for failure in sorted(failures[m], key=lambda f: f["path"])[:10]:
             print(f"  {failure['path']}: {'; '.join(failure['problems'])[:600]}")

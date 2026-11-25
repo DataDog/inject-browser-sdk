@@ -15,6 +15,7 @@ LoadModule proxy_module /usr/lib/apache2/modules/mod_proxy.so
 LoadModule proxy_http_module /usr/lib/apache2/modules/mod_proxy_http.so
 LoadModule headers_module /usr/lib/apache2/modules/mod_headers.so
 @MODULE_LOAD@
+@SSL_LOAD@
 
 User www-data
 Group www-data
@@ -39,6 +40,7 @@ MaxRequestWorkers 512
 MaxConnectionsPerChild 0
 ListenBacklog 4096
 
+@SSL_CONF@
 DocumentRoot @PAGES@
 <Directory @PAGES@>
     Require all granted

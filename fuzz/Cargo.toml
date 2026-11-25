@@ -55,5 +55,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "scanner"
+path = "fuzz_targets/scanner.rs"
+test = false
+doc = false
+bench = false
+
 [lints]
 workspace = true

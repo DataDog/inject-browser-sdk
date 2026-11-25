@@ -37,7 +37,7 @@ def to_ms(value):
 
 def run_wrk(args, path, conns):
     cmd = ["taskset", "-c", args.wrk_cpus, "wrk", f"-t{args.threads}", f"-c{conns}", f"-d{args.duration}",
-           "--latency", "--timeout", "10s", f"http://127.0.0.1:{args.port}{path}"]
+           "--latency", "--timeout", "10s", f"{args.scheme}://127.0.0.1:{args.port}{path}"]
     return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
 
 
@@ -58,6 +58,7 @@ def parse_wrk(out):
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--scheme", default="http", choices=["http", "https"])
     for flag in ("--server", "--variant", "--pids", "--pages", "--conns", "--out", "--wrk-cpus"):
         p.add_argument(flag, required=True)
     p.add_argument("--port", type=int, required=True)
@@ -78,6 +79,7 @@ def main():
                 result.update(server=args.server, variant=args.variant, page=page, conns=conns,
                               layout=os.environ.get("LAYOUT_SEED"),
                               resp_headers_kb=int(os.environ.get("RESP_HEADERS_KB", "0")),
+                              tls=args.scheme == "https",
                               server_cpu_s=round(cpu, 3),
                               cpu_us_per_req=round(cpu / max(result["requests"], 1) * 1e6, 2))
                 print(f"{args.server:5} {args.variant:3} {page:24} c={conns:<4} {result['rps']:>10.0f} req/s"

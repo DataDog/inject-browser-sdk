@@ -17,6 +17,7 @@ fn main() {
         .clang_arg(format!("-I{apr}"))
         .allowlist_function("ap_(register_output_filter|remove_output_filter|pass_brigade|set_content_length|hook_insert_filter)")
         .allowlist_function("apr_(table_get|table_set|table_unset|bucket_heap_create|pool_cleanup_register|pool_cleanup_null)")
+        .allowlist_function("apr_(brigade_create|bucket_immortal_create|bucket_pool_create|os_file_get|palloc)")
         .allowlist_type("module|request_rec|ap_filter_t|apr_bucket.*|ap_filter_type")
         .allowlist_var("apr_bucket_type_eos|apr_bucket_type_file|apr_bucket_type_flush|MODULE_MAGIC_.*|APR_HOOK_MIDDLE|APR_SUCCESS")
         .default_enum_style(bindgen::EnumVariation::Consts)

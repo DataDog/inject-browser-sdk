@@ -15,6 +15,6 @@ exec docker run "${docker_args[@]}" --cpuset-cpus "${BENCH_CPUSET:-4-7,20-23}" \
     -v "$repo":/src -w /src/bench \
     -v rum-bench-cargo:/usr/local/cargo/registry -v rum-bench-target:/src/bench/target \
     -e SERVER_CPUS="${SERVER_CPUS:-4,5}" -e WRK_CPUS="${WRK_CPUS:-20-23}" -e BENCH_CPUS="${BENCH_CPUS:-4}" \
-    -e LAYOUTS -e HEADER_SIZES -e DURATION -e CONNS -e SERVERS -e PERF_PAGES \
+    -e LAYOUTS -e VARIANTS -e TLS -e HEADER_SIZES -e DURATION -e CONNS -e SERVERS -e PERF_PAGES \
     -e RUSTUP_TOOLCHAIN="$(docker run --rm rum-inject-bench:base rustup default | cut -d" " -f1)" \
     rum-inject-bench:base "$@"

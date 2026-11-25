@@ -59,6 +59,24 @@ kernel-mode fast path:
 </system.webServer>
 ```
 
+### Compressed responses are not injected
+
+The module cannot read a compressed body. A response that already has a `Content-Encoding` header
+when the module sees it goes out untouched, and is counted as skipped with `reason:compressed_html`.
+This happens for example:
+
+* behind ARR or URL Rewrite used as a reverse proxy, when the backend compresses its responses: IIS
+  forwards the client's `Accept-Encoding` header, so the backend sends gzip or brotli HTML;
+* when the HTML is compressed before it reaches the module.
+
+To get the snippet in, make the backend send uncompressed HTML: turn compression off on the
+backend, or do not forward `Accept-Encoding` to it. With ARR, Microsoft describes how to remove this
+header in the inbound rule with the `HTTP_ACCEPT_ENCODING` server variable, and how to put it back
+for the client: see
+[dealing with 500.52 status codes](https://learn.microsoft.com/en-us/archive/blogs/friis/iis-with-url-rewrite-as-a-reverse-proxy-part-2-dealing-with-500-52-status-codes).
+Without compression from the backend, the response to the client is only compressed if IIS
+compresses it itself.
+
 ## Build/installation steps
 1. Configure the project
 ```sh

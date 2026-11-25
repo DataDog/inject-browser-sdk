@@ -90,10 +90,19 @@ class Environment : public testing::Environment {
     datadog::telemetry::Configuration config;
     config.enabled = true;
     config.integration_name = "iis";
+    config.report_metrics = true;
+    // The scheduler tells the tasks apart by their interval.
+    config.metrics_interval_seconds = 60;
+    config.heartbeat_interval_seconds = 10;
+    config.extended_heartbeat_interval_seconds = 3600;
     auto finalized = datadog::telemetry::finalize_config(config);
     ASSERT_EQ(finalized.if_error(), nullptr);
     metrics_interval_ = finalized->metrics_interval;
     heartbeat_interval_ = finalized->heartbeat_interval;
+    // Environment variables win over the values above.
+    ASSERT_NE(metrics_interval_, heartbeat_interval_);
+    ASSERT_NE(finalized->extended_heartbeat_interval, metrics_interval_);
+    ASSERT_NE(finalized->extended_heartbeat_interval, heartbeat_interval_);
     datadog::telemetry::init(*finalized, std::make_shared<NullLogger>(), client_, scheduler_,
                              datadog::tracing::HTTPClient::URL{"http", "localhost:8126", "", ""});
   }
@@ -148,7 +157,7 @@ inline Environment* const environment =
 // Drops the injection counts so far.
 inline void reset() { environment->take(); }
 
-// Returns the injection counts since the last call, described, in order. Each must carry the
+// Returns the injection counts since the last call, described and sorted. Each must carry the
 // application id and remote config tags.
 inline std::vector<std::string> take_counts() {
   std::vector<std::string> described;

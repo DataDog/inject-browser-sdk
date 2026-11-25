@@ -200,7 +200,7 @@ const NotInjected k_internal_error{&telemetry::injection_failed, "reason:interna
 // A static file with `injectStaticFiles` off.
 const NotInjected k_static_files_disabled{&telemetry::injection_skipped,
                                           "reason:static_files_disabled"};
-// A chunk the injector cannot read: not in memory, or a file that cannot be read.
+// A chunk the injector cannot read: neither in memory nor a file.
 const NotInjected k_unreadable_body{&telemetry::injection_skipped, "reason:unreadable_body"};
 
 // How much of a file the first read takes: most static pages whole. Each later one reads as much
@@ -326,7 +326,7 @@ std::variant<Injection, NotInjected> write_response(IHttpContext& http_context,
         return k_missing_header_tag;
       }
       if (!read_file_chunk(http_context, http_response, response, i, file_read)) {
-        return k_unreadable_body;
+        return k_internal_error;
       }
     }
     const HTTP_DATA_CHUNK& chunk = response.pEntityChunks[i];
@@ -889,9 +889,10 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
     // This part goes out, but for what the injector holds back of a head window it has yet to
     // decide on, and the next ones go to the same injector.
     auto* carried = snippet == nullptr ? nullptr : request_state(pHttpContext, true);
-    const char* error = carried == nullptr ? "Error storing the injection for the next parts"
-                                           : hold_back(pHttpResponse, *pResponseStruct,
-                                                       injector_held_back_length(injector.get()));
+    const char* error = snippet == nullptr   ? "Error copying the snippet for the next parts"
+                        : carried == nullptr ? "Error storing the injection for the next parts"
+                                             : hold_back(pHttpResponse, *pResponseStruct,
+                                                         injector_held_back_length(injector.get()));
     if (error != nullptr) {
       logger.error(error);
       count_injection(ctx, k_internal_error);
@@ -906,7 +907,8 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
       carried->injector = std::move(injector);
       return RQ_NOTIFICATION_CONTINUE;
     }
-  } else {
+  } else if (may_carry || !send.more_data) {
+    // Otherwise the injector downstream takes over the response: nothing to count here.
     count_injection(ctx, std::get<NotInjected>(written));
   }
 
@@ -951,9 +953,9 @@ HttpModule::ContinueInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRe
       if (streamed.injected) {
         count_injected(*ctx);
       } else {
-        count_injection(*ctx, streamed.error != nullptr ? k_internal_error
-                              : streamed.readable       ? k_missing_header_tag
-                                                        : k_unreadable_body);
+        // An unreadable part fails too: the announced length may already count the snippet.
+        count_injection(*ctx, streamed.error == nullptr && streamed.readable ? k_missing_header_tag
+                                                                             : k_internal_error);
       }
     }
     state->injector.reset();

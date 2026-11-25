@@ -571,7 +571,7 @@ static std::string assembleResponseBody(const PreparedChunkedResponse& pr) {
   return responseBody(pr.raw);
 }
 
-// Injection counts, as "<counter> <reason tag>", in order.
+// Injection counts, as "<counter> <reason tag>", sorted.
 using Counts = std::vector<std::string>;
 
 // ---------------------------------------------------------------------------
@@ -1068,7 +1068,7 @@ TEST(InjectionPipeline, ChunksNotInMemory) {
     EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr),
               RQ_NOTIFICATION_FINISH_REQUEST);
     EXPECT_EQ(telemetry_spy::take_counts(),
-              Counts{before ? "injection.skipped reason:unreadable_body" : "injection.succeed"});
+              Counts{before ? "injection.failed reason:internal_error" : "injection.succeed"});
 
     const int file_at = before ? 0 : pr.raw.EntityChunkCount - 1;
     EXPECT_EQ(pr.raw.pEntityChunks[file_at].DataChunkType, HttpDataChunkFromFileHandle);
@@ -1088,6 +1088,27 @@ TEST(InjectionPipeline, ChunksNotInMemory) {
       EXPECT_TRUE(served.ends_with(head.substr(head.size() - 100))) << served;
     }
   }
+}
+
+// A chunk neither in memory nor a file, from the fragment cache for instance, cannot be read: the
+// response goes out untouched, and the injection counts as skipped.
+TEST(InjectionPipeline, ChunkNeitherInMemoryNorAFileIsSkipped) {
+  ModuleUnderTest module;
+  PreparedChunkedResponse pr;
+  setupChunkedHtmlResponse(module.httpCtx, module.httpResp, &module.app, &module.metadata, pr,
+                           {"fragment", "<html><head></head></html>"});
+  pr.chunks[0] = {};
+  pr.chunks[0].DataChunkType = HttpDataChunkFromFragmentCache;
+
+  EXPECT_CALL(module.httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .Times(0);
+  EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+  telemetry_spy::reset();
+  EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr),
+            RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.skipped reason:unreadable_body"});
+  ASSERT_EQ(pr.raw.EntityChunkCount, 2);
+  EXPECT_EQ(pr.raw.pEntityChunks[0].DataChunkType, HttpDataChunkFromFragmentCache);
 }
 
 // A static file as IIS serves one: a single chunk with the whole file as its range, through a
@@ -1553,7 +1574,7 @@ TEST(InjectionPipeline, HeldBackBytesGoOutAheadOfAChunkNotInMemory) {
   EXPECT_EQ(response.send(first), "");
   EXPECT_EQ(response.send(second), first.body + second.body + "[file]");
   EXPECT_EQ(response.send(last), last.body + std::string(response.snippet_length(), ' '));
-  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.skipped reason:unreadable_body"});
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:internal_error"});
   response.stop();
 }
 
@@ -1732,6 +1753,9 @@ TEST(InjectionPipeline, DownstreamInjectorKeepsLaterPartsUninjected) {
     EXPECT_EQ(response.extended_to,
               head_in_first_part ? std::to_string(100000 + response.snippet_length()) : "");
     EXPECT_EQ(response.send(last), last.body);
+    // Not injected here: the injector downstream takes over, so nothing is counted.
+    EXPECT_EQ(telemetry_spy::take_counts(),
+              head_in_first_part ? Counts{"injection.succeed"} : Counts{});
     response.stop();
   }
 }

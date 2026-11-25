@@ -200,8 +200,8 @@ const NotInjected k_internal_error{&telemetry::injection_failed, "reason:interna
 // A static file with `injectStaticFiles` off.
 const NotInjected k_static_files_disabled{&telemetry::injection_skipped,
                                           "reason:static_files_disabled"};
-// A chunk the injector cannot read: neither in memory nor a file, from the fragment cache for
-// instance.
+// A chunk the module does not read where it is: neither in memory nor a file, or a file in a later
+// part.
 const NotInjected k_unsupported_chunk_type{&telemetry::injection_failed,
                                            "reason:unsupported_chunk_type"};
 
@@ -361,7 +361,7 @@ std::variant<Injection, NotInjected> write_response(IHttpContext& http_context,
 // points to.
 //
 // Returns an error message, or nullptr. Splicing only fails before it touches the response, which
-// is then served untouched.
+// is then served untouched. A header error is only logged: the snippet is in already.
 const char* apply_injection(IHttpContext& http_context, IHttpResponse& http_response,
                             HTTP_RESPONSE& response, const Injection& injection,
                             const Injector& injector, bool headers_gone, Logger& logger) {
@@ -375,7 +375,7 @@ const char* apply_injection(IHttpContext& http_context, IHttpResponse& http_resp
   }
   extend_content_length(http_response, injector, logger);
   if (FAILED(http_response.SetHeader(k_injection_header, "1", 1, TRUE))) {
-    return "Error setting the injection header";
+    logger.error("Error setting the injection header");
   }
   return nullptr;
 }

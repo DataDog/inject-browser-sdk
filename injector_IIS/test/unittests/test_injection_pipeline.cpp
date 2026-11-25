@@ -2130,6 +2130,43 @@ TEST(InjectionPipeline, AllocationFailureLeavesTheResponseUntouched) {
   mod.global->Terminate();
 }
 
+// The injection header fails after the snippet went in: the injection still counts as a success.
+TEST(InjectionPipeline, InjectionHeaderFailureStillCountsTheInjection) {
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  const auto mod = registerModule(mockServer);
+  ASSERT_NE(mod.global, nullptr);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+
+  CHttpModule* httpMod = nullptr;
+  ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  PreparedResponse pr;
+  setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr,
+                    "<html><head><title>t</title></head><body>hi</body></html>");
+
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .WillOnce(Return(E_FAIL));
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+
+  telemetry_spy::reset();
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_NE(responseBody(pr.raw).find("DD_RUM"), std::string::npos);
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.succeed"});
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
 TEST(InjectionPipeline, DisabledConfig) {
   MockRumConfigElement rumConfig(false, {
                                             {L"applicationId", L"test-app-id"},

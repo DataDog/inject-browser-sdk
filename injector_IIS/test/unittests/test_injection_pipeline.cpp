@@ -2156,10 +2156,10 @@ TEST(InjectionPipeline, InjectionHeaderFailureStillCountsTheInjection) {
 
   EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
       .WillOnce(Return(E_FAIL));
-  EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
 
   telemetry_spy::reset();
-  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
   EXPECT_NE(responseBody(pr.raw).find("DD_RUM"), std::string::npos);
   EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.succeed"});
 

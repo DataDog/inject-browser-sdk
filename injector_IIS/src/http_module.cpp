@@ -361,7 +361,8 @@ std::variant<Injection, NotInjected> write_response(IHttpContext& http_context,
 // points to.
 //
 // Returns an error message, or nullptr. Splicing only fails before it touches the response, which
-// is then served untouched. A header error is only logged: the snippet is in already.
+// is then served untouched. A header error returns k_injection_header_error: the snippet is in.
+const char* const k_injection_header_error = "Error setting the injection header";
 const char* apply_injection(IHttpContext& http_context, IHttpResponse& http_response,
                             HTTP_RESPONSE& response, const Injection& injection,
                             const Injector& injector, bool headers_gone, Logger& logger) {
@@ -375,7 +376,7 @@ const char* apply_injection(IHttpContext& http_context, IHttpResponse& http_resp
   }
   extend_content_length(http_response, injector, logger);
   if (FAILED(http_response.SetHeader(k_injection_header, "1", 1, TRUE))) {
-    logger.error("Error setting the injection header");
+    return k_injection_header_error;
   }
   return nullptr;
 }
@@ -883,7 +884,11 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
     if (const char* error = apply_injection(pHttpContext, pHttpResponse, *pResponseStruct,
                                             *injection, *injector, send.headers_gone, logger)) {
       logger.error(error);
-      count_injection(ctx, k_internal_error);
+      if (error == k_injection_header_error) {
+        count_injected(ctx);
+      } else {
+        count_injection(ctx, k_internal_error);
+      }
       return RQ_NOTIFICATION_CONTINUE;
     }
     count_injected(ctx);

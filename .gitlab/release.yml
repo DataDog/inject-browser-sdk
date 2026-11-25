@@ -108,7 +108,9 @@ variables:
     CI_IDENTITIES_GITLAB_ID_TOKEN:
       aud: ci-identities
 
-# Build the release tools image once per content hash and export its name.
+# Build the release tools image in every pipeline that needs it and export it
+# by digest. Branch pipelines can push to the same registry repository, so
+# jobs with trusted credentials must never reuse an existing tag.
 # manual_installer_release (.gitlab/installer.yml) uses it too.
 release_tools_image:
   stage: build
@@ -124,20 +126,14 @@ release_tools_image:
   script:
     - |
       set -euo pipefail
-      TAG=$(cat docker/Dockerfile.release-tools tools/release-please/package.json \
-        tools/release-please/package-lock.json tools/release-please/validate-config.mjs \
-        | sha256sum | cut -c1-12)
-      IMAGE="${RELEASE_TOOLS_IMAGE_NAME}:${TAG}"
-      echo "RELEASE_TOOLS_IMAGE=${IMAGE}" > release-tools.env
-      if crane manifest "${IMAGE}" > /dev/null 2>&1; then
-        echo "Image ${IMAGE} already exists in registry"
-      else
-        docker buildx build --platform linux/amd64 --push -t "${IMAGE}" \
-          -f docker/Dockerfile.release-tools .
-      fi
-      # Runners only pull signed images. Signing is idempotent, so also sign
-      # on a cache hit in case an earlier push was never signed.
-      ddsign sign "${IMAGE}@$(crane digest "${IMAGE}")"
+      IMAGE="${RELEASE_TOOLS_IMAGE_NAME}:${CI_PIPELINE_ID}"
+      docker buildx build --platform linux/amd64 --push -t "${IMAGE}" \
+        --metadata-file meta.json -f docker/Dockerfile.release-tools .
+      # Take the digest from this build, not from the registry.
+      DIGEST=$(jq -er '."containerimage.digest"' meta.json)
+      echo "RELEASE_TOOLS_IMAGE=${IMAGE}@${DIGEST}" > release-tools.env
+      # Runners only pull signed images.
+      ddsign sign "${IMAGE}@${DIGEST}"
   artifacts:
     reports:
       dotenv: release-tools.env

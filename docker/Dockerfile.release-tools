@@ -1,7 +1,7 @@
 # Release automation image: dd-octo-sts, gh, git, jq and curl from the octo-sts
 # CI base, adms for MASS, the AWS CLI and the CI Identities client for S3
-# publishing, plus Node and a lockfile-pinned release-please. Built per content
-# hash by release_tools_image so release jobs never install tools at runtime.
+# publishing, plus Node and a lockfile-pinned release-please. Built per pipeline
+# by release_tools_image so release jobs never install tools at runtime.
 ARG NODE_IMAGE=registry.ddbuild.io/images/mirror/node:24-bookworm@sha256:222f704ce7f499c7bd7d101c993b980d86393e87bb54d416bcfcfe8e62aa9f64
 ARG OCTO_STS_IMAGE=registry.ddbuild.io/images/dd-octo-sts-ci-base:2026.08-2@sha256:c9815338b8aeb4656f045ff93952a0472e83f6d9f53ea5832ef42c04b5ec1e14
 ARG ADMS_IMAGE=registry.ddbuild.io/adms-cli@sha256:4ab06229c5e7a3578f2b2c1c5a6687d183417d7d205448a3d16505776eea168c

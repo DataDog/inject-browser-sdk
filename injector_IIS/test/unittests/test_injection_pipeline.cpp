@@ -792,7 +792,7 @@ TEST(InjectionPipeline, NonHtmlResponseLeavesTheResponseUntouched) {
   telemetry_spy::reset();
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
   EXPECT_EQ(assembleResponseBody(pr), bodies[0] + bodies[1]);
-  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:missing_header_tag"});
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:no_injection_point"});
 
   mod.factory->Terminate();
   mod.global->Terminate();
@@ -1091,8 +1091,8 @@ TEST(InjectionPipeline, ChunksNotInMemory) {
 }
 
 // A chunk neither in memory nor a file, from the fragment cache for instance, cannot be read: the
-// response goes out untouched, and the injection counts as skipped.
-TEST(InjectionPipeline, ChunkNeitherInMemoryNorAFileIsSkipped) {
+// response goes out untouched, and the injection counts as failed.
+TEST(InjectionPipeline, ChunkNeitherInMemoryNorAFileIsNotInjected) {
   ModuleUnderTest module;
   PreparedChunkedResponse pr;
   setupChunkedHtmlResponse(module.httpCtx, module.httpResp, &module.app, &module.metadata, pr,
@@ -1106,7 +1106,7 @@ TEST(InjectionPipeline, ChunkNeitherInMemoryNorAFileIsSkipped) {
   telemetry_spy::reset();
   EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr),
             RQ_NOTIFICATION_FINISH_REQUEST);
-  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.skipped reason:unreadable_body"});
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:unsupported_chunk_type"});
   ASSERT_EQ(pr.raw.EntityChunkCount, 2);
   EXPECT_EQ(pr.raw.pEntityChunks[0].DataChunkType, HttpDataChunkFromFragmentCache);
 }
@@ -1256,7 +1256,7 @@ TEST(InjectionPipeline, StaticFileNotInjectedIsReadOnlyAsFarAsNeeded) {
   EXPECT_EQ(file.body(pr.raw), file.content());
   ASSERT_EQ(pr.raw.EntityChunkCount, 2);
   EXPECT_EQ(pr.raw.pEntityChunks[1].FromFileHandle.ByteRange.StartingOffset.QuadPart, 16 * 1024);
-  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:missing_header_tag"});
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:no_injection_point"});
 }
 
 // A static file whose injection point is not found in the bytes the module may read of it: the
@@ -1273,7 +1273,7 @@ TEST(InjectionPipeline, StaticFileReadLimit) {
   const auto& rest = pr.raw.pEntityChunks[pr.raw.EntityChunkCount - 1];
   ASSERT_EQ(rest.DataChunkType, HttpDataChunkFromFileHandle);
   EXPECT_EQ(rest.FromFileHandle.ByteRange.StartingOffset.QuadPart, 1024 * 1024);
-  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:missing_header_tag"});
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:no_injection_point"});
 }
 
 // With `injectStaticFiles` off, a static file is not read, and goes out from the file untouched.
@@ -1611,7 +1611,7 @@ TEST(InjectionPipeline, CarriedInjectionPadsTheLastPart) {
     EXPECT_EQ(response.send(second), second.body);
     const std::string padding = announced ? std::string(response.snippet_length(), ' ') : "";
     EXPECT_EQ(response.send(last), last.body + padding);
-    EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:missing_header_tag"});
+    EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:no_injection_point"});
     response.stop();
   }
 }

@@ -195,13 +195,15 @@ struct NotInjected {
   const char* reason;
 };
 
-const NotInjected k_missing_header_tag{&telemetry::injection_failed, "reason:missing_header_tag"};
+const NotInjected k_no_injection_point{&telemetry::injection_failed, "reason:no_injection_point"};
 const NotInjected k_internal_error{&telemetry::injection_failed, "reason:internal_error"};
 // A static file with `injectStaticFiles` off.
 const NotInjected k_static_files_disabled{&telemetry::injection_skipped,
                                           "reason:static_files_disabled"};
-// A chunk the injector cannot read: neither in memory nor a file.
-const NotInjected k_unreadable_body{&telemetry::injection_skipped, "reason:unreadable_body"};
+// A chunk the injector cannot read: neither in memory nor a file, from the fragment cache for
+// instance.
+const NotInjected k_unsupported_chunk_type{&telemetry::injection_failed,
+                                           "reason:unsupported_chunk_type"};
 
 // How much of a file the first read takes: most static pages whole. Each later one reads as much
 // again as was read so far, up to k_file_read_limit bytes of files in all, while the injector has
@@ -315,7 +317,7 @@ std::variant<Injection, NotInjected> write_response(IHttpContext& http_context,
   for (int i = 0; i < response.EntityChunkCount; i++) {
     // The injector gave up: the snippet cannot go in anymore.
     if (!injector_is_pending(&injector)) {
-      return k_missing_header_tag;
+      return k_no_injection_point;
     }
     if (response.pEntityChunks[i].DataChunkType == HttpDataChunkFromFileHandle) {
       if (!read_files) {
@@ -323,7 +325,7 @@ std::variant<Injection, NotInjected> write_response(IHttpContext& http_context,
       }
       // Read as far as allowed, and still no injection point.
       if (file_read >= k_file_read_limit) {
-        return k_missing_header_tag;
+        return k_no_injection_point;
       }
       if (!read_file_chunk(http_context, http_response, response, i, file_read)) {
         return k_internal_error;
@@ -331,7 +333,7 @@ std::variant<Injection, NotInjected> write_response(IHttpContext& http_context,
     }
     const HTTP_DATA_CHUNK& chunk = response.pEntityChunks[i];
     if (chunk.DataChunkType != HttpDataChunkFromMemory) {
-      return k_unreadable_body;
+      return k_unsupported_chunk_type;
     }
     const size_t withheld = injector_held_back_length(&injector);
     const InjectorResult result =
@@ -342,7 +344,7 @@ std::variant<Injection, NotInjected> write_response(IHttpContext& http_context,
     }
   }
   if (more_data) {
-    return k_missing_header_tag;
+    return k_no_injection_point;
   }
   const size_t withheld = injector_held_back_length(&injector);
   // Without padding: the queued chunks keep the original length when nothing is injected.
@@ -350,7 +352,7 @@ std::variant<Injection, NotInjected> write_response(IHttpContext& http_context,
   if (result.injected) {
     return Injection{{response.EntityChunkCount, withheld}, result};
   }
-  return k_missing_header_tag;
+  return k_no_injection_point;
 }
 
 // Has the response serve `injection`: its entity chunks rebuilt around the snippet, then its
@@ -954,7 +956,7 @@ HttpModule::ContinueInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRe
         count_injected(*ctx);
       } else {
         // An unreadable part fails too: the announced length may already count the snippet.
-        count_injection(*ctx, streamed.error == nullptr && streamed.readable ? k_missing_header_tag
+        count_injection(*ctx, streamed.error == nullptr && streamed.readable ? k_no_injection_point
                                                                              : k_internal_error);
       }
     }

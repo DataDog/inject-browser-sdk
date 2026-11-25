@@ -67,7 +67,7 @@ struct Count {
   std::string metric;
   std::vector<std::string> tags;
 
-  // The counter and its reason tag, if any: "injection.failed reason:missing_header_tag".
+  // The counter and its reason tag, if any: "injection.failed reason:no_injection_point".
   std::string describe() const {
     std::string description = metric;
     for (const std::string& tag : tags) {

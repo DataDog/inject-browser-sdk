@@ -955,9 +955,9 @@ HttpModule::ContinueInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRe
       if (streamed.injected) {
         count_injected(*ctx);
       } else {
-        // An unreadable part fails too: the announced length may already count the snippet.
-        count_injection(*ctx, streamed.error == nullptr && streamed.readable ? k_no_injection_point
-                                                                             : k_internal_error);
+        count_injection(*ctx, streamed.error != nullptr ? k_internal_error
+                              : !streamed.readable      ? k_unsupported_chunk_type
+                                                        : k_no_injection_point);
       }
     }
     state->injector.reset();

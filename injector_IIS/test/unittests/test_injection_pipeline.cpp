@@ -1574,7 +1574,7 @@ TEST(InjectionPipeline, HeldBackBytesGoOutAheadOfAChunkNotInMemory) {
   EXPECT_EQ(response.send(first), "");
   EXPECT_EQ(response.send(second), first.body + second.body + "[file]");
   EXPECT_EQ(response.send(last), last.body + std::string(response.snippet_length(), ' '));
-  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:internal_error"});
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:unsupported_chunk_type"});
   response.stop();
 }
 

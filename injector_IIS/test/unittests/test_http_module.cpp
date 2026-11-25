@@ -7,7 +7,11 @@
 #include "http_module.h"
 #include "mocks.h"
 #include "module_context.h"
+#include "telemetry_spy.h"
 #include "gtest/gtest.h"
+
+#include <string>
+#include <vector>
 
 using namespace datadog::rum;
 
@@ -50,7 +54,12 @@ TEST_P(HttpModuleTest, ShouldAttemptInjection_ContentType) {
                       // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
                       Return(content_type.data())));
 
+  moduleContext.application_id_tag = "application_id:test-app-id";
+  moduleContext.remote_config_tag = "remote_config_used:false";
+  telemetry_spy::reset();
   EXPECT_EQ(expected, module.ShouldAttemptInjection(httpResponse, moduleContext));
+  EXPECT_EQ(telemetry_spy::take_counts(),
+            std::vector<std::string>{"injection.skipped reason:content-type"});
 }
 
 constexpr ContentTypeParams kContentTypes[] = {

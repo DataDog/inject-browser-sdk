@@ -16,9 +16,9 @@
 #include <format>
 #include <limits>
 #include <memory>
-#include <optional>
 #include <span>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace datadog::rum {
@@ -189,6 +189,22 @@ struct Injection {
   InjectorResult result;
 };
 
+// Why the snippet did not go in: the counter and the reason tag it is counted with.
+struct NotInjected {
+  const datadog::telemetry::Counter* counter;
+  const char* reason;
+};
+
+const NotInjected k_no_injection_point{&telemetry::injection_failed, "reason:no_injection_point"};
+const NotInjected k_internal_error{&telemetry::injection_failed, "reason:internal_error"};
+// A static file with `injectStaticFiles` off.
+const NotInjected k_static_files_disabled{&telemetry::injection_skipped,
+                                          "reason:static_files_disabled"};
+// A chunk the module does not read where it is: neither in memory nor a file, or a file in a later
+// part.
+const NotInjected k_unsupported_chunk_type{&telemetry::injection_failed,
+                                           "reason:unsupported_chunk_type"};
+
 // How much of a file the first read takes: most static pages whole. Each later one reads as much
 // again as was read so far, up to k_file_read_limit bytes of files in all, while the injector has
 // not decided.
@@ -276,7 +292,7 @@ bool read_file_chunk(IHttpContext& http_context, IHttpResponse& http_response,
 // Writes the response's entity chunks to `injector` until the snippet comes out, which happens at
 // `injector_end` for a response shorter than the head window. The queued chunks are left as they
 // are: they already carry every byte in order, which is how they serve a response the snippet never
-// goes into. Returns nullopt then.
+// goes into. Returns why then.
 //
 // While it looks for the injection point, the injector holds back the first kilobyte, which decides
 // where in `<head>` the snippet goes, and up to 10 KiB when the head is a run of `<meta>` and
@@ -292,21 +308,32 @@ bool read_file_chunk(IHttpContext& http_context, IHttpResponse& http_response,
 // served as it is past an injection point found before it. And when more of the response
 // follows in later sends (`more_data`), the end of these chunks is not the end of the document:
 // the injector is not ended, so it never injects on the strength of a document cut short.
-std::optional<Injection> write_response(IHttpContext& http_context, IHttpResponse& http_response,
-                                        Injector& injector, HTTP_RESPONSE& response, bool more_data,
-                                        bool read_files) {
+std::variant<Injection, NotInjected> write_response(IHttpContext& http_context,
+                                                    IHttpResponse& http_response,
+                                                    Injector& injector, HTTP_RESPONSE& response,
+                                                    bool more_data, bool read_files) {
   uint64_t file_read = 0;
   // Reading a file chunk rewrites the chunk list: the count is read on every turn.
   for (int i = 0; i < response.EntityChunkCount; i++) {
-    // Read only while the snippet may still go in.
-    if (response.pEntityChunks[i].DataChunkType == HttpDataChunkFromFileHandle &&
-        (!read_files || !injector_is_pending(&injector) ||
-         !read_file_chunk(http_context, http_response, response, i, file_read))) {
-      return std::nullopt;
+    // The injector gave up: the snippet cannot go in anymore.
+    if (!injector_is_pending(&injector)) {
+      return k_no_injection_point;
+    }
+    if (response.pEntityChunks[i].DataChunkType == HttpDataChunkFromFileHandle) {
+      if (!read_files) {
+        return k_static_files_disabled;
+      }
+      // Read as far as allowed, and still no injection point.
+      if (file_read >= k_file_read_limit) {
+        return k_no_injection_point;
+      }
+      if (!read_file_chunk(http_context, http_response, response, i, file_read)) {
+        return k_internal_error;
+      }
     }
     const HTTP_DATA_CHUNK& chunk = response.pEntityChunks[i];
     if (chunk.DataChunkType != HttpDataChunkFromMemory) {
-      return std::nullopt;
+      return k_unsupported_chunk_type;
     }
     const size_t withheld = injector_held_back_length(&injector);
     const InjectorResult result =
@@ -317,7 +344,7 @@ std::optional<Injection> write_response(IHttpContext& http_context, IHttpRespons
     }
   }
   if (more_data) {
-    return std::nullopt;
+    return k_no_injection_point;
   }
   const size_t withheld = injector_held_back_length(&injector);
   // Without padding: the queued chunks keep the original length when nothing is injected.
@@ -325,7 +352,7 @@ std::optional<Injection> write_response(IHttpContext& http_context, IHttpRespons
   if (result.injected) {
     return Injection{{response.EntityChunkCount, withheld}, result};
   }
-  return std::nullopt;
+  return k_no_injection_point;
 }
 
 // Has the response serve `injection`: its entity chunks rebuilt around the snippet, then its
@@ -334,7 +361,8 @@ std::optional<Injection> write_response(IHttpContext& http_context, IHttpRespons
 // points to.
 //
 // Returns an error message, or nullptr. Splicing only fails before it touches the response, which
-// is then served untouched.
+// is then served untouched. A header error returns k_injection_header_error: the snippet is in.
+const char* const k_injection_header_error = "Error setting the injection header";
 const char* apply_injection(IHttpContext& http_context, IHttpResponse& http_response,
                             HTTP_RESPONSE& response, const Injection& injection,
                             const Injector& injector, bool headers_gone, Logger& logger) {
@@ -348,7 +376,7 @@ const char* apply_injection(IHttpContext& http_context, IHttpResponse& http_resp
   }
   extend_content_length(http_response, injector, logger);
   if (FAILED(http_response.SetHeader(k_injection_header, "1", 1, TRUE))) {
-    return "Error setting the injection header";
+    return k_injection_header_error;
   }
   return nullptr;
 }
@@ -475,10 +503,11 @@ const char* hold_back(IHttpResponse& http_response, HTTP_RESPONSE& response, siz
 
 // What became of a part written to a carried injector.
 struct Streamed {
-  const char* error;  // nullptr, or the response is left as it was
-  bool injected;      // the snippet went into this part
-  bool pending;       // the injector may still inject into a later part
-  bool ended;         // the injector ended the document, padded as asked if it did not inject
+  const char* error;      // nullptr, or the response is left as it was
+  bool injected;          // the snippet went into this part
+  bool pending;           // the injector may still inject into a later part
+  bool ended;             // the injector ended the document, padded as asked if it did not inject
+  bool readable = false;  // every chunk of this part was in memory
 };
 
 // Rebuilds a part after the first out of what the carried `injector` hands back for it: the bytes
@@ -550,14 +579,21 @@ Streamed stream_part(IHttpContext& http_context, IHttpResponse& http_response,
   if (!rewrite_body(http_response, response, std::move(rebuilt))) {
     return {"IIS refused an entity chunk, skipping injection", false, false, false};
   }
-  return {nullptr, injected, readable && !end && injector_is_pending(&injector), ended};
+  return {nullptr, injected, readable && !end && injector_is_pending(&injector), ended, readable};
 }
 
-// Counts an injection that succeeded or failed, for telemetry.
-void count_injection(const ModuleContext& ctx, bool injected) {
+// Counts an injection that succeeded, for telemetry.
+void count_injected(const ModuleContext& ctx) {
   datadog::telemetry::counter::increment(
-      injected ? telemetry::injection_succeed : telemetry::injection_failed,
+      telemetry::injection_succeed,
       telemetry::build_tags(ctx.application_id_tag, ctx.remote_config_tag));
+}
+
+// Counts a response the snippet did not go into, with why, for telemetry.
+void count_injection(const ModuleContext& ctx, NotInjected why) {
+  datadog::telemetry::counter::increment(
+      *why.counter,
+      telemetry::build_tags(why.reason, ctx.application_id_tag, ctx.remote_config_tag));
 }
 
 // Returns the per-location context if cached on the metadata container,
@@ -765,9 +801,15 @@ bool HttpModule::ShouldAttemptInjection(IHttpResponse& pHttpResponse,
   USHORT statusCode = 0;
   pHttpResponse.GetStatus(&statusCode);
 
-  // 3xx redirects have no body to inject into; <200 are informational; a 206 carries a range of
-  // the document, which the snippet would corrupt.
-  if (statusCode < 200 || statusCode == 206 || (statusCode >= 300 && statusCode < 400)) {
+  // A 206 carries a range of the document, which the snippet would corrupt.
+  if (statusCode == 206) {
+    count_injection(ctx, {&telemetry::injection_skipped, "reason:partial_content"});
+    ctx.logger->debug("Skipping RUM injection: partial content");
+    return false;
+  }
+
+  // 3xx redirects have no body to inject into; <200 are informational.
+  if (statusCode < 200 || (statusCode >= 300 && statusCode < 400)) {
     ctx.logger->debug(std::format("Skipping RUM injection: return code {}", statusCode));
     return false;
   }
@@ -832,29 +874,35 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
       injector_cleanup);
   if (!injector) {
     logger.error("Error creating injector");
+    count_injection(ctx, k_internal_error);
     return RQ_NOTIFICATION_CONTINUE;
   }
 
-  bool injected = false;
-  if (const auto injection =
-          write_response(pHttpContext, pHttpResponse, *injector, *pResponseStruct, send.more_data,
-                         ctx.inject_static_files)) {
+  const auto written = write_response(pHttpContext, pHttpResponse, *injector, *pResponseStruct,
+                                      send.more_data, ctx.inject_static_files);
+  if (const auto* injection = std::get_if<Injection>(&written)) {
     if (const char* error = apply_injection(pHttpContext, pHttpResponse, *pResponseStruct,
                                             *injection, *injector, send.headers_gone, logger)) {
       logger.error(error);
+      if (error == k_injection_header_error) {
+        count_injected(ctx);
+      } else {
+        count_injection(ctx, k_internal_error);
+      }
       return RQ_NOTIFICATION_CONTINUE;
     }
-    injected = true;
-  } else if (may_carry && snippet && all_in_memory(*pResponseStruct) &&
-             injector_is_pending(injector.get())) {
+    count_injected(ctx);
+  } else if (may_carry && all_in_memory(*pResponseStruct) && injector_is_pending(injector.get())) {
     // This part goes out, but for what the injector holds back of a head window it has yet to
     // decide on, and the next ones go to the same injector.
-    auto* carried = request_state(pHttpContext, true);
-    const char* error = carried == nullptr ? "Error storing the injection for the next parts"
-                                           : hold_back(pHttpResponse, *pResponseStruct,
-                                                       injector_held_back_length(injector.get()));
+    auto* carried = snippet == nullptr ? nullptr : request_state(pHttpContext, true);
+    const char* error = snippet == nullptr   ? "Error copying the snippet for the next parts"
+                        : carried == nullptr ? "Error storing the injection for the next parts"
+                                             : hold_back(pHttpResponse, *pResponseStruct,
+                                                         injector_held_back_length(injector.get()));
     if (error != nullptr) {
       logger.error(error);
+      count_injection(ctx, k_internal_error);
     } else {
       // The headers go out with this part, if they have not already, before the snippet goes in,
       // if it ever does: the announced length counts it already, and the last part is padded to
@@ -866,8 +914,10 @@ HttpModule::PerformInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRes
       carried->injector = std::move(injector);
       return RQ_NOTIFICATION_CONTINUE;
     }
+  } else if (may_carry || !send.more_data) {
+    // Otherwise the injector downstream takes over the response: nothing to count here.
+    count_injection(ctx, std::get<NotInjected>(written));
   }
-  count_injection(ctx, injected);
 
   if (send.more_data || send.headers_gone) {
     // Part of a response sent in several sends: flushing here and finishing the request would drop
@@ -905,9 +955,15 @@ HttpModule::ContinueInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRe
       ctx->logger->error(error);
     }
   };
-  const auto resolve = [&](bool injected) {
+  const auto resolve = [&](const Streamed& streamed) {
     if (ctx != nullptr) {
-      count_injection(*ctx, injected);
+      if (streamed.injected) {
+        count_injected(*ctx);
+      } else {
+        count_injection(*ctx, streamed.error != nullptr ? k_internal_error
+                              : !streamed.readable      ? k_unsupported_chunk_type
+                                                        : k_no_injection_point);
+      }
     }
     state->injector.reset();
     state->snippet.reset();
@@ -925,7 +981,7 @@ HttpModule::ContinueInjection(IHttpContext& pHttpContext, IHttpResponse& pHttpRe
       state->padded = false;
     }
     if (streamed.error != nullptr || !streamed.pending) {
-      resolve(streamed.injected);
+      resolve(streamed);
     }
   }
 

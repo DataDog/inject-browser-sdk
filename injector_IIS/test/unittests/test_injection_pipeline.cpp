@@ -15,6 +15,7 @@
 #include "http_module.h"
 #include "module_context.h"
 #include "mocks.h"
+#include "telemetry_spy.h"
 #include "gtest/gtest.h"
 
 #include <array>
@@ -570,6 +571,9 @@ static std::string assembleResponseBody(const PreparedChunkedResponse& pr) {
   return responseBody(pr.raw);
 }
 
+// Injection counts, as "<counter> <reason tag>", sorted.
+using Counts = std::vector<std::string>;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -612,7 +616,9 @@ TEST(InjectionPipeline, FullModuleLifecycle) {
       .WillOnce(Return(S_OK));
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
+  telemetry_spy::reset();
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.succeed"});
 
   const std::string output = responseBody(pr.raw);
   EXPECT_NE(output.find("DD_RUM"), std::string::npos) << "Expected DD_RUM in output, got:\n"
@@ -783,8 +789,10 @@ TEST(InjectionPipeline, NonHtmlResponseLeavesTheResponseUntouched) {
   EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _)).Times(0);
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
 
+  telemetry_spy::reset();
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_FINISH_REQUEST);
   EXPECT_EQ(assembleResponseBody(pr), bodies[0] + bodies[1]);
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:no_injection_point"});
 
   mod.factory->Terminate();
   mod.global->Terminate();
@@ -1056,8 +1064,11 @@ TEST(InjectionPipeline, ChunksNotInMemory) {
         .Times(before ? 0 : 1)
         .WillRepeatedly(Return(S_OK));
     EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+    telemetry_spy::reset();
     EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr),
               RQ_NOTIFICATION_FINISH_REQUEST);
+    EXPECT_EQ(telemetry_spy::take_counts(),
+              Counts{before ? "injection.failed reason:internal_error" : "injection.succeed"});
 
     const int file_at = before ? 0 : pr.raw.EntityChunkCount - 1;
     EXPECT_EQ(pr.raw.pEntityChunks[file_at].DataChunkType, HttpDataChunkFromFileHandle);
@@ -1077,6 +1088,27 @@ TEST(InjectionPipeline, ChunksNotInMemory) {
       EXPECT_TRUE(served.ends_with(head.substr(head.size() - 100))) << served;
     }
   }
+}
+
+// A chunk neither in memory nor a file, from the fragment cache for instance, cannot be read: the
+// response goes out untouched, and the injection counts as failed.
+TEST(InjectionPipeline, ChunkNeitherInMemoryNorAFileIsNotInjected) {
+  ModuleUnderTest module;
+  PreparedChunkedResponse pr;
+  setupChunkedHtmlResponse(module.httpCtx, module.httpResp, &module.app, &module.metadata, pr,
+                           {"fragment", "<html><head></head></html>"});
+  pr.chunks[0] = {};
+  pr.chunks[0].DataChunkType = HttpDataChunkFromFragmentCache;
+
+  EXPECT_CALL(module.httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .Times(0);
+  EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+  telemetry_spy::reset();
+  EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr),
+            RQ_NOTIFICATION_FINISH_REQUEST);
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:unsupported_chunk_type"});
+  ASSERT_EQ(pr.raw.EntityChunkCount, 2);
+  EXPECT_EQ(pr.raw.pEntityChunks[0].DataChunkType, HttpDataChunkFromFragmentCache);
 }
 
 // A static file as IIS serves one: a single chunk with the whole file as its range, through a
@@ -1218,11 +1250,30 @@ TEST(InjectionPipeline, StaticFileNotInjectedIsReadOnlyAsFarAsNeeded) {
   ModuleUnderTest module;
   const StaticFile file("{\"page\": \"" + std::string(size_t{100} * 1024, 'x') + "\"}");
   PreparedChunkedResponse pr;
+  telemetry_spy::reset();
   serveStaticFile(module, file, pr);
 
   EXPECT_EQ(file.body(pr.raw), file.content());
   ASSERT_EQ(pr.raw.EntityChunkCount, 2);
   EXPECT_EQ(pr.raw.pEntityChunks[1].FromFileHandle.ByteRange.StartingOffset.QuadPart, 16 * 1024);
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:no_injection_point"});
+}
+
+// A static file whose injection point is not found in the bytes the module may read of it: the
+// rest goes out from the file, and the injection counts as failed, as with any page without one.
+TEST(InjectionPipeline, StaticFileReadLimit) {
+  ModuleUnderTest module;
+  const StaticFile file("<html><!-- " + std::string(size_t{2} * 1024 * 1024, 'c') +
+                        " --><head></head></html>");
+  PreparedChunkedResponse pr;
+  telemetry_spy::reset();
+  serveStaticFile(module, file, pr);
+
+  EXPECT_EQ(file.body(pr.raw), file.content());
+  const auto& rest = pr.raw.pEntityChunks[pr.raw.EntityChunkCount - 1];
+  ASSERT_EQ(rest.DataChunkType, HttpDataChunkFromFileHandle);
+  EXPECT_EQ(rest.FromFileHandle.ByteRange.StartingOffset.QuadPart, 1024 * 1024);
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:no_injection_point"});
 }
 
 // With `injectStaticFiles` off, a static file is not read, and goes out from the file untouched.
@@ -1239,8 +1290,11 @@ TEST(InjectionPipeline, InjectStaticFilesFromConfig) {
     setupStaticFileResponse(module, file, pr);
     EXPECT_CALL(module.httpResp, SetHeader(Matcher<PCSTR>(_), _, _, _)).Times(0);
     EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).WillOnce(Return(S_OK));
+    telemetry_spy::reset();
     EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr),
               RQ_NOTIFICATION_FINISH_REQUEST);
+    EXPECT_EQ(telemetry_spy::take_counts(),
+              Counts{"injection.skipped reason:static_files_disabled"});
 
     ASSERT_EQ(pr.raw.EntityChunkCount, 1);
     EXPECT_EQ(pr.raw.pEntityChunks[0].DataChunkType, HttpDataChunkFromFileHandle);
@@ -1267,7 +1321,9 @@ TEST(InjectionPipeline, PartialContentIsNotInjected) {
                                       _Out_ HRESULT*, PCWSTR*, _Out_ DWORD*,
                                       IAppHostConfigException**, _Out_ BOOL*) { *pCode = 206; }),
                             Return()));
+  telemetry_spy::reset();
   EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.skipped reason:partial_content"});
 
   ASSERT_EQ(pr.raw.EntityChunkCount, 1);
   EXPECT_EQ(pr.raw.pEntityChunks[0].DataChunkType, HttpDataChunkFromFileHandle);
@@ -1287,8 +1343,10 @@ TEST(InjectionPipeline, RefusedChunkWriteLeavesTheResponseUntouched) {
   EXPECT_CALL(module.httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
       .Times(0);
   EXPECT_CALL(module.httpResp, Flush(_, _, _, _)).Times(0);
+  telemetry_spy::reset();
   EXPECT_EQ(module.httpMod->OnSendResponse(&module.httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
   EXPECT_EQ(assembleResponseBody(pr), bodies[0] + bodies[1]);
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:internal_error"});
 }
 
 // A first part that more data follows and that ends within the head window is not the whole
@@ -1348,6 +1406,7 @@ class PartedResponse {
                               }),
                               Return(S_OK)));
     EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
+    telemetry_spy::reset();
   }
 
   size_t snippet_length() {
@@ -1413,6 +1472,8 @@ TEST(InjectionPipeline, InjectionCarriedOverToALaterPart) {
 
   EXPECT_EQ(response.send(first), first.body);
   EXPECT_EQ(response.extended_to, std::to_string(100000 + response.snippet_length()));
+  // Carried over: counted once the snippet goes in.
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{});
 
   const std::string body = response.send(second);
   const std::string before = "<link rel=icon><head>";
@@ -1422,6 +1483,7 @@ TEST(InjectionPipeline, InjectionCarriedOverToALaterPart) {
   EXPECT_EQ(body.substr(before.size() + response.snippet_length()), "<meta name=a>");
 
   EXPECT_EQ(response.send(last), last.body);
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.succeed"});
   response.stop();
 }
 
@@ -1512,6 +1574,20 @@ TEST(InjectionPipeline, HeldBackBytesGoOutAheadOfAChunkNotInMemory) {
   EXPECT_EQ(response.send(first), "");
   EXPECT_EQ(response.send(second), first.body + second.body + "[file]");
   EXPECT_EQ(response.send(last), last.body + std::string(response.snippet_length(), ' '));
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:unsupported_chunk_type"});
+  response.stop();
+}
+
+// A later part the carried injector cannot rebuild, out of request memory: the injection counts as
+// failed.
+TEST(InjectionPipeline, CarriedInjectionErrorIsCounted) {
+  PartedResponse response;
+  response.start();
+
+  EXPECT_EQ(response.send({"<!DOCTYPE html><html>", TRUE, true}), "");
+  response.httpCtx.FailAllocations();
+  response.send({"<head><title>t</title></head></html>", FALSE, false});
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:internal_error"});
   response.stop();
 }
 
@@ -1535,6 +1611,7 @@ TEST(InjectionPipeline, CarriedInjectionPadsTheLastPart) {
     EXPECT_EQ(response.send(second), second.body);
     const std::string padding = announced ? std::string(response.snippet_length(), ' ') : "";
     EXPECT_EQ(response.send(last), last.body + padding);
+    EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:no_injection_point"});
     response.stop();
   }
 }
@@ -1676,6 +1753,9 @@ TEST(InjectionPipeline, DownstreamInjectorKeepsLaterPartsUninjected) {
     EXPECT_EQ(response.extended_to,
               head_in_first_part ? std::to_string(100000 + response.snippet_length()) : "");
     EXPECT_EQ(response.send(last), last.body);
+    // Not injected here: the injector downstream takes over, so nothing is counted.
+    EXPECT_EQ(telemetry_spy::take_counts(),
+              head_in_first_part ? Counts{"injection.succeed"} : Counts{});
     response.stop();
   }
 }
@@ -2041,8 +2121,47 @@ TEST(InjectionPipeline, AllocationFailureLeavesTheResponseUntouched) {
   EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _)).Times(0);
   EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
 
+  telemetry_spy::reset();
   EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
   EXPECT_EQ(assembleResponseBody(pr), bodies[0] + bodies[1]);
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.failed reason:internal_error"});
+
+  mod.factory->Terminate();
+  mod.global->Terminate();
+}
+
+// The injection header fails after the snippet went in: the injection still counts as a success.
+TEST(InjectionPipeline, InjectionHeaderFailureStillCountsTheInjection) {
+  MockRumConfigElement rumConfig;
+  MockAdminManager adminManager(&rumConfig);
+  MockServer mockServer;
+  EXPECT_CALL(mockServer, GetAdminManager()).WillRepeatedly(Return(&adminManager));
+
+  const auto mod = registerModule(mockServer);
+  ASSERT_NE(mod.global, nullptr);
+
+  MockAppWithContext app;
+  MockAppStartProvider appStart(app);
+  ASSERT_EQ(mod.global->OnGlobalApplicationStart(&appStart), GL_NOTIFICATION_CONTINUE);
+
+  CHttpModule* httpMod = nullptr;
+  ASSERT_EQ(mod.factory->GetHttpModule(&httpMod, nullptr), S_OK);
+
+  MockHttpContext httpCtx;
+  MockHttpResponse httpResp;
+  MockMetadataInfo metadata(L"MACHINE/WEBROOT/APPHOST/Default Web Site");
+  PreparedResponse pr;
+  setupHtmlResponse(httpCtx, httpResp, &app, &metadata, pr,
+                    "<html><head><title>t</title></head><body>hi</body></html>");
+
+  EXPECT_CALL(httpResp, SetHeader(Matcher<PCSTR>(StrEq(k_injection_header)), _, _, _))
+      .WillOnce(Return(E_FAIL));
+  EXPECT_CALL(httpResp, Flush(_, _, _, _)).Times(0);
+
+  telemetry_spy::reset();
+  EXPECT_EQ(httpMod->OnSendResponse(&httpCtx, nullptr), RQ_NOTIFICATION_CONTINUE);
+  EXPECT_NE(responseBody(pr.raw).find("DD_RUM"), std::string::npos);
+  EXPECT_EQ(telemetry_spy::take_counts(), Counts{"injection.succeed"});
 
   mod.factory->Terminate();
   mod.global->Terminate();

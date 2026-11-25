@@ -535,8 +535,9 @@ checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
 
 [[package]]
 name = "libdd-library-config"
-version = "4.2.0"
-source = "git+https://github.com/DataDog/libdatadog?rev=278117feead185ad0f97863ee19af7e2b99ddfca#278117feead185ad0f97863ee19af7e2b99ddfca"
+version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acd8d640c921896ba2e93e250323de2891709d66b037578e9b95e613a127651e"
 dependencies = [
  "anyhow",
  "libc",
@@ -551,8 +552,9 @@ dependencies = [
 
 [[package]]
 name = "libdd-trace-protobuf"
-version = "5.1.0"
-source = "git+https://github.com/DataDog/libdatadog?rev=278117feead185ad0f97863ee19af7e2b99ddfca#278117feead185ad0f97863ee19af7e2b99ddfca"
+version = "5.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "393dffe95ff0982bcd5fb6a92fbf245791483115ea7ce1e49004c5b3e52ce75c"
 dependencies = [
  "prost",
  "serde",

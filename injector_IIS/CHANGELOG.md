@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.5.0](https://github.com/DataDog/inject-browser-sdk/compare/iis-1.4.0...iis-1.5.0) (2026-11-16)
+
+
+### Features
+
+* **iis:** carry the injector over the parts of a response ([#163](https://github.com/DataDog/inject-browser-sdk/issues/163)) ([e30c691](https://github.com/DataDog/inject-browser-sdk/commit/e30c691944d912f7f1b518d49de49080ab2f368b))
+* **iis:** inject into static files ([#169](https://github.com/DataDog/inject-browser-sdk/issues/169)) ([b60702a](https://github.com/DataDog/inject-browser-sdk/commit/b60702ab41c3719e96513e5ca38ff5bfbea76fbe))
+* **injector:** inject in &lt;head&gt; only, before &lt;/head&gt; by default or as early as possible ([#159](https://github.com/DataDog/inject-browser-sdk/issues/159)) ([dfc25c5](https://github.com/DataDog/inject-browser-sdk/commit/dfc25c59ace22ef51b3369de8b5d06771cc996bc))
+
+
+### Bug Fixes
+
+* **config:** read DD_RUM_TRACK_USER_INTERACTION ([#166](https://github.com/DataDog/inject-browser-sdk/issues/166)) ([72384af](https://github.com/DataDog/inject-browser-sdk/commit/72384af4c90b2350e9182d3b5c53f125b4496a4e))
+* **injector:** end a character reference at the next tag in the head walk ([#179](https://github.com/DataDog/inject-browser-sdk/issues/179)) ([cb5b199](https://github.com/DataDog/inject-browser-sdk/commit/cb5b19935ed75f44c9f0564af8b590b0773e31b0))
+* **injector:** same output whatever the chunking (fuzz findings) ([#177](https://github.com/DataDog/inject-browser-sdk/issues/177)) ([6e7e6e7](https://github.com/DataDog/inject-browser-sdk/commit/6e7e6e75a9f3d100a38ac3a02d311bc628903a33))
+* **snippet:** escape HTML-sensitive chars in the init JSON ([#175](https://github.com/DataDog/inject-browser-sdk/issues/175)) ([f710d8e](https://github.com/DataDog/inject-browser-sdk/commit/f710d8eddcaf52028f5ad5a4d1dcdbc3736bd426))
+
 ## [1.4.0](https://github.com/DataDog/inject-browser-sdk/compare/iis-1.3.0...iis-1.4.0) (2026-11-09)
 
 

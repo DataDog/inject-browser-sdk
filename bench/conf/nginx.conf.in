@@ -1,0 +1,46 @@
+# @MODULE_LOAD@ is replaced by run.sh: a load_module line (module on) or nothing (off).
+@MODULE_LOAD@
+daemon off;
+master_process on;
+worker_processes 2;
+worker_cpu_affinity auto;
+worker_rlimit_nofile 65536;
+error_log @RUN@/nginx-error.log warn;
+pid @RUN@/nginx.pid;
+
+events {
+    worker_connections 8192;
+}
+
+http {
+    include /opt/nginx/conf/mime.types;
+    default_type application/octet-stream;
+    access_log off;
+    sendfile @SENDFILE@;
+    tcp_nopush on;
+    keepalive_timeout 65;
+    keepalive_requests 10000000;
+    client_body_temp_path @RUN@/nginx-body;
+    proxy_temp_path @RUN@/nginx-proxy;
+
+    server {
+        listen 127.0.0.1:@PORT@ backlog=4096 reuseport;
+        root @PAGES@;
+        @MODULE_ON@
+        @HEADERS@
+
+        # Random upstream writes, streamed through as they come (non-buffered proxy).
+        location /up/ {
+            proxy_pass http://127.0.0.1:@UPSTREAM@/;
+            proxy_http_version 1.1;
+            proxy_buffering off;
+        }
+        # Same, through nginx's buffered proxy path.
+        location /upb/ {
+            proxy_pass http://127.0.0.1:@UPSTREAM@/;
+            proxy_http_version 1.1;
+            proxy_buffering on;
+            proxy_buffers 8 4k;
+        }
+    }
+}

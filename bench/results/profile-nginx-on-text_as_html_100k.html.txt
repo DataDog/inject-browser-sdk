@@ -1,0 +1,33 @@
+## profile-nginx-on-text_as_html_100k.html (flat, self time)
+# by DSO
+    67.81%  libngx_http_rum_inject_module.so
+    27.03%  [kernel.kallsyms]               
+     2.89%  nginx                           
+     2.26%  libc.so.6                       
+     0.01%  [vdso]                          
+# by symbol
+    67.43%  libngx_http_rum_inject_module.so  [.] inject_browser_sdk::injector::head_open_tag::HeadOpenTagLocator::scan  -      -            
+     6.21%  [kernel.kallsyms]                 [k] __arch_copy_from_user                                                  -      -            
+     6.07%  [kernel.kallsyms]                 [k] __arch_copy_to_user                                                    -      -            
+     3.76%  [kernel.kallsyms]                 [k] __wake_up_sync_key                                                     -      -            
+     1.20%  [kernel.kallsyms]                 [k] local_daif_restore                                                     -      -            
+     1.12%  [kernel.kallsyms]                 [k] filemap_read                                                           -      -            
+     0.70%  [kernel.kallsyms]                 [k] arch_counter_get_cntvct                                                -      -            
+     0.69%  libc.so.6                         [.] __libc_pread                                                           -      -            
+     0.50%  [kernel.kallsyms]                 [k] tcp_sendmsg                                                            -      -            
+     0.32%  nginx                             [.] ngx_vslprintf                                                          -      -            
+     0.28%  [kernel.kallsyms]                 [k] free_frozen_pages                                                      -      -            
+     0.28%  [kernel.kallsyms]                 [k] _raw_spin_unlock_irqrestore                                            -      -            
+     0.28%  [kernel.kallsyms]                 [k] __alloc_pages_noprof                                                   -      -            
+     0.27%  [kernel.kallsyms]                 [k] do_el0_svc                                                             -      -            
+     0.24%  [kernel.kallsyms]                 [k] net_rx_action                                                          -      -            
+     0.23%  [kernel.kallsyms]                 [k] local_bh_enable                                                        -      -            
+     0.23%  libc.so.6                         [.] __close                                                                -      -            
+     0.22%  [kernel.kallsyms]                 [k] copy_page_to_iter                                                      -      -            
+     0.21%  libc.so.6                         [.] fstatat64                                                              -      -            
+     0.20%  nginx                             [.] ngx_palloc                                                             -      -            
+     0.19%  [kernel.kallsyms]                 [k] fdget                                                                  -      -            
+     0.18%  [kernel.kallsyms]                 [k] inode_permission                                                       -      -            
+     0.17%  [kernel.kallsyms]                 [k] __do_softirq                                                           -      -            
+     0.17%  libc.so.6                         [.] writev                                                                 -      -            
+     0.16%  [kernel.kallsyms]                 [k] dput                                                                   -      -            

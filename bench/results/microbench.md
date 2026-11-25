@@ -1,0 +1,23 @@
+| page | size | chunk | ns/page | GB/s |
+|---|---:|---:|---:|---:|
+| head_late_20k.html | 20480 | 8000 | 5351 | 3.8 |
+| head_late_20k.html | 20480 | whole | 5426 | 3.8 |
+| html_100k.html | 102400 | 32768 | 453 | 226.2 |
+| html_100k.html | 102400 | 8000 | 463 | 221.2 |
+| html_100k.html | 102400 | whole | 436 | 234.8 |
+| html_16k.html | 16384 | 8000 | 438 | 37.4 |
+| html_16k.html | 16384 | whole | 433 | 37.8 |
+| html_1m.html | 1048576 | 32768 | 525 | 1995.7 |
+| html_1m.html | 1048576 | 8000 | 837 | 1252.6 |
+| html_1m.html | 1048576 | whole | 437 | 2401.3 |
+| html_2k.html | 2048 | whole | 416 | 4.9 |
+| html_512.html | 512 | whole | 434 | 1.2 |
+| html_5m.html | 5242880 | 32768 | 892 | 5877.6 |
+| html_5m.html | 5242880 | 8000 | 2348 | 2233.3 |
+| html_5m.html | 5242880 | whole | 431 | 12166.8 |
+| html_nohead_1m.html | 1048576 | 32768 | 1064151 | 1.0 |
+| html_nohead_1m.html | 1048576 | 8000 | 1059994 | 1.0 |
+| html_nohead_1m.html | 1048576 | whole | 1065688 | 1.0 |
+| text_as_html_100k.html | 102400 | 32768 | 26696 | 3.8 |
+| text_as_html_100k.html | 102400 | 8000 | 6553 | 15.6 |
+| text_as_html_100k.html | 102400 | whole | 83567 | 1.2 |

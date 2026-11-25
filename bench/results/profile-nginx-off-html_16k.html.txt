@@ -1,0 +1,32 @@
+## profile-nginx-off-html_16k.html (flat, self time)
+# by DSO
+    68.30%  [kernel.kallsyms]
+    17.36%  nginx            
+    14.31%  libc.so.6        
+     0.03%  [vdso]           
+# by symbol
+     7.49%  [kernel.kallsyms]  [k] local_daif_restore                   -      -            
+     6.65%  [kernel.kallsyms]  [k] __wake_up_sync_key                   -      -            
+     4.40%  [kernel.kallsyms]  [k] arch_counter_get_cntvct              -      -            
+     2.63%  libc.so.6          [.] __close                              -      -            
+     2.37%  [kernel.kallsyms]  [k] filemap_splice_read                  -      -            
+     2.01%  nginx              [.] ngx_vslprintf                        -      -            
+     1.92%  [kernel.kallsyms]  [k] do_el0_svc                           -      -            
+     1.82%  [kernel.kallsyms]  [k] __do_softirq                         -      -            
+     1.77%  libc.so.6          [.] fstatat64                            -      -            
+     1.76%  [kernel.kallsyms]  [k] net_rx_action                        -      -            
+     1.76%  libc.so.6          [.] setsockopt                           -      -            
+     1.68%  libc.so.6          [.] recv                                 -      -            
+     1.52%  [kernel.kallsyms]  [k] __arch_copy_to_user                  -      -            
+     1.42%  [kernel.kallsyms]  [k] get_inode_acl                        -      -            
+     1.37%  [kernel.kallsyms]  [k] __folio_batch_release                -      -            
+     1.35%  [kernel.kallsyms]  [k] tcp_sendmsg                          -      -            
+     1.28%  [kernel.kallsyms]  [k] local_bh_enable                      -      -            
+     1.24%  [kernel.kallsyms]  [k] fdget                                -      -            
+     1.07%  [kernel.kallsyms]  [k] kmem_cache_free                      -      -            
+     1.07%  libc.so.6          [.] open64                               -      -            
+     1.06%  [kernel.kallsyms]  [k] dput                                 -      -            
+     1.05%  libc.so.6          [.] sendfile                             -      -            
+     1.04%  [kernel.kallsyms]  [k] kmem_cache_alloc_noprof              -      -            
+     1.03%  libc.so.6          [.] writev                               -      -            
+     0.87%  nginx              [.] ngx_http_parse_request_line          -      -            

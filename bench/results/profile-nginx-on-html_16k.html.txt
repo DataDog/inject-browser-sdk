@@ -1,0 +1,33 @@
+## profile-nginx-on-html_16k.html (flat, self time)
+# by DSO
+    62.06%  [kernel.kallsyms]               
+    17.14%  nginx                           
+    10.63%  libc.so.6                       
+    10.13%  libngx_http_rum_inject_module.so
+     0.03%  [vdso]                          
+# by symbol
+     7.96%  [kernel.kallsyms]                 [k] __arch_copy_to_user                                                    -      -            
+     7.09%  [kernel.kallsyms]                 [k] __wake_up_sync_key                                                     -      -            
+     6.44%  [kernel.kallsyms]                 [k] __arch_copy_from_user                                                  -      -            
+     5.13%  [kernel.kallsyms]                 [k] local_daif_restore                                                     -      -            
+     4.08%  libngx_http_rum_inject_module.so  [.] inject_browser_sdk::injector::parser::next_markup                      -      -            
+     2.35%  [kernel.kallsyms]                 [k] arch_counter_get_cntvct                                                -      -            
+     2.04%  libc.so.6                         [.] __close                                                                -      -            
+     1.72%  nginx                             [.] ngx_vslprintf                                                          -      -            
+     1.65%  libngx_http_rum_inject_module.so  [.] inject_browser_sdk::injector::head_open_tag::HeadOpenTagLocator::scan  -      -            
+     1.32%  libngx_http_rum_inject_module.so  [.] inject_browser_sdk::injector::encoding::has_encoding_attributes        -      -            
+     1.31%  [kernel.kallsyms]                 [k] do_el0_svc                                                             -      -            
+     1.26%  [kernel.kallsyms]                 [k] filemap_read                                                           -      -            
+     1.26%  nginx                             [.] ngx_palloc                                                             -      -            
+     1.18%  [kernel.kallsyms]                 [k] net_rx_action                                                          -      -            
+     1.15%  libc.so.6                         [.] fstatat64                                                              -      -            
+     1.04%  libc.so.6                         [.] recv                                                                   -      -            
+     1.03%  [kernel.kallsyms]                 [k] tcp_sendmsg                                                            -      -            
+     1.00%  [kernel.kallsyms]                 [k] local_bh_enable                                                        -      -            
+     1.00%  [kernel.kallsyms]                 [k] __do_softirq                                                           -      -            
+     0.99%  libc.so.6                         [.] writev                                                                 -      -            
+     0.89%  libc.so.6                         [.] open64                                                                 -      -            
+     0.88%  libc.so.6                         [.] __libc_pread                                                           -      -            
+     0.79%  [kernel.kallsyms]                 [k] get_inode_acl                                                          -      -            
+     0.76%  nginx                             [.] ngx_http_parse_request_line                                            -      -            
+     0.71%  [kernel.kallsyms]                 [k] kmem_cache_free                                                        -      -            
